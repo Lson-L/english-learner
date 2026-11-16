@@ -1,0 +1,67 @@
+# =============================================================================
+# pyproject.toml —— 整个项目唯一的配置文件
+#
+# Java 对照：
+#   本文件 ≈ pom.xml + checkstyle.xml + surefire 配置 + assembly 配置 的合体。
+#   Python 的现代标准（PEP 621）就是把“项目元数据、依赖、构建、工具配置”
+#   全部收敛到一个文件里，不再像以前那样散落成 setup.py / setup.cfg /
+#   requirements.txt / tox.ini / .flake8 一堆文件。
+# =============================================================================
+
+[project]
+# 坐标信息 ≈ Maven 的 groupId + artifactId + version
+name = "py-learn"
+version = "0.1.0"
+description = "用 Java 视角学习 Python 工程结构的最小项目"
+readme = "README.md"
+requires-python = ">=3.13"          # ≈ maven.compiler.release
+authors = [{ name = "lson" }]
+
+# 运行时依赖 ≈ <dependencies> 里 scope=compile 的部分。
+# 本项目只用标准库，所以是空列表；写在这里的包会被 uv sync 自动安装。
+dependencies = []
+
+# 命令行入口：安装后会在 .venv/Scripts 下生成一个 py-learn.exe。
+# Java 对照：≈ 打一个带 Main-Class 的 jar，用户敲 py-learn 就相当于 java -jar。
+# 格式 "模块路径:函数名"。
+[project.scripts]
+py-learn = "pylearn.cli:main"
+
+# 开发期依赖 ≈ <scope>test</scope> + 那些只在开发时用的插件。
+# 这是 PEP 735 的依赖组，uv sync 默认会安装 dev 组。
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+]
+
+# 用哪个“打包插件”把源码打成 wheel / sdist。
+# Java 对照：≈ maven-jar-plugin / maven-assembly-plugin 的声明。
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# src 布局必须显式告诉构建工具：包在 src/pylearn 下。
+# Java 对照：≈ <sourceDirectory>src/main/java</sourceDirectory>。
+[tool.hatch.build.targets.wheel]
+packages = ["src/pylearn"]
+
+# ------------------------- 以下是各工具的配置 -------------------------
+# Java 对照：≈ pom.xml 里各个 <plugin><configuration>。
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]        # 只在这些目录找测试 ≈ <testSourceDirectory>
+addopts = "-q"               # 默认安静模式
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]       # 让 ruff 能识别 pylearn 是自己的包（first-party）
+
+# ruff = 格式化器（≈ google-java-format）+ 静态检查（≈ Checkstyle/SpotBugs）
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.coverage.run]
+source = ["pylearn"]         # ≈ JaCoCo 的 include 范围

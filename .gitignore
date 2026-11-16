@@ -1,0 +1,24 @@
+# 虚拟环境：每个项目一份独立的依赖目录，绝不入库（≈ 不入库 target/ 和本地仓库）
+.venv/
+
+# Python 字节码缓存：解释器自动生成，相当于 Java 的 .class
+__pycache__/
+*.py[cod]
+
+# 打包产物（≈ target/）
+dist/
+build/
+*.egg-info/
+
+# 工具缓存
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# 本项目 CLI 运行时生成的数据文件
+tasks.json
+
+# IDE
+.idea/
