@@ -14,6 +14,7 @@ uv sync
 uv run pytest
 
 # 3. 运行 CLI
+uv run python main.py            # 不带子命令时默认执行 list，IDE 里点运行即可
 uv run py-learn add "学习 Python 工程结构"
 uv run py-learn list
 uv run py-learn done 1
@@ -27,25 +28,58 @@ uv run ruff format .
 uv build          # 产出 dist/*.whl 和 dist/*.tar.gz
 ```
 
+## 豆瓣电影爬虫（douban_movie 包）
+
+输入年份，抓取该年电影并按评分从高到低输出，默认 100 条。
+
+```bash
+uv run douban-movies 2023                       # 2023 年评分前 100，控制台表格
+uv run douban-movies 2023 -n 50                 # 前 50 条
+uv run douban-movies 2023 -n 200 -o out.json    # 抓 200 条并保存 JSON
+uv run douban-movies 2023 -o out.csv            # 保存 CSV（Excel 直接打开）
+uv run douban-movies                            # 不带年份则交互输入
+uv run python -m douban_movie 2023              # 等价写法：按包名运行
+uv run python douban_main.py 2023               # PyCharm 右键运行入口
+```
+
+实现要点（都是实测踩出来的坑）：
+
+- 豆瓣接口的 `year` 参数单独传会被忽略，年份必须放进 `tags=电影,2023`；
+- 服务端排序有轻微倒挂，程序会在本地再按评分排一次；
+- 默认每次请求间隔 1 秒并带指数退避重试，被反爬时调大 `--delay`；
+- 中文表格按“显示宽度”对齐（中文占 2 个终端列），不能用 `len()`；
+- Windows 上读写文件必须显式 `encoding="utf-8"`，CSV 用 `utf-8-sig` 兼容 Excel。
+
+接口是豆瓣的公开搜索接口，请控制请求频率，仅用于个人学习。
+
 ## 目录结构
 
 ```
 py-learn/
 ├── src/
-│   └── pylearn/              # 包目录 = Java 的 package
-│       ├── __init__.py       # 包入口，对外导出公共 API
-│       ├── __main__.py       # 支持 python -m pylearn（≈ Main-Class）
-│       ├── exceptions.py     # 自定义异常
-│       ├── models.py         # 实体层（≈ entity / POJO，用 dataclass）
-│       ├── storage.py        # 仓储层（≈ Repository / DAO，JSON 文件存储）
-│       ├── service.py        # 业务层（≈ Service）
+│   ├── pylearn/              # 包目录 = Java 的 package
+│   │   ├── __init__.py       # 包入口，对外导出公共 API
+│   │   ├── __main__.py       # 支持 python -m pylearn（≈ Main-Class）
+│   │   ├── exceptions.py     # 自定义异常
+│   │   ├── models.py         # 实体层（≈ entity / POJO，用 dataclass）
+│   │   ├── storage.py        # 仓储层（≈ Repository / DAO，JSON 文件存储）
+│   │   ├── service.py        # 业务层（≈ Service）
+│   │   └── cli.py            # 表现层（≈ Controller / main）
+│   └── douban_movie/         # 豆瓣爬虫包（与 pylearn 互不依赖）
+│       ├── __init__.py
+│       ├── models.py         # Movie 实体（≈ Java record）
+│       ├── client.py         # HTTP 客户端（≈ FeignClient / RestTemplate）
+│       ├── crawler.py        # 业务编排：分页 + 去重 + 排序
+│       ├── storage.py        # 导出 JSON / CSV
 │       └── cli.py            # 表现层（≈ Controller / main）
 ├── tests/                    # 测试目录 = Java 的 src/test/java
 │   ├── conftest.py           # 公共 fixture（≈ @BeforeEach 集中定义）
 │   ├── test_cli.py
 │   ├── test_service.py
-│   └── test_storage.py
-├── main.py                   # 根目录薄入口，方便 PyCharm 右键运行
+│   ├── test_storage.py
+│   └── test_douban.py        # 豆瓣爬虫测试（离线，用 FakeClient）
+├── main.py                   # 待办程序的根目录薄入口
+├── douban_main.py            # 豆瓣爬虫的根目录薄入口
 ├── pyproject.toml            # 项目总配置 = pom.xml
 ├── uv.lock                   # 锁定所有依赖的精确版本
 ├── .python-version           # 指定 Python 版本

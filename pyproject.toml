@@ -26,6 +26,7 @@ dependencies = []
 # 格式 "模块路径:函数名"。
 [project.scripts]
 py-learn = "pylearn.cli:main"
+douban-movies = "douban_movie.cli:main"
 
 # 开发期依赖 ≈ <scope>test</scope> + 那些只在开发时用的插件。
 # 这是 PEP 735 的依赖组，uv sync 默认会安装 dev 组。
@@ -45,7 +46,7 @@ build-backend = "hatchling.build"
 # src 布局必须显式告诉构建工具：包在 src/pylearn 下。
 # Java 对照：≈ <sourceDirectory>src/main/java</sourceDirectory>。
 [tool.hatch.build.targets.wheel]
-packages = ["src/pylearn"]
+packages = ["src/pylearn", "src/douban_movie"]
 
 # ------------------------- 以下是各工具的配置 -------------------------
 # Java 对照：≈ pom.xml 里各个 <plugin><configuration>。
@@ -64,4 +65,4 @@ src = ["src", "tests"]       # 让 ruff 能识别 pylearn 是自己的包（firs
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.coverage.run]
-source = ["pylearn"]         # ≈ JaCoCo 的 include 范围
+source = ["pylearn", "douban_movie"]   # ≈ JaCoCo 的 include 范围

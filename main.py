@@ -6,8 +6,9 @@ Java 对照：
   Java 项目也不会把逻辑写在启动类的 main 里，道理一样。
 
 运行方式：
-- PyCharm：右键本文件 → Run 'main'
+- PyCharm：右键本文件 → Run 'main'（不带参数时默认执行 list）
 - 命令行：uv run python main.py
+- 命令行带参数：uv run python main.py add "学习 Python"
 """
 
 from pylearn.cli import main
