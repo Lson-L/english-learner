@@ -17,8 +17,5 @@ build/
 .coverage
 htmlcov/
 
-# 本项目 CLI 运行时生成的数据文件
-tasks.json
-
 # IDE
 .idea/

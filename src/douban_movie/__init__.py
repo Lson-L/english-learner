@@ -1,12 +1,22 @@
 """豆瓣电影爬虫（按年份抓取，按评分从高到低排序）。
 
 Java 对照：
-- 这个包 ≈ 一个独立的 Maven 模块（比如 py-learn 项目下的 douban-movie 子模块）。
-- 和 pylearn 包互不依赖：待办是待办，爬虫是爬虫，各自分层、各自入口。
+- 这个包 ≈ 一个独立的 Maven 模块，包内的 client / crawler / storage / cli
+  分别对应 HTTP 客户端、Service、Repository、Controller。
 """
 
 from .client import DoubanClient, DoubanError
 from .crawler import MovieCrawler
-from .models import Movie
+from .filters import TitleFilter
+from .models import Comment, Movie
+from .report import render_markdown
 
-__all__ = ["DoubanClient", "DoubanError", "Movie", "MovieCrawler"]
+__all__ = [
+    "Comment",
+    "DoubanClient",
+    "DoubanError",
+    "Movie",
+    "MovieCrawler",
+    "TitleFilter",
+    "render_markdown",
+]

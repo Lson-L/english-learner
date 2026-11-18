@@ -1,11 +1,15 @@
 """命令行入口（表现层 / Controller）。
 
 用法：
-    douban-movies 2023                    # 抓 2023 年评分前 100
-    douban-movies 2023 -n 50              # 抓前 50
-    douban-movies 2023 -n 200 -o out.json # 抓 200 条并保存 JSON
-    douban-movies 2023 -o out.csv         # 保存 CSV（Excel 可直接打开）
-    douban-movies                         # 不带年份时交互输入
+    douban-movies 2023                          # 抓 2023 年评分前 100，Markdown 打到终端
+    douban-movies 2023 -n 50 -o report.md       # 抓前 50，保存 Markdown 报告
+    douban-movies 2023 -o out.json              # 保存 JSON（含评论）
+    douban-movies 2023 -o out.csv               # 保存 CSV（Excel 可直接打开）
+    douban-movies 2023 --comments 0             # 不抓评论，只抓榜单
+    douban-movies                               # 不带年份时交互输入
+
+约定：Markdown 正文走 stdout（方便 `> report.md` 重定向），
+进度、提示、错误全部走 stderr，保证重定向出来的文件是干净的 Markdown。
 
 Java 对照：
 - argparse ≈ picocli / commons-cli。
@@ -15,18 +19,17 @@ Java 对照：
 import argparse
 import logging
 import sys
-import unicodedata
 from datetime import datetime
 from pathlib import Path
 
 from .client import DoubanClient, DoubanError
 from .crawler import DEFAULT_PAGE_SIZE, MovieCrawler
-from .models import Movie
+from .filters import TitleFilter
+from .report import render_markdown
 from .storage import save_movies
 
-# 控制台表格里片名、导演最多显示多少列（中文算 2 列）。
-TITLE_MAX_WIDTH = 36
-DIRECTOR_MAX_WIDTH = 16
+# 默认每部电影抓多少条热门评论。
+DEFAULT_COMMENT_COUNT = 15
 
 
 def configure_stdout() -> None:
@@ -51,8 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
     """构建参数解析器（与 main 分离，方便测试）。"""
     parser = argparse.ArgumentParser(
         prog="douban-movies",
-        description="抓取指定年份的豆瓣电影，按评分从高到低输出",
-        epilog="示例：douban-movies 2023 -n 100 -o movies.json",
+        description="抓取指定年份的豆瓣电影，按评分从高到低生成 Markdown 报告"
+        "（默认过滤演唱会/晚会/特别篇，并抓取每部电影的热门评论）",
+        epilog="示例：douban-movies 2023 -n 50 -o report.md --comments 10",
     )
     parser.add_argument(
         "year",
@@ -65,104 +69,64 @@ def build_parser() -> argparse.ArgumentParser:
         "--count",
         type=int,
         default=100,
-        help="抓取条数，默认 100",
+        help="抓取电影条数，默认 100",
     )
     parser.add_argument(
         "-o",
         "--output",
         type=Path,
-        help="结果保存路径，后缀支持 .json 或 .csv",
+        help="结果保存路径，后缀支持 .md / .json / .csv；不传则 Markdown 输出到终端",
+    )
+    parser.add_argument(
+        "--comments",
+        type=int,
+        default=DEFAULT_COMMENT_COUNT,
+        metavar="N",
+        help=f"每部电影抓多少条热门评论，默认 {DEFAULT_COMMENT_COUNT}；填 0 表示不抓",
     )
     parser.add_argument(
         "--delay",
         type=float,
         default=1.0,
-        help="两次请求之间的间隔秒数，默认 1.0（调大可降低被反爬概率）",
+        help="两次请求之间的间隔秒数，默认 1.0（抓评论时请求较多，调大可降低被反爬概率）",
+    )
+    parser.add_argument(
+        "--no-filter",
+        action="store_true",
+        help="关闭默认过滤（保留演唱会、晚会、特别篇等条目）",
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="关键字",
+        help="额外排除的标题关键字，可重复指定，例如 --exclude 纪录片 --exclude 短片",
     )
     return parser
 
 
-# ---------------------------------------------------------------------------
-# 控制台表格：中文是“全角”字符，占 2 个终端列，不能直接用 len() 对齐。
-# Java 对照：≈ 自己写一个按显示宽度补齐的工具类（类似 commons-lang 的 StringUtils）。
-# ---------------------------------------------------------------------------
-def char_width(char: str) -> int:
-    """单个字符在终端里占几列。"""
-    # W=宽，F=全角，A=模糊宽度（中文环境下通常也按 2 列显示）
-    return 2 if unicodedata.east_asian_width(char) in ("W", "F", "A") else 1
-
-
-def display_width(text: str) -> int:
-    """字符串的终端显示宽度。"""
-    return sum(char_width(char) for char in text)
-
-
-def truncate_display(text: str, max_width: int) -> str:
-    """按显示宽度截断，超出时以省略号结尾。"""
-    if display_width(text) <= max_width:
-        return text
-    kept: list[str] = []
-    width = 0
-    for char in text:
-        width += char_width(char)
-        if width > max_width - 1:
-            break
-        kept.append(char)
-    return "".join(kept) + "…"
-
-
-def pad_display(text: str, width: int) -> str:
-    """按显示宽度右侧补空格。"""
-    text = truncate_display(text, width)
-    return text + " " * max(0, width - display_width(text))
-
-
-def format_movies(movies: list[Movie]) -> str:
-    """把电影列表格式化成对齐的文本表格。"""
-    if not movies:
-        return "（没有找到符合条件的电影）"
-
-    titles = [truncate_display(movie.title or "—", TITLE_MAX_WIDTH) for movie in movies]
-    directors = [
-        truncate_display(" / ".join(movie.directors[:2]) or "—", DIRECTOR_MAX_WIDTH)
-        for movie in movies
-    ]
-
-    rank_width = max(display_width("排名"), len(str(len(movies))))
-    rating_width = max(display_width("评分"), display_width("暂无"), 3)
-    title_width = max(display_width(title) for title in titles)
-    director_width = max(display_width(director) for director in directors)
-
-    lines = [
-        f"{pad_display('排名', rank_width)}  {pad_display('评分', rating_width)}  "
-        f"{pad_display('片名', title_width)}  {pad_display('导演', director_width)}",
-        f"{'-' * rank_width}  {'-' * rating_width}  {'-' * title_width}  {'-' * director_width}",
-    ]
-    for rank, movie in enumerate(movies, start=1):
-        rating = f"{movie.rate:.1f}" if movie.rate is not None else "暂无"
-        lines.append(
-            f"{str(rank).rjust(rank_width)}  {pad_display(rating, rating_width)}  "
-            f"{pad_display(titles[rank - 1], title_width)}  {directors[rank - 1]}"
-        )
-    return "\n".join(lines)
-
-
 def read_year() -> int:
-    """交互输入年份。"""
+    """交互输入年份（提示写到 stderr，避免污染 stdout 里的 Markdown）。"""
     while True:
-        text = input("请输入年份（例如 2023）: ").strip()
+        print("请输入年份（例如 2023）: ", end="", file=sys.stderr)
+        text = input().strip()
         if not text:
             continue
         try:
             return int(text)
         except ValueError:
-            print("请输入有效的年份数字，例如 2023")
+            print("请输入有效的年份数字，例如 2023", file=sys.stderr)
 
 
 def validate_year(year: int) -> None:
     current_year = datetime.now().year
     if not 1900 <= year <= current_year:
         raise ValueError(f"年份需在 1900 ~ {current_year} 之间，你输入的是 {year}")
+
+
+def log(message: str) -> None:
+    """状态提示统一走 stderr。"""
+    print(message, file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -182,19 +146,39 @@ def main(argv: list[str] | None = None) -> int:
         validate_year(year)
         if args.count <= 0:
             raise ValueError("抓取条数必须大于 0")
+        if args.comments < 0:
+            raise ValueError("评论条数不能为负数")
 
+        title_filter = TitleFilter(extra_keywords=args.exclude, enabled=not args.no_filter)
         client = DoubanClient(delay=args.delay)
-        crawler = MovieCrawler(client, page_size=DEFAULT_PAGE_SIZE)
+        crawler = MovieCrawler(client, page_size=DEFAULT_PAGE_SIZE, title_filter=title_filter)
 
-        print(f"正在抓取 {year} 年电影（目标 {args.count} 条）...")
+        log(f"正在抓取 {year} 年电影（目标 {args.count} 条）...")
         movies = crawler.crawl(year, count=args.count)
 
-        print(format_movies(movies))
-        print(f"\n共 {len(movies)} 部（{year} 年，按评分从高到低）")
+        if args.comments > 0:
+            log(f"正在抓取热门评论（每部 {args.comments} 条，共 {len(movies)} 部）...")
+            movies = crawler.attach_comments(movies, count=args.comments)
+
+        filtered_note = (
+            f"，已过滤 {crawler.filtered_count} 条非电影条目" if crawler.filtered_count else ""
+        )
+        log(f"共 {len(movies)} 部（{year} 年，按评分从高到低{filtered_note}）")
+        if len(movies) < args.count:
+            log(f"注意：符合条件的电影不足 {args.count} 条。")
+        if crawler.comments_failed:
+            log(f"注意：有 {crawler.comments_failed} 部电影的评论抓取失败。")
 
         if args.output:
-            save_movies(movies, args.output)
-            print(f"已保存到：{args.output}")
+            save_movies(
+                movies,
+                args.output,
+                year=year,
+                filtered_count=crawler.filtered_count,
+            )
+            log(f"已保存到：{args.output}")
+        else:
+            print(render_markdown(movies, year=year, filtered_count=crawler.filtered_count))
 
     except (ValueError, DoubanError) as exc:
         print(f"错误: {exc}", file=sys.stderr)

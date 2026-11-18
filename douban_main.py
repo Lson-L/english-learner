@@ -9,4 +9,4 @@
 from douban_movie.cli import main
 
 if __name__ == "__main__":
-    raise SystemExit(main(["2023", "-n", "50", "-o", "out.json"]))
+    raise SystemExit(main(["2019", "-n", "100", "-o", "out.md"]))

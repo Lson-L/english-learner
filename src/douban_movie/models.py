@@ -12,6 +12,57 @@ from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
+class Comment:
+    """一条热门短评。
+
+    豆瓣短评的评分是 1~5 星（不是 10 分制），没评分时 rating 为 None。
+    """
+
+    user: str
+    content: str
+    rating: int | None = None
+    created_at: str = ""
+    votes: int = 0
+    ip_location: str = ""
+
+    @classmethod
+    def from_api(cls, data: dict) -> "Comment":
+        rating_info = data.get("rating") or {}
+        raw_rating = rating_info.get("value") if isinstance(rating_info, dict) else None
+        try:
+            rating = int(raw_rating) if raw_rating else None
+        except (TypeError, ValueError):
+            rating = None
+
+        try:
+            votes = int(data.get("vote_count") or 0)
+        except (TypeError, ValueError):
+            votes = 0
+
+        user_info = data.get("user") or {}
+        user_name = user_info.get("name") if isinstance(user_info, dict) else None
+
+        return cls(
+            user=str(user_name or "匿名用户"),
+            content=str(data.get("comment") or "").strip(),
+            rating=rating,
+            created_at=str(data.get("create_time") or "")[:10],
+            votes=votes,
+            ip_location=str(data.get("ip_location") or ""),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "user": self.user,
+            "content": self.content,
+            "rating": self.rating,
+            "created_at": self.created_at,
+            "votes": self.votes,
+            "ip_location": self.ip_location,
+        }
+
+
+@dataclass(frozen=True)
 class Movie:
     """一部电影。
 
@@ -26,6 +77,8 @@ class Movie:
     casts: list[str] = field(default_factory=list)
     url: str = ""
     cover: str = ""
+    # 热门评论在抓完电影后再单独补充，所以给一个空列表默认值。
+    comments: list[Comment] = field(default_factory=list)
 
     @classmethod
     def from_api(cls, data: dict) -> "Movie":
@@ -71,4 +124,5 @@ class Movie:
             "casts": self.casts,
             "url": self.url,
             "cover": self.cover,
+            "comments": [comment.to_dict() for comment in self.comments],
         }

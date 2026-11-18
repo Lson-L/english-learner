@@ -24,6 +24,8 @@ from urllib.request import Request, urlopen
 logger = logging.getLogger(__name__)
 
 SEARCH_URL = "https://movie.douban.com/j/new_search_subjects"
+# 移动端 Rexxar 接口：详情页被反爬拦截时，这个接口仍然可用。
+COMMENTS_URL = "https://m.douban.com/rexxar/api/v2/movie/{movie_id}/interests"
 
 # 不带浏览器 UA 时，豆瓣很容易直接返回 403 或验证页。
 # Java 对照：≈ HttpClient 里统一加的默认 Header 拦截器。
@@ -74,17 +76,50 @@ class DoubanClient:
         }
         url = f"{SEARCH_URL}?{urlencode(params)}"
 
+        payload = self._get_json(url, f"第 {start} 条起的数据")
+        data = payload.get("data")
+        if not isinstance(data, list):
+            # 常见于被反爬拦截后返回了结构不同的 JSON。
+            raise DoubanError(f"搜索结果格式异常：{str(payload)[:120]}")
+        return data
+
+    def fetch_comments(
+        self,
+        movie_id: str,
+        count: int = 15,
+        start: int = 0,
+    ) -> list[dict[str, Any]]:
+        """抓取某部电影的热门短评。
+
+        - count：要多少条（豆瓣默认按点赞数从高到低返回）。
+        - start：偏移量，一般不需要翻页。
+        """
+        if count <= 0:
+            return []
+
+        params = {"count": count, "order_by": "hot", "start": start}
+        url = f"{COMMENTS_URL.format(movie_id=movie_id)}?{urlencode(params)}"
+
+        payload = self._get_json(url, f"电影 {movie_id} 的评论")
+        interests = payload.get("interests")
+        if not isinstance(interests, list):
+            raise DoubanError(f"评论接口返回格式异常：{str(payload)[:120]}")
+        return interests
+
+    def _get_json(self, url: str, what: str) -> dict[str, Any]:
+        """带重试的 GET + JSON 解析，返回解析后的 dict。
+
+        what 只是用来拼错误提示，例如“电影 123 的评论”。
+        """
         last_error: Exception | None = None
         for attempt in range(1, self.retries + 1):
             self._throttle()
             try:
                 body = self._get(url)
                 payload = json.loads(body)
-                data = payload.get("data")
-                if not isinstance(data, list):
-                    # 常见于被反爬拦截后返回了结构不同的 JSON。
+                if not isinstance(payload, dict):
                     raise DoubanError(f"接口返回格式异常：{body[:120]!r}")
-                return data
+                return payload
             except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, DoubanError) as exc:
                 last_error = exc
                 if attempt >= self.retries:
@@ -94,7 +129,7 @@ class DoubanClient:
                 time.sleep(wait)
 
         raise DoubanError(
-            f"抓取失败（start={start}）：{last_error}。"
+            f"抓取失败（{what}）：{last_error}。"
             "如果返回的是网页而不是 JSON，通常是豆瓣反爬，请调大 --delay 后重试。"
         ) from last_error
 

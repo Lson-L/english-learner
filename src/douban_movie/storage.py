@@ -10,8 +10,19 @@ import json
 from pathlib import Path
 
 from .models import Movie
+from .report import render_markdown
 
-CSV_FIELDS = ["rank", "title", "rate", "directors", "casts", "url", "douban_id"]
+CSV_FIELDS = [
+    "rank",
+    "title",
+    "rate",
+    "directors",
+    "casts",
+    "url",
+    "douban_id",
+    "comment_count",
+    "top_comment",
+]
 
 
 def save_json(movies: list[Movie], file_path: str | Path) -> None:
@@ -44,16 +55,46 @@ def save_csv(movies: list[Movie], file_path: str | Path) -> None:
                     "casts": " / ".join(movie.casts),
                     "url": movie.url,
                     "douban_id": movie.id,
+                    "comment_count": len(movie.comments),
+                    "top_comment": _one_line(movie.comments[0].content) if movie.comments else "",
                 }
             )
 
 
-def save_movies(movies: list[Movie], file_path: str | Path) -> None:
-    """按后缀自动选择 JSON 或 CSV。"""
+def save_markdown(
+    movies: list[Movie],
+    file_path: str | Path,
+    year: int,
+    filtered_count: int = 0,
+) -> None:
+    """保存为 Markdown 报告。"""
+    path = Path(file_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = render_markdown(movies, year=year, filtered_count=filtered_count)
+    path.write_text(text, encoding="utf-8")
+
+
+def save_movies(
+    movies: list[Movie],
+    file_path: str | Path,
+    *,
+    year: int | None = None,
+    filtered_count: int = 0,
+) -> None:
+    """按后缀自动选择 Markdown / JSON / CSV。"""
     suffix = Path(file_path).suffix.lower()
-    if suffix == ".json":
+    if suffix == ".md":
+        if year is None:
+            raise ValueError("保存 Markdown 需要提供年份")
+        save_markdown(movies, file_path, year=year, filtered_count=filtered_count)
+    elif suffix == ".json":
         save_json(movies, file_path)
     elif suffix == ".csv":
         save_csv(movies, file_path)
     else:
-        raise ValueError("输出文件后缀只支持 .json 或 .csv")
+        raise ValueError("输出文件后缀只支持 .md / .json / .csv")
+
+
+def _one_line(text: str) -> str:
+    """CSV 里不能有换行，把短评压成一行。"""
+    return " ".join(text.split())

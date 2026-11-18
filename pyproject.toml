@@ -12,7 +12,7 @@
 # 坐标信息 ≈ Maven 的 groupId + artifactId + version
 name = "py-learn"
 version = "0.1.0"
-description = "用 Java 视角学习 Python 工程结构的最小项目"
+description = "用 Java 视角学习 Python 工程结构：豆瓣电影爬虫"
 readme = "README.md"
 requires-python = ">=3.13"          # ≈ maven.compiler.release
 authors = [{ name = "lson" }]
@@ -21,11 +21,10 @@ authors = [{ name = "lson" }]
 # 本项目只用标准库，所以是空列表；写在这里的包会被 uv sync 自动安装。
 dependencies = []
 
-# 命令行入口：安装后会在 .venv/Scripts 下生成一个 py-learn.exe。
-# Java 对照：≈ 打一个带 Main-Class 的 jar，用户敲 py-learn 就相当于 java -jar。
+# 命令行入口：安装后会在 .venv/Scripts 下生成一个 douban-movies.exe。
+# Java 对照：≈ 打一个带 Main-Class 的 jar，用户敲 douban-movies 就相当于 java -jar。
 # 格式 "模块路径:函数名"。
 [project.scripts]
-py-learn = "pylearn.cli:main"
 douban-movies = "douban_movie.cli:main"
 
 # 开发期依赖 ≈ <scope>test</scope> + 那些只在开发时用的插件。
@@ -43,10 +42,10 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# src 布局必须显式告诉构建工具：包在 src/pylearn 下。
+# src 布局必须显式告诉构建工具：包在 src/douban_movie 下。
 # Java 对照：≈ <sourceDirectory>src/main/java</sourceDirectory>。
 [tool.hatch.build.targets.wheel]
-packages = ["src/pylearn", "src/douban_movie"]
+packages = ["src/douban_movie"]
 
 # ------------------------- 以下是各工具的配置 -------------------------
 # Java 对照：≈ pom.xml 里各个 <plugin><configuration>。
@@ -58,11 +57,11 @@ addopts = "-q"               # 默认安静模式
 [tool.ruff]
 line-length = 100
 target-version = "py313"
-src = ["src", "tests"]       # 让 ruff 能识别 pylearn 是自己的包（first-party）
+src = ["src", "tests"]       # 让 ruff 能识别 douban_movie 是自己的包（first-party）
 
 # ruff = 格式化器（≈ google-java-format）+ 静态检查（≈ Checkstyle/SpotBugs）
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.coverage.run]
-source = ["pylearn", "douban_movie"]   # ≈ JaCoCo 的 include 范围
+source = ["douban_movie"]   # ≈ JaCoCo 的 include 范围
