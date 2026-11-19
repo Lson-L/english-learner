@@ -29,6 +29,7 @@ def make_word(**overrides) -> Word:
         "lemma": "resilient",
         "display_form": "resilient",
         "meaning_cn": "有韧性的",
+        "in_vocabulary": True,
         "status": "new",
         "ease": 2.5,
         "interval_days": 0,
@@ -165,6 +166,23 @@ def test_review_persists_schedule_logs_and_stats(db: Database) -> None:
     assert db.stats.get("2026-11-19").reviews_done == 1
     # 复习后这个词不再出现在到期队列
     assert service.due_words() == []
+
+
+def test_review_logs_user_reason_and_ai_advice(db: Database) -> None:
+    stored = db.words.upsert(make_word())
+    assert stored.id is not None
+    service = ReviewService(db.words, db.reviews, db.stats, today=lambda: "2026-11-19")
+
+    service.review(
+        stored,
+        RATING_FORGOT,
+        note="总是和 resistant 混淆",
+        advice="resilient 强调恢复力",
+    )
+
+    logs = db.reviews.list_for_word(stored.id)
+    assert logs[0].note == "总是和 resistant 混淆"
+    assert logs[0].advice == "resilient 强调恢复力"
 
 
 def test_review_rejects_unsaved_word(db: Database) -> None:

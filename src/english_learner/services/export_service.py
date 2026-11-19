@@ -1,7 +1,9 @@
 """学习数据导出：JSON 全量备份 / CSV 分表。
 
-导出的数据来自 SQLite 的六张表：
-`profile` / `articles` / `words` / `highlights` / `review_logs` / `daily_stats`。
+导出的数据来自 SQLite 的十张表：
+`profile` / `articles` / `words` / `word_forms` / `highlights` /
+`review_logs` / `daily_stats` / `reading_quizzes` / `level_evidence` /
+`weekly_reviews`。
 
 设计：
 - 纯 Python，不依赖 PySide6；界面只负责选路径，导出本身可以放进 TaskWorker；
@@ -26,9 +28,12 @@ from .. import __version__
 from ..models.entities import now_iso
 from ..storage.repositories import (
     ArticleRepo,
+    LevelEvidenceRepo,
     ProfileRepo,
+    QuizRepo,
     ReviewRepo,
     StatsRepo,
+    WeeklyReviewRepo,
     WordRepo,
 )
 
@@ -39,18 +44,26 @@ TABLE_LABELS: dict[str, str] = {
     "profile": "学习画像",
     "articles": "文章",
     "words": "生词",
+    "word_forms": "词形缓存",
     "highlights": "高亮",
     "review_logs": "复习记录",
     "daily_stats": "打卡天数",
+    "reading_quizzes": "阅读检测",
+    "level_evidence": "等级证据",
+    "weekly_reviews": "每周复盘",
 }
 
 # 摘要展示顺序：先看学习内容，再看历史。
 SUMMARY_ORDER: tuple[str, ...] = (
     "articles",
     "words",
+    "word_forms",
     "highlights",
+    "reading_quizzes",
+    "level_evidence",
     "review_logs",
     "daily_stats",
+    "weekly_reviews",
     "profile",
 )
 
@@ -64,6 +77,10 @@ CSV_COLUMNS: dict[str, tuple[str, ...]] = {
         "comment",
         "assessed_at",
         "updated_at",
+        "pending_level",
+        "pending_count",
+        "level_confidence",
+        "level_updated_reason",
     ),
     "articles": (
         "id",
@@ -87,8 +104,11 @@ CSV_COLUMNS: dict[str, tuple[str, ...]] = {
         "meaning_en",
         "example_en",
         "example_cn",
+        "mnemonic",
         "context_sentence",
         "article_id",
+        "in_vocabulary",
+        "cefr_band",
         "status",
         "ease",
         "interval_days",
@@ -96,6 +116,11 @@ CSV_COLUMNS: dict[str, tuple[str, ...]] = {
         "due_date",
         "created_at",
         "updated_at",
+    ),
+    "word_forms": (
+        "form",
+        "word_id",
+        "created_at",
     ),
     "highlights": (
         "id",
@@ -112,12 +137,74 @@ CSV_COLUMNS: dict[str, tuple[str, ...]] = {
         "prev_interval",
         "next_interval",
         "reviewed_at",
+        "note",
+        "advice",
     ),
     "daily_stats": (
         "stat_date",
         "article_read",
         "words_added",
         "reviews_done",
+    ),
+    "reading_quizzes": (
+        "id",
+        "article_id",
+        "article_date",
+        "level",
+        "questions",
+        "answers",
+        "explanations",
+        "error_types",
+        "short_answer_text",
+        "short_answer_score",
+        "self_report",
+        "score",
+        "total",
+        "recommended_level",
+        "previous_level",
+        "result_level",
+        "pending_level",
+        "pending_count",
+        "evidence_ratio",
+        "productions",
+        "level_confidence",
+        "posterior",
+        "practice_mode",
+        "stage",
+        "feedback",
+        "created_at",
+        "completed_at",
+    ),
+    "level_evidence": (
+        "id",
+        "source",
+        "observed_at",
+        "article_level",
+        "quiz_id",
+        "choice_correct",
+        "choice_total",
+        "short_score",
+        "short_total",
+        "weighted_points",
+        "evidence_ratio",
+        "error_types",
+        "observations",
+        "posterior",
+        "confidence",
+    ),
+    "weekly_reviews": (
+        "id",
+        "week_start",
+        "summary",
+        "suggested_level",
+        "focus",
+        "quiz_count",
+        "review_count",
+        "words_added",
+        "confidence",
+        "applied_level",
+        "created_at",
+        "applied_at",
     ),
 }
 
@@ -144,12 +231,18 @@ class ExportService:
         words: WordRepo,
         reviews: ReviewRepo,
         stats: StatsRepo,
+        quizzes: QuizRepo,
+        evidence: LevelEvidenceRepo | None = None,
+        weekly_reviews: WeeklyReviewRepo | None = None,
     ) -> None:
         self._profiles = profiles
         self._articles = articles
         self._words = words
         self._reviews = reviews
         self._stats = stats
+        self._quizzes = quizzes
+        self._evidence = evidence
+        self._weekly_reviews = weekly_reviews
 
     # ------------------------------------------------------------------ 快照
     def snapshot(self) -> dict[str, object]:
@@ -158,10 +251,24 @@ class ExportService:
         return {
             "profile": asdict(profile) if profile is not None else None,
             "articles": [asdict(item) for item in self._articles.list_all()],
-            "words": [asdict(item) for item in self._words.list_all()],
+            "words": [asdict(item) for item in self._words.list_all(include_cache=True)],
+            "word_forms": [asdict(item) for item in self._words.list_all_forms()],
             "highlights": [asdict(item) for item in self._words.list_all_highlights()],
             "review_logs": [asdict(item) for item in self._reviews.list_all()],
             "daily_stats": [asdict(item) for item in self._stats.list_all()],
+            "reading_quizzes": [
+                {**asdict(item), "total": item.total} for item in self._quizzes.list_all()
+            ],
+            "level_evidence": (
+                [asdict(item) for item in self._evidence.list_all()]
+                if self._evidence is not None
+                else []
+            ),
+            "weekly_reviews": (
+                [asdict(item) for item in self._weekly_reviews.list_all()]
+                if self._weekly_reviews is not None
+                else []
+            ),
         }
 
     @staticmethod
@@ -246,6 +353,12 @@ class ExportService:
     def _csv_value(value: object) -> object:
         if value is None:
             return ""
+        if isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=False)
         if isinstance(value, (list, tuple)):
+            # 嵌套结构（如阅读检测的 questions）整体写成 JSON 字符串，
+            # 简单列表（目标词、解析列表）仍用分号拼接，方便 Excel 阅读。
+            if any(isinstance(item, (dict, list, tuple)) for item in value):
+                return json.dumps(value, ensure_ascii=False)
             return "; ".join(str(item) for item in value)
         return value

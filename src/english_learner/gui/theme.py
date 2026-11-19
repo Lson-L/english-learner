@@ -252,6 +252,18 @@ QFrame#wordPanel {
     border: 1px solid #E4E8F0;
     border-radius: 12px;
 }
+QPushButton#cardCloseButton {
+    background: transparent;
+    border: none;
+    color: #9CA3AF;
+    font-size: 18px;
+    padding: 0;
+}
+QPushButton#cardCloseButton:hover {
+    color: #111827;
+    background: #F3F4F6;
+    border-radius: 12px;
+}
 QLabel#wordTitle {
     font-size: 26px;
     font-weight: 600;
@@ -290,6 +302,30 @@ QLabel#wordContext {
     color: #6B7280;
     font-size: 12px;
     background: #F7F8FA;
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+QLabel#wordMnemonic {
+    color: #92400E;
+    font-size: 13px;
+    background: #FFFBEB;
+    border: 1px solid #FDE68A;
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+QLabel#reviewHelpAdvice {
+    color: #1F2937;
+    font-size: 14px;
+    background: #F0FDF4;
+    border: 1px solid #BBF7D0;
+    border-radius: 10px;
+    padding: 12px 14px;
+}
+QLabel#reviewHelpLog {
+    color: #1F2937;
+    font-size: 12px;
+    background: #F0FDF4;
+    border: 1px solid #BBF7D0;
     border-radius: 8px;
     padding: 8px 10px;
 }

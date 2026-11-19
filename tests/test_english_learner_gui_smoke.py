@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date, timedelta
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -25,6 +26,9 @@ from english_learner.gui.onboarding import OnboardingDialog  # noqa: E402
 from english_learner.models.entities import (  # noqa: E402
     Article,
     Profile,
+    QuizQuestion,
+    ReadingQuiz,
+    WeeklyReview,
     Word,
     now_iso,
     today_str,
@@ -95,6 +99,7 @@ def test_today_page_reflects_database(tmp_path: Path) -> None:
         db.words.upsert(
             Word(
                 lemma=lemma,
+                in_vocabulary=True,
                 due_date=today_str(),
                 created_at=now_iso(),
                 updated_at=now_iso(),
@@ -112,6 +117,80 @@ def test_today_page_reflects_database(tmp_path: Path) -> None:
     window.close()
 
 
+def test_today_page_distinguishes_last_week_review(tmp_path: Path) -> None:
+    get_app()
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(make_config())
+    db = Database(tmp_path / "data.db")
+    db.profiles.save(Profile(cefr_level="B1"))
+    today = date.today()
+    last_week_start = (today - timedelta(days=7 + today.weekday())).isoformat()
+    db.weekly_reviews.save(
+        WeeklyReview(
+            week_start=last_week_start,
+            summary="上周的复盘内容。",
+            suggested_level="B2",
+            created_at=now_iso(),
+        )
+    )
+
+    window = MainWindow(make_config(), store, db)
+
+    assert "最近复盘" in window._today_page._weekly_desc.text()
+    assert "上周的复盘内容" in window._today_page._weekly_desc.text()
+    assert "本周复盘" not in window._today_page._weekly_desc.text()
+    window.close()
+
+
+def test_today_page_shows_quiz_completion(tmp_path: Path) -> None:
+    get_app()
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(make_config())
+    db = Database(tmp_path / "data.db")
+    db.profiles.save(Profile(cefr_level="B1", vocab_estimate=3800))
+    article = db.articles.insert(
+        Article(
+            article_date=today_str(),
+            title="Small Habits",
+            content="Small habits are powerful.",
+            level="B1",
+            word_count=4,
+            created_at=now_iso(),
+        )
+    )
+    assert article.id is not None
+    quiz = db.quizzes.insert(
+        ReadingQuiz(
+            article_id=article.id,
+            article_date=today_str(),
+            level="B1",
+            questions=(
+                QuizQuestion(prompt="Q1?", options=("a", "b", "c"), answer_index=0),
+                QuizQuestion(prompt="Q2?", options=("a", "b", "c"), answer_index=1),
+                QuizQuestion(prompt="Q3?", options=("a", "b", "c"), answer_index=2),
+            ),
+            created_at=now_iso(),
+        )
+    )
+    assert quiz.id is not None
+    db.quizzes.save_result(
+        quiz.id,
+        answers=(0, 1, 0),
+        explanations=("", "", ""),
+        score=2,
+        previous_level="B1",
+        result_level="A2",
+        feedback="推断题需要再练。",
+    )
+
+    window = MainWindow(make_config(), store, db)
+    window._today_page.refresh()
+
+    assert "已完成检测" in window._today_page._article_desc.text()
+    assert "2/3" in window._today_page._article_desc.text()
+    window.close()
+
+
 def test_navigate_to_review_and_vocabulary(tmp_path: Path) -> None:
     get_app()
     store = ConfigStore(tmp_path / "config.json")
@@ -121,6 +200,7 @@ def test_navigate_to_review_and_vocabulary(tmp_path: Path) -> None:
         Word(
             lemma="resilient",
             meaning_cn="有韧性的",
+            in_vocabulary=True,
             due_date=today_str(),
             created_at=now_iso(),
             updated_at=now_iso(),
@@ -153,6 +233,7 @@ def test_navigation_blocked_by_unsaved_meaning(
         Word(
             lemma="resilient",
             meaning_cn="有韧性的",
+            in_vocabulary=True,
             due_date=today_str(),
             created_at=now_iso(),
             updated_at=now_iso(),

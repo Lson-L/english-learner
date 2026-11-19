@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -31,8 +32,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...models.entities import Word
+from ...models.entities import ReviewLog, Word
 from ...services.app_context import AppContext
+from ...services.srs import RATING_LABELS
+from ..workers import TaskWorker
 from .common import PageHeader, set_status
 
 STATUS_LABELS: dict[str, str] = {
@@ -59,6 +62,12 @@ _SORT_OPTIONS: tuple[tuple[str, str], ...] = (
 
 _COLUMNS = ("单词", "释义", "状态", "下次复习")
 
+# 复习求助记录：详情面板只展示最近 5 条。
+_HELP_LOG_LIMIT = 5
+_HELP_LOG_EMPTY_HINT = (
+    "还没有求助记录。复习时点「忘记 / 模糊」并请 AI 帮记后，你写的原因和 AI 的建议会显示在这里。"
+)
+
 
 class VocabularyPage(QWidget):
     def __init__(self, context: AppContext, parent: QWidget | None = None) -> None:
@@ -71,6 +80,7 @@ class VocabularyPage(QWidget):
         self._last_filter_index = 0
         self._last_search_text = ""
         self._last_sort_index = 0
+        self._worker: TaskWorker | None = None
 
         self._build_ui()
 
@@ -186,6 +196,10 @@ class VocabularyPage(QWidget):
         self._title_label.setWordWrap(True)
         body.addWidget(self._title_label)
 
+        self._lemma_label = QLabel("")
+        self._lemma_label.setObjectName("wordPhonetic")
+        body.addWidget(self._lemma_label)
+
         phonetic_row = QHBoxLayout()
         phonetic_row.setSpacing(8)
         self._phonetic_label = QLabel("")
@@ -224,6 +238,30 @@ class VocabularyPage(QWidget):
         self._source_label.setWordWrap(True)
         body.addWidget(self._source_label)
 
+        body.addWidget(self._field_label("记忆方法"))
+        self._mnemonic_label = QLabel("")
+        self._mnemonic_label.setObjectName("wordMnemonic")
+        self._mnemonic_label.setWordWrap(True)
+        body.addWidget(self._mnemonic_label)
+
+        mnemonic_row = QHBoxLayout()
+        mnemonic_row.setSpacing(8)
+        self._mnemonic_button = QPushButton("AI 生成记忆方法")
+        self._mnemonic_button.setObjectName("secondaryButton")
+        self._mnemonic_button.clicked.connect(self._generate_mnemonic)
+        mnemonic_row.addWidget(self._mnemonic_button)
+        mnemonic_row.addStretch(1)
+        body.addLayout(mnemonic_row)
+
+        # 复习时点“忘记 / 模糊”写下的原因和 AI 帮记内容，复习记录落在
+        # review_logs.note / advice，这里回显最近几条，方便事后对照。
+        body.addWidget(self._field_label("复习求助记录"))
+        self._help_log_label = QLabel("")
+        self._help_log_label.setObjectName("reviewHelpLog")
+        self._help_log_label.setWordWrap(True)
+        self._help_log_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        body.addWidget(self._help_log_label)
+
         body.addStretch(1)
 
         buttons = QHBoxLayout()
@@ -240,8 +278,14 @@ class VocabularyPage(QWidget):
         buttons.addStretch(1)
         body.addLayout(buttons)
 
-        root.addWidget(self._detail_body, 1)
-        self._detail_body.setVisible(False)
+        # 字段多（释义 / SRS / 原文 / 记忆方法 / 按钮），放进滚动区避免小窗口重叠。
+        self._detail_scroll = QScrollArea()
+        self._detail_scroll.setWidgetResizable(True)
+        self._detail_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._detail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._detail_scroll.setWidget(self._detail_body)
+        self._detail_scroll.setVisible(False)
+        root.addWidget(self._detail_scroll, 1)
         return panel
 
     @staticmethod
@@ -349,8 +393,11 @@ class VocabularyPage(QWidget):
         self._update_batch_button()
 
     def _set_row(self, row: int, word: Word) -> None:
+        form = word.display_form or word.lemma
+        if form.lower() != word.lemma.lower():
+            form = f"{form} → {word.lemma}"
         cells = (
-            word.display_form or word.lemma,
+            form,
             word.meaning_cn or word.meaning_en or "—",
             STATUS_LABELS.get(word.status, word.status),
             word.due_date or "—",
@@ -404,9 +451,14 @@ class VocabularyPage(QWidget):
     def _show_detail(self, word: Word) -> None:
         self._selected = word
         self._detail_placeholder.setVisible(False)
-        self._detail_body.setVisible(True)
+        self._detail_scroll.setVisible(True)
 
         self._title_label.setText(word.display_form or word.lemma)
+        if word.display_form and word.display_form.lower() != word.lemma.lower():
+            self._lemma_label.setText(f"原形：{word.lemma}")
+        else:
+            self._lemma_label.setText("")
+        self._lemma_label.setVisible(bool(self._lemma_label.text()))
         self._phonetic_label.setText(word.phonetic)
         self._phonetic_label.setVisible(bool(word.phonetic))
         self._pos_label.setText(word.pos)
@@ -430,10 +482,45 @@ class VocabularyPage(QWidget):
         self._source_label.setText(self._source_text(word))
         self._source_label.setVisible(bool(self._source_label.text()))
 
+        self._mnemonic_label.setText(
+            word.mnemonic or "还没有记忆方法，可以让 AI 根据释义和原文生成一个。"
+        )
+        self._mnemonic_button.setText("重新生成记忆方法" if word.mnemonic else "AI 生成记忆方法")
+        self._render_help_logs(word)
+
+    def _render_help_logs(self, word: Word) -> None:
+        """展示复习求助记录：用户写的原因 + AI 帮记内容（最新在前）。"""
+        if word.id is None:
+            self._help_log_label.setText(_HELP_LOG_EMPTY_HINT)
+            return
+
+        records = self._context.review_repo.list_help_for_word(int(word.id), limit=_HELP_LOG_LIMIT)
+        if not records:
+            self._help_log_label.setText(_HELP_LOG_EMPTY_HINT)
+            return
+
+        text = "\n\n".join(self._format_help_log(log) for log in records)
+        total = self._context.review_repo.count_help_for_word(int(word.id))
+        if total > _HELP_LOG_LIMIT:
+            text += f"\n\n更早的 {total - _HELP_LOG_LIMIT} 次求助已省略。"
+        self._help_log_label.setText(text)
+
+    @staticmethod
+    def _format_help_log(log: ReviewLog) -> str:
+        when = log.reviewed_at[:16].replace("T", " ") if log.reviewed_at else ""
+        header = " · ".join(part for part in (when, RATING_LABELS.get(log.rating, "")) if part)
+        lines = [header] if header else []
+        if log.note:
+            lines.append(f"我的输入：{log.note}")
+        if log.advice:
+            lines.append(f"AI 帮记：{log.advice}")
+        return "\n".join(lines)
+
     def _clear_detail(self) -> None:
         self._selected = None
         self._baseline = None
-        self._detail_body.setVisible(False)
+        self._help_log_label.setText("")
+        self._detail_scroll.setVisible(False)
         self._detail_placeholder.setVisible(True)
         self._update_batch_button()
 
@@ -540,6 +627,53 @@ class VocabularyPage(QWidget):
         self.refresh()
         set_status(self._status, f"「{name}」已从生词本删除。", "success")
 
+    # -------------------------------------------------------------- 记忆方法
+    def _generate_mnemonic(self) -> None:
+        word = self._selected
+        if word is None or word.id is None:
+            return
+        if self._worker is not None and self._worker.isRunning():
+            return
+        if self._has_unsaved_changes():
+            set_status(
+                self._status,
+                "请先保存或放弃当前释义修改，再生成记忆方法。",
+                "hint",
+            )
+            return
+
+        service = self._context.dictionary_service()
+        level = self._context.level()
+        self._mnemonic_button.setEnabled(False)
+        self._mnemonic_button.setText("生成中…")
+        set_status(self._status, "AI 正在生成记忆方法…", "loading")
+
+        worker = TaskWorker(lambda: service.generate_mnemonic(word, level))
+        worker.succeeded.connect(self._on_mnemonic_ready)
+        worker.failed.connect(self._on_mnemonic_failed)
+        worker.cancelled.connect(self._on_mnemonic_finished)
+        worker.finished.connect(self._on_mnemonic_finished)
+        self._worker = worker
+        worker.start()
+
+    def _on_mnemonic_ready(self, result: object) -> None:
+        if not isinstance(result, Word):
+            set_status(self._status, "记忆方法生成完成，但返回了意外数据。", "error")
+            return
+        self.refresh()
+        set_status(self._status, "记忆方法已生成。", "success")
+
+    def _on_mnemonic_failed(self, message: str) -> None:
+        set_status(self._status, message, "error")
+
+    def _on_mnemonic_finished(self) -> None:
+        self._worker = None
+        self._mnemonic_button.setEnabled(True)
+        if self._selected is not None:
+            self._mnemonic_button.setText(
+                "重新生成记忆方法" if self._selected.mnemonic else "AI 生成记忆方法"
+            )
+
     def _on_batch_delete_clicked(self) -> None:
         ids = self._selected_word_ids()
         if not ids:
@@ -568,3 +702,12 @@ class VocabularyPage(QWidget):
         else:
             set_status(self._status, "删除失败：选中的词已不存在。", "error")
         return deleted
+
+    # ------------------------------------------------------------------ 关闭
+    def shutdown(self, timeout_ms: int = 3000) -> TaskWorker | None:
+        worker = self._worker
+        if worker is None or worker.isFinished():
+            return None
+        if worker.stop(timeout_ms):
+            return None
+        return worker

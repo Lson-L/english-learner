@@ -75,6 +75,21 @@ def as_int(value: Any, default: int = 0) -> int:
             return default
 
 
+def as_float(value: Any, default: float = 0.0) -> float:
+    """尽量转 float：兼容 0.7、"0.7"、"70%"（按百分数处理）；失败用默认值。"""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, str) and value.strip().endswith("%"):
+        try:
+            return float(value.strip().rstrip("%")) / 100.0
+        except ValueError:
+            return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def as_str_list(value: Any) -> tuple[str, ...]:
     """任何值 → 字符串元组：支持列表、JSON 数组字符串、普通字符串。"""
     if value is None:

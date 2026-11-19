@@ -102,6 +102,7 @@ def add_word(db: Database, article: Article, lemma: str, created_at: str) -> Wor
             lemma=lemma,
             display_form=lemma,
             meaning_cn="释义",
+            in_vocabulary=True,
             due_date=TODAY,
             created_at=created_at,
             updated_at=created_at,
@@ -127,6 +128,7 @@ def test_collect_today_words_prefers_highlighted(db: Database, article: Article)
     db.words.upsert(
         Word(
             lemma="looked-up",
+            in_vocabulary=True,
             created_at=f"{TODAY}T10:00:00",
             updated_at=f"{TODAY}T10:00:00",
         )

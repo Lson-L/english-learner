@@ -206,6 +206,7 @@ class ArticleService:
         angle: str | None = None,
         avoid_titles: list[str] | tuple[str, ...] = (),
         user_request: str = "",
+        current_article: Article | None = None,
     ) -> ArticleDraft:
         """调用 AI 生成文章；JSON 不合法或校验不过时重试一次。
 
@@ -214,6 +215,7 @@ class ArticleService:
         angle=None 时随机选一个切入角度，传空字符串表示不加角度；
         avoid_titles 列出“别再写”的历史标题，保证每次生成（尤其“换一篇”）
         的 prompt 本身就不一样；user_request 是用户在弹窗里写的具体要求。
+        current_article 仅在“换一篇 + 用户有要求”时传入，用于理解指代。
         """
         auto_angle = angle is None
         chosen_angle = self.pick_angle() if auto_angle else (angle or "").strip()
@@ -231,10 +233,11 @@ class ArticleService:
                 angle=chosen_angle,
                 avoid_titles=avoid_titles,
                 user_request=user_request,
+                current_article=current_article,
             )
             logger.info(
                 "生成文章 prompt=%s level=%s attempt=%s topic=%s angle=%s "
-                "target_words=%s soft=%s avoid=%s request=%s",
+                "target_words=%s soft=%s avoid=%s request=%s with_current=%s",
                 PROMPT_VERSION,
                 level,
                 attempt + 1,
@@ -244,6 +247,7 @@ class ArticleService:
                 not strict_targets,
                 len(avoid_titles),
                 user_request.strip() or "-",
+                current_article is not None,
             )
             text = self._client.complete_json(messages, temperature=0.8)
             try:
@@ -300,8 +304,15 @@ class ArticleService:
             topic,
             strict_targets=strict_targets,
             angle=angle,
-            avoid_titles=self._avoid_titles(day, current_title=existing.title if existing else ""),
+            # 用户写明了要求时，不再把当前标题列进“禁止重复”：
+            # 他可能就是要一篇同主题/同风格的文章，不能让两条指令互相打架。
+            avoid_titles=self._avoid_titles(
+                day,
+                current_title=existing.title if (existing and not request) else "",
+            ),
             user_request=request,
+            # 只有用户写了要求才把当前文章一起发过去：理解“这篇/这个话题”的指代。
+            current_article=existing if request else None,
         )
         return self.replace_today(draft, today=day)
 

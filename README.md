@@ -6,7 +6,7 @@
 - GUI：PySide6
 - AI：任何 OpenAI 兼容接口（DeepSeek / Kimi / 通义 / 智谱 / 硅基流动 / OpenRouter / Ollama）
 - 数据：SQLite + 本地 JSON 配置，全部留在本机
-- 当前进度：**M3 核心项（数据导出、Key 加密、可取消请求、生词本增强、性能）**
+- 当前进度：**M3.11（本地后验与置信度、自适应出题、盲评、双产出题、每周复盘）**
 
 产品方向见 [`docs/english_learner/PRODUCT.md`](docs/english_learner/PRODUCT.md)，
 开发进度与下一步任务见 [`docs/english_learner/PROGRESS.md`](docs/english_learner/PROGRESS.md)。
@@ -15,7 +15,7 @@
 
 ```
 首次启动：配置 AI → 真实连接测试 → 水平测评 → 进入首页
-每天：打开 → 今日文章 → 阅读划词 → 生词入本 → 复习到期词 → 打卡
+每天：打开 → 今日文章 → 阅读划词 → 阅读完成（答题检测）→ 生词入本 → 复习到期词 → 打卡
 ```
 
 ## 快速开始
@@ -43,14 +43,20 @@ uv run english-learner --reconfigure
 |---|---|
 | AI 配置向导 / 连接测试 / 主窗口导航 | ✅ M0 |
 | 水平测评（固定题库 + AI 评分，CEFR 定级） | ✅ M1 |
-| 每日文章生成（结构化 JSON、当天缓存） | ✅ M1 |
-| 阅读器 + 双击划词 + 语境释义 | ✅ M1 |
+| 每日文章生成（结构化 JSON、当天缓存；换一篇支持提示词并携带原文上下文） | ✅ M1 / M3.5 |
+| 阅读器 + 双击划词 + 语境释义（正文全宽 + 悬浮释义卡） | ✅ M1 / M3.6 |
 | 阅读反馈调难度（AI 重新定级 + 换一篇） | ✅ M1.5 |
+| 阅读完成检测（两轮自适应、边界题、短答 + 改写、盲评 + 本地后验、置信度、选项随机，支持全屏） | ✅ M3.11 |
+| 每周复盘（AI 汇总检测/生词/复习，用户确认后改级） | ✅ M3.11 |
 | 生词本列表、筛选、搜索、排序、编辑释义、批量删除、正文高亮持久化 | ✅ M2/M3 |
 | SM-2 间隔重复复习（四档反馈、复习历史落库） | ✅ M2 |
 | 首页待复习按到期日统计、复习入口 | ✅ M2 |
 | 数据导出（JSON 快照 / CSV 分表） | ✅ M3 |
 | API Key 加密（Windows DPAPI）、请求可取消、错误分类 | ✅ M3 |
+| 生词按原形入库、记录文章词形、AI 记忆方法 | ✅ M3.5 |
+| 复习「忘记 / 模糊」原因收集 + AI 针对性建议 | ✅ M3.5 |
+| 生词本回显复习求助（用户输入 + AI 帮记，最近 5 条） | ✅ M3.10 |
+| 查词与生词本分离（双击只查词，手动加入才入本） | ✅ M3.7 |
 | 深色模式、安装器 / 自动更新 | 可选 M4 |
 
 ## 配置与数据位置
@@ -65,7 +71,7 @@ uv run english-learner --reconfigure
 
 - `config.json`：AI 服务地址、Key、模型 id、温度；
 - `logs/app.log`：运行日志（轮转，最多 3 份）；
-- `data.db`：学习数据（文章、生词、高亮、统计）。
+- `data.db`：学习数据（文章、生词、高亮、统计、阅读检测）。
 
 > API Key 在 Windows 上使用系统 DPAPI 加密保存（与当前用户绑定）；其他平台
 > 回退明文并收紧文件权限。设置页可导出 JSON / CSV 备份学习数据。
@@ -88,7 +94,12 @@ src/english_learner/
 │   ├── article_service.py  每日文章生成、校验、缓存与换一篇
 │   ├── dictionary_service.py 划词查词缓存、上下文句子、加入生词本
 │   ├── level_feedback_service.py 阅读反馈重新定级 + 软约束重写文章
+│   ├── reading_quiz_service.py 阅读检测：两轮自适应、盲评、本地后验与调级
+│   ├── level_estimator.py      纯函数等级后验估计器
+│   ├── quiz_calibration.py     难度/技能正确率统计
+│   ├── weekly_review_service.py 每周复盘
 │   ├── srs.py              简化 SM-2 调度 + 复习服务（纯本地，不依赖 AI）
+│   ├── review_help_service.py 复习“忘记/模糊”求助：AI 建议 + 记忆方法
 │   ├── secret_store.py     API Key 的 Windows DPAPI 加解密
 │   └── export_service.py   JSON / CSV 数据导出
 └── gui/                    PySide6 视图层
@@ -98,12 +109,15 @@ src/english_learner/
     ├── onboarding.py       三步配置向导
     ├── assessment_dialog.py 摸底测评弹窗
     ├── level_feedback_dialog.py 阅读感受/调整难度弹窗
+    ├── reading_quiz_dialog.py 阅读检测弹窗（两轮答题 → 讲评/置信度）
+    ├── weekly_review_dialog.py 每周复盘弹窗
+    ├── review_help_dialog.py 复习求助弹窗（原因 → AI 建议）
     ├── main_window.py      侧边导航 + 页面栈
-    ├── widgets/            阅读器正文视图、右侧释义卡
+    ├── widgets/            阅读器正文视图、悬浮释义卡
     └── pages/              今日 / 阅读 / 生词本 / 复习 / 设置（后两者 M2 已接真实数据）
 
 run_app.py                  根目录启动入口（PyCharm 右键运行）
-tests/                      存储、JSON、测评、文章、阅读器、复习、生词本、导出与 GUI 冒烟测试
+tests/                      存储、JSON、测评、文章、阅读器、阅读检测、等级估计、每周复盘、复习、生词本、导出与 GUI 冒烟测试
 docs/english_learner/       产品方向、开发进度与后续交接清单
 ```
 

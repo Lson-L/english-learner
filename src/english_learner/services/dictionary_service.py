@@ -16,12 +16,22 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..models.entities import Word, WordDefinition, now_iso, today_str
+from ..models.entities import (
+    Word,
+    WordDefinition,
+    normalize_cefr_level,
+    now_iso,
+    today_str,
+)
 from ..storage.repositories import StatsRepo, WordRepo
 from .ai_client import AIError
 from .ai_protocol import TextCompleter
 from .json_utils import JsonParseError, as_text, parse_json_object
-from .prompts import PROMPT_VERSION, build_dictionary_messages
+from .prompts import (
+    PROMPT_VERSION,
+    build_dictionary_messages,
+    build_mnemonic_messages,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,17 +114,26 @@ class DictionaryService:
         article_id: int | None = None,
         level: str = "B1",
     ) -> LookupResult:
-        lemma = normalize_lemma(raw_word)
-        if not lemma:
+        """查词；`lemma` 是词典原形，`display_form` 保留文章中的词形。
+
+        缓存顺序：
+        1. word_forms 里有这个“文章词形” → 直接命中（went → go）；
+        2. words 里正好有同名词条 → 命中；
+        3. 都没命中才调用 AI，由 AI 判断原形并生成记忆方法。
+        """
+        surface = normalize_lemma(raw_word)
+        if not surface:
             raise AIError("请选择一个英文单词", "只能查询由字母组成的单词，双击正文即可选中。")
 
-        cached = self._words.get_by_lemma(lemma)
+        cached = self._words.get_by_form(surface)
+        if cached is None:
+            cached = self._words.get_by_lemma(surface)
         if cached is not None:
-            logger.info("查词命中缓存：%s", lemma)
+            logger.info("查词命中缓存：%s → %s", surface, cached.lemma)
             return LookupResult(word=cached, cached=True)
 
         messages = build_dictionary_messages(raw_word.strip(), sentence.strip(), level)
-        logger.info("查词调用 AI prompt=%s word=%s", PROMPT_VERSION, lemma)
+        logger.info("查词调用 AI prompt=%s word=%s", PROMPT_VERSION, surface)
         text = self._client.complete_json(messages, temperature=0.3)
         try:
             data = parse_json_object(text)
@@ -130,16 +149,26 @@ class DictionaryService:
         if not meaning_cn and not meaning_en:
             raise AIError("查词结果缺少释义", "AI 没有返回 meaning_cn / meaning_en，请重试。")
 
+        # AI 给的原形可能缺失或带标点；非法时退回当前词形。
+        lemma = normalize_lemma(as_text(data.get("lemma"))) or surface
+        display_form = (
+            raw_word.strip().strip("\"'“”‘’()[]{}<>.,;:!?…—–-")
+            or as_text(data.get("display_form"))
+            or lemma
+        )
+
         timestamp = now_iso()
         word = Word(
             lemma=lemma,
-            display_form=as_text(data.get("display_form"), raw_word.strip().strip("\"'“”‘’")),
+            display_form=display_form,
             phonetic=as_text(data.get("phonetic")),
             pos=as_text(data.get("pos")),
             meaning_cn=meaning_cn,
             meaning_en=meaning_en,
             example_en=as_text(data.get("example_en")),
             example_cn=as_text(data.get("example_cn")),
+            mnemonic=as_text(data.get("mnemonic")),
+            cefr_band=normalize_cefr_level(data.get("cefr_band")),
             context_sentence=sentence.strip()[:500],
             article_id=article_id,
             status="new",
@@ -148,7 +177,36 @@ class DictionaryService:
             updated_at=timestamp,
         )
         stored = self._words.upsert(word)
+        if stored.id is not None:
+            # 记住“文章词形”和原形，下一次查同一词形不再调用 AI。
+            self._words.remember_form(surface, stored.id)
+            self._words.remember_form(lemma, stored.id)
         return LookupResult(word=stored, cached=False)
+
+    def generate_mnemonic(self, word: Word, level: str = "B1") -> Word:
+        """给已有生词单独生成 / 更新记忆方法（老词条或用户手动触发）。"""
+        if word.id is None:
+            raise ValueError("generate_mnemonic() 需要已落库的词条")
+
+        messages = build_mnemonic_messages(word, level)
+        logger.info("生成记忆方法 prompt=%s word=%s", PROMPT_VERSION, word.lemma)
+        text = self._client.complete_json(messages, temperature=0.5)
+        try:
+            data = parse_json_object(text)
+        except JsonParseError as exc:
+            raise AIError(
+                "记忆方法无法解析",
+                "模型可能没有按 JSON 格式返回，可以重试或换一个模型。",
+            ) from exc
+
+        mnemonic = as_text(data.get("mnemonic"))
+        if not mnemonic:
+            raise AIError("AI 没有返回记忆方法", "请重试，或换一个模型。")
+
+        updated = self._words.update_mnemonic(word.id, mnemonic[:500])
+        if updated is None:
+            raise AIError("词条已不存在", "请刷新生词本后重试。")
+        return updated
 
     # -------------------------------------------------------------- 生词本
     def add_to_vocabulary(
@@ -165,6 +223,10 @@ class DictionaryService:
             raise ValueError("word.id 为空：请先调用 lookup() 再入生词本")
         if article_id is None or end_offset <= start_offset:
             raise ValueError("文章或偏移量不合法")
+
+        # 查词只写缓存；只有走到这里（用户点“加入生词本”）才真正入本。
+        if self._words.mark_in_vocabulary(word.id) is None:
+            raise ValueError("词条不存在，请重新查词")
 
         inserted = self._words.add_highlight(
             article_id=article_id,

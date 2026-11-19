@@ -14,6 +14,7 @@ import logging
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -144,6 +145,10 @@ class ReviewPage(QWidget):
         self._word_label.setWordWrap(True)
         box.addWidget(self._word_label)
 
+        self._lemma_label = QLabel("")
+        self._lemma_label.setObjectName("wordPhonetic")
+        box.addWidget(self._lemma_label)
+
         phonetic_row = QHBoxLayout()
         phonetic_row.setSpacing(10)
         self._phonetic_label = QLabel("")
@@ -179,6 +184,11 @@ class ReviewPage(QWidget):
         self._meaning_en_label.setObjectName("wordMeaningEn")
         self._meaning_en_label.setWordWrap(True)
         answer.addWidget(self._meaning_en_label)
+
+        self._mnemonic_label = QLabel("")
+        self._mnemonic_label.setObjectName("wordMnemonic")
+        self._mnemonic_label.setWordWrap(True)
+        answer.addWidget(self._mnemonic_label)
 
         self._example_en_label = QLabel("")
         self._example_en_label.setObjectName("wordExampleEn")
@@ -325,6 +335,11 @@ class ReviewPage(QWidget):
 
         self._progress_label.setText(f"第 {self._index + 1} / {len(self._session)} 个")
         self._word_label.setText(word.display_form or word.lemma)
+        if word.display_form and word.display_form.lower() != word.lemma.lower():
+            self._lemma_label.setText(f"原形：{word.lemma}")
+        else:
+            self._lemma_label.setText("")
+        self._lemma_label.setVisible(bool(self._lemma_label.text()))
 
         self._phonetic_label.setText(word.phonetic)
         self._phonetic_label.setVisible(bool(word.phonetic))
@@ -340,6 +355,8 @@ class ReviewPage(QWidget):
         self._meaning_cn_label.setVisible(bool(word.meaning_cn))
         self._meaning_en_label.setText(word.meaning_en)
         self._meaning_en_label.setVisible(bool(word.meaning_en))
+        self._mnemonic_label.setText(f"记忆方法：{word.mnemonic}" if word.mnemonic else "")
+        self._mnemonic_label.setVisible(bool(word.mnemonic))
         self._example_en_label.setText(word.example_en)
         self._example_en_label.setVisible(bool(word.example_en))
         self._example_cn_label.setText(word.example_cn)
@@ -363,11 +380,29 @@ class ReviewPage(QWidget):
         self._rating_hint.setVisible(True)
 
     def _rate(self, rating: int) -> None:
-        """记录评分并前进到下一张；只有翻面后才接受评分。"""
+        """记录评分并前进到下一张；只有翻面后才接受评分。
+
+        “忘记 / 模糊”会先弹窗收集原因，再让 AI 给针对性记忆帮助；
+        用户取消弹窗则不记录本次评分，留在当前卡片。
+        """
         if not self._revealed or self._current is None:
             return
+
+        note = ""
+        advice = ""
+        if rating in (RATING_FORGOT, RATING_VAGUE):
+            help_result = self._collect_review_help(rating)
+            if help_result is None:
+                return
+            note, advice = help_result
+
         try:
-            self._context.review_service().review(self._current, rating)
+            self._context.review_service().review(
+                self._current,
+                rating,
+                note=note,
+                advice=advice,
+            )
         except Exception as exc:  # noqa: BLE001 - 本地写库失败不能让界面崩掉
             logger.exception("复习评分失败")
             set_status(self._status, f"保存复习进度失败：{exc}", "error")
@@ -382,6 +417,32 @@ class ReviewPage(QWidget):
             self._finish_session()
         else:
             self._show_current()
+
+    def _collect_review_help(self, rating: int) -> tuple[str, str] | None:
+        """弹出复习帮助框，返回 (原因, AI 建议)；None 表示用户取消本次评分。
+
+        单独抽成方法便于单测替换：测试里直接返回 ("", "") 即可跳过模态框。
+        """
+        if self._current is None:
+            return None
+
+        # 延迟导入：review_help_dialog 依赖 pages.common，而 pages/__init__ 又会
+        # 导入本模块，放在模块顶层会形成循环导入。
+        from ..review_help_dialog import ReviewHelpDialog
+
+        dialog = ReviewHelpDialog(self._context, self._current, rating, parent=self)
+        # 弹窗打开期间禁用 1~4 快捷键，避免输入原因时误触发评分。
+        for shortcut in self._shortcuts:
+            shortcut.setEnabled(False)
+        try:
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        finally:
+            for shortcut in self._shortcuts:
+                shortcut.setEnabled(True)
+
+        if not accepted:
+            return None
+        return dialog.result_reason, dialog.result_advice
 
     def _finish_session(self) -> None:
         self._current = None

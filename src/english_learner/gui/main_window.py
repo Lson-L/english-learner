@@ -34,6 +34,7 @@ from .assessment_dialog import AssessmentDialog
 from .onboarding import OnboardingDialog
 from .pages import ReaderPage, ReviewPage, SettingsPage, TodayPage, VocabularyPage
 from .theme import build_stylesheet
+from .weekly_review_dialog import WeeklyReviewDialog
 from .workers import TaskWorker
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,7 @@ class MainWindow(QMainWindow):
         self._today_page.read_requested.connect(lambda: self._go(PAGE_READER))
         self._today_page.assessment_requested.connect(self.run_assessment)
         self._today_page.review_requested.connect(lambda: self._go(PAGE_REVIEW))
+        self._today_page.weekly_review_requested.connect(self.open_weekly_review)
 
         self._pages: tuple[QWidget, ...] = (
             self._today_page,
@@ -138,7 +140,7 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
 
-        footer = QLabel(f"M2 · v{__version__}\n数据仅保存在本机")
+        footer = QLabel(f"M3.11 · v{__version__}\n数据仅保存在本机")
         footer.setObjectName("sidebarFooter")
         footer.setWordWrap(True)
         layout.addWidget(footer)
@@ -195,6 +197,13 @@ class MainWindow(QMainWindow):
             self._assessment_dialog = None
         if accepted and dialog.result_profile is not None:
             self._today_page.refresh()
+
+    # ---------------------------------------------------------------- 复盘
+    def open_weekly_review(self) -> None:
+        """打开每周复盘；用户应用建议后首页立即刷新等级。"""
+        dialog = WeeklyReviewDialog(self._context, parent=self)
+        dialog.exec()
+        self._today_page.refresh()
 
     # -------------------------------------------------------------- 外观变更
     def _apply_english_font(self, key: str) -> None:

@@ -1,0 +1,988 @@
+"""阅读检测测试：自适应两阶段、本地后验、盲评、产出题与练习模式。"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from english_learner.models.entities import (
+    Article,
+    Profile,
+    QuizQuestion,
+    ReadingQuiz,
+    now_iso,
+)
+from english_learner.services.ai_client import AIError
+from english_learner.services.quiz_calibration import (
+    difficulty_stats,
+    question_outcomes,
+    skill_stats,
+)
+from english_learner.services.reading_quiz_service import (
+    EvidenceSummary,
+    InvalidQuizError,
+    QuizOutcome,
+    ReadingQuizService,
+    apply_level_policy,
+    choose_boundary_level,
+    decide_recommended_level,
+    parse_question_review,
+    parse_quiz_questions,
+    parse_stage_one_questions,
+    parse_stage_two_questions,
+    score_quiz_evidence,
+    shuffle_question_options,
+)
+from english_learner.storage.db import Database
+
+TODAY = "2026-11-19"
+ARTICLE_TITLE = "The Quiet Power of Small Habits"
+ARTICLE_CONTENT = (
+    "Small habits are easy to start and easy to repeat. "
+    "They add up over time and quietly change our lives."
+)
+
+
+# ------------------------------------------------------------------ 桩模型
+class RoutingCompleter:
+    """按 prompt 内容路由到不同预设回复，支持队列与异常。"""
+
+    def __init__(
+        self,
+        *,
+        stage_one: object = None,
+        stage_two: object = None,
+        review: object = None,
+        blind: object = None,
+        grading: object = None,
+    ) -> None:
+        self.replies = {
+            "stage_one": stage_one if stage_one is not None else stage_one_payload(),
+            "stage_two": stage_two if stage_two is not None else stage_two_payload(),
+            "review": review if review is not None else review_payload(),
+            "blind": blind if blind is not None else blind_payload("B1"),
+            "grading": grading if grading is not None else grading_payload(),
+        }
+        self.calls: list[str] = []
+        self.messages: list[list[dict[str, str]]] = []
+
+    def complete_json(self, messages, *, temperature=None, max_tokens=None) -> str:
+        content = messages[-1]["content"]
+        self.messages.append(messages)
+        if "审核下面这组阅读题" in content:
+            kind = "review"
+        elif "不会看到学习者的当前等级" in content:
+            kind = "blind"
+        elif "边界探测题" in content:
+            kind = "stage_two"
+        elif "逐题用中文讲评" in content:
+            kind = "grading"
+        else:
+            kind = "stage_one"
+        self.calls.append(kind)
+        reply = self.replies[kind]
+        if isinstance(reply, list):
+            reply = reply.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return str(reply)
+
+
+def question_payload(
+    count: int,
+    *,
+    difficulty: str,
+    answer_index: int = 1,
+    start: int = 1,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "kind": "choice",
+            "prompt": f"Question {index} about the passage?",
+            "options": ["Option A", "Option B", "Option C", "Option D"],
+            "answer_index": answer_index,
+            "skill": "detail" if index % 2 else "inference",
+            "difficulty": difficulty,
+            "explanation": f"第 {index} 题的解析",
+        }
+        for index in range(start, start + count)
+    ]
+
+
+def stage_one_payload(count: int = 3, difficulty: str = "B1") -> str:
+    return json.dumps(
+        {"questions": question_payload(count, difficulty=difficulty)},
+        ensure_ascii=False,
+    )
+
+
+def stage_two_payload(
+    target: str = "B2",
+    *,
+    difficulty: str = "B2",
+) -> str:
+    questions = question_payload(2, difficulty=difficulty, start=4)
+    questions.append(
+        {
+            "kind": "short",
+            "prompt": "In 1-2 sentences, summarize the main idea.",
+            "skill": "writing",
+            "difficulty": difficulty,
+            "reference_answer": "Small habits add up over time.",
+            "explanation": "评分要点：抓住习惯累积的观点。",
+        }
+    )
+    questions.append(
+        {
+            "kind": "short",
+            "prompt": "Rewrite the sentence in your own words.",
+            "skill": "rewrite",
+            "difficulty": target,
+            "reference_answer": "Small habits gradually change our lives.",
+            "explanation": "评分要点：意思保留、语法、用词。",
+        }
+    )
+    return json.dumps({"questions": questions}, ensure_ascii=False)
+
+
+def review_payload(invalid: tuple[int, ...] = ()) -> str:
+    return json.dumps({"invalid_indices": list(invalid)}, ensure_ascii=False)
+
+
+def blind_payload(cefr: str = "B1") -> str:
+    return json.dumps({"cefr": cefr, "reason": "根据作答判断"}, ensure_ascii=False)
+
+
+def grading_payload(
+    *,
+    production_scores: tuple[int, int] = (1, 1),
+    error_types: list[str] | None = None,
+    explanations: list[str] | None = None,
+    **overrides,
+) -> str:
+    data = {
+        "vocab_estimate": 4200,
+        "strengths": ["细节理解"],
+        "weaknesses": ["推断题"],
+        "comment": "整体理解不错。",
+        "explanations": explanations or [f"讲评第 {index} 题" for index in range(1, 8)],
+        "error_types": error_types or ["none"] * 7,
+        "production_scores": list(production_scores),
+        "production_feedbacks": ["短答基本达意。", "改写保留了意思。"],
+    }
+    data.update(overrides)
+    return json.dumps(data, ensure_ascii=False)
+
+
+# ------------------------------------------------------------------ fixtures
+@pytest.fixture
+def db(tmp_path: Path):
+    database = Database(tmp_path / "data.db")
+    yield database
+    database.close()
+
+
+@pytest.fixture
+def profile(db: Database) -> Profile:
+    return db.profiles.save(
+        Profile(
+            cefr_level="B1",
+            vocab_estimate=3800,
+            strengths=("阅读理解",),
+            weaknesses=("学术词汇",),
+            assessed_at="2026-11-01T10:00:00",
+        )
+    )
+
+
+def make_article(db: Database, day: str = TODAY, level: str = "B1") -> Article:
+    return db.articles.insert(
+        Article(
+            article_date=day,
+            title=ARTICLE_TITLE,
+            content=ARTICLE_CONTENT,
+            level=level,
+            topic="psychology",
+            word_count=18,
+            created_at=now_iso(),
+        )
+    )
+
+
+def make_service(
+    db: Database,
+    fake: RoutingCompleter,
+    *,
+    shuffle_options: bool = False,
+) -> ReadingQuizService:
+    # 默认关闭选项打乱，测试里可以稳定地用固定下标作答；
+    # 打乱逻辑有独立的纯函数测试与开启后的映射测试。
+    return ReadingQuizService(
+        fake,
+        db.quizzes,
+        db.profiles,
+        db.evidence,
+        db.reviews,
+        shuffle_options=shuffle_options,
+    )
+
+
+def complete_quiz(
+    service: ReadingQuizService,
+    article: Article,
+    *,
+    level: str = "B1",
+    stage_one_answers: tuple[int, int, int] = (1, 1, 1),
+    all_answers: tuple[int, int, int, int, int] = (1, 1, 1, 1, 1),
+    production_texts: tuple[str, str] = ("Habits add up.", "Small habits change lives."),
+):
+    quiz = service.get_or_create(article, level)
+    quiz = service.advance_stage(article, quiz, stage_one_answers)
+    return service, quiz, all_answers, production_texts
+
+
+def make_quiz(
+    level: str = "B1",
+    difficulties: tuple[str, ...] = ("A2", "B1", "B1", "B2", "C1"),
+    answer_index: int = 1,
+) -> ReadingQuiz:
+    questions = [
+        QuizQuestion(
+            prompt=f"Question {index}?",
+            options=("A", "B", "C", "D"),
+            answer_index=answer_index,
+            skill="detail",
+            difficulty=difficulty,
+        )
+        for index, difficulty in enumerate(difficulties, start=1)
+    ]
+    questions.append(
+        QuizQuestion(
+            prompt="Summarize the passage.",
+            skill="writing",
+            difficulty=level,
+            kind="short",
+            reference_answer="Small habits add up.",
+        )
+    )
+    return ReadingQuiz(
+        id=1,
+        article_id=1,
+        article_date=TODAY,
+        level=level,
+        questions=tuple(questions),
+        created_at=now_iso(),
+    )
+
+
+# ------------------------------------------------------------------ 解析
+def test_parse_stage_one_requires_three_choices() -> None:
+    questions = parse_stage_one_questions(stage_one_payload(), "B1")
+    assert len(questions) == 3
+    assert all(not question.is_short for question in questions)
+
+    with pytest.raises(InvalidQuizError, match="3 道"):
+        parse_stage_one_questions(stage_one_payload(count=2), "B1")
+
+
+def test_parse_stage_two_requires_two_choices_and_two_productions() -> None:
+    questions = parse_stage_two_questions(stage_two_payload("B2"), "B1", "B2")
+
+    assert len(questions) == 4
+    assert sum(1 for question in questions if question.is_short) == 2
+    assert questions[0].difficulty == "B2"
+    assert {question.skill for question in questions if question.is_short} == {
+        "writing",
+        "rewrite",
+    }
+
+    only_choices = json.dumps(
+        {"questions": question_payload(2, difficulty="B2")}, ensure_ascii=False
+    )
+    with pytest.raises(InvalidQuizError, match="产出题"):
+        parse_stage_two_questions(only_choices, "B1", "B2")
+
+
+def test_parse_treats_rewrite_kind_as_production() -> None:
+    payload = json.loads(stage_two_payload("B2"))
+    payload["questions"][3]["kind"] = "rewrite"
+
+    questions = parse_stage_two_questions(json.dumps(payload, ensure_ascii=False), "B1", "B2")
+
+    assert sum(1 for question in questions if question.is_short) == 2
+
+
+def test_parse_question_review_filters_bad_indices() -> None:
+    assert parse_question_review('{"invalid_indices": [0, 2, 99, "x"]}', 4) == (0, 2)
+    assert parse_question_review('{"invalid": []}', 4) == ()
+    with pytest.raises(InvalidQuizError):
+        parse_question_review("不是 JSON", 4)
+
+
+def test_parse_legacy_quiz_still_works() -> None:
+    payload = json.dumps(
+        {
+            "questions": question_payload(5, difficulty="B1")
+            + [
+                {
+                    "kind": "short",
+                    "prompt": "Summarize it.",
+                    "skill": "writing",
+                    "difficulty": "B1",
+                    "reference_answer": "A reference.",
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    questions = parse_quiz_questions(payload, "B1")
+    assert len(questions) == 6
+    assert questions[-1].is_short is True
+
+
+# ------------------------------------------------------------------ 证据与策略
+def test_evidence_rewards_hard_correct_and_punishes_easy_wrong() -> None:
+    quiz = make_quiz(difficulties=("A2", "B1", "B2", "C1", "B1"))
+
+    strong = score_quiz_evidence("B1", quiz, (1, 1, 1, 1, 1), short_answer_score=1)
+    weak = score_quiz_evidence("B1", quiz, (0, 1, 1, 0, 1), short_answer_score=0)
+
+    assert strong.ratio > 0
+    assert strong.direction == "up"
+    assert weak.ratio < strong.ratio
+    assert weak.direction in {"keep", "down"}
+
+
+def test_single_wrong_question_weights_by_difficulty() -> None:
+    quiz = make_quiz(difficulties=("A2", "B1", "B2", "C1", "B1"))
+
+    easy_wrong = score_quiz_evidence("B1", quiz, (0, 1, 1, 1, 1), short_answer_score=1)
+    same_wrong = score_quiz_evidence("B1", quiz, (1, 0, 1, 1, 1), short_answer_score=1)
+    hard_wrong = score_quiz_evidence("B1", quiz, (1, 1, 1, 0, 1), short_answer_score=1)
+
+    assert easy_wrong.details[0] == pytest.approx(-1.5)
+    assert same_wrong.details[1] == pytest.approx(-1.0)
+    assert hard_wrong.details[3] == pytest.approx(0.0)
+    assert easy_wrong.details[0] < same_wrong.details[1] < hard_wrong.details[3]
+
+
+def test_decide_recommended_level_legacy_rules() -> None:
+    up = score_quiz_evidence("B1", make_quiz(), (1, 1, 1, 1, 1), short_answer_score=1)
+    down = score_quiz_evidence("B1", make_quiz(), (0, 0, 0, 0, 0), short_answer_score=0)
+    neutral = score_quiz_evidence(
+        "B1", make_quiz(difficulties=("B1", "B1", "B1", "B1", "B1")), (1, 0, 1, 0, 1)
+    )
+
+    assert decide_recommended_level("B1", "B1", up) == "B2"
+    assert decide_recommended_level("B1", "C1", neutral) == "B2"
+    assert decide_recommended_level("B1", "B1", down) == "A2"
+    moderate_down = EvidenceSummary(ratio=-0.4, direction="down", points=-2.4, max_points=6)
+    assert decide_recommended_level("B1", "C1", moderate_down) == "B1"
+
+
+def test_apply_level_policy_requires_two_up_signals() -> None:
+    first = apply_level_policy("B1", "B2", "", 0)
+    assert first.applied_level == "B1"
+    assert first.pending_level == "B2"
+    assert first.pending_count == 1
+    assert first.waiting is True
+
+    second = apply_level_policy("B1", "B2", first.pending_level, first.pending_count)
+    assert second.applied_level == "B2"
+    assert second.pending_level == ""
+    assert second.changed is True
+
+    downgrade = apply_level_policy("B1", "A2", "B2", 1)
+    assert downgrade.applied_level == "A2"
+    assert downgrade.changed is True
+
+
+def test_shuffle_options_remaps_answer_index() -> None:
+    class ReverseRng:
+        @staticmethod
+        def shuffle(items: list[int]) -> None:
+            items.reverse()
+
+    question = QuizQuestion(
+        prompt="Q?",
+        options=("A", "B", "C", "D"),
+        answer_index=1,
+    )
+    shuffled = shuffle_question_options(question, ReverseRng())
+
+    assert shuffled.options == ("D", "C", "B", "A")
+    assert shuffled.answer_index == 2
+    assert shuffled.options[shuffled.answer_index] == "B"
+
+    production = QuizQuestion(prompt="Write.", kind="short")
+    assert shuffle_question_options(production) == production
+
+
+def test_service_can_shuffle_options_without_changing_correct_text(
+    db: Database,
+) -> None:
+    article = make_article(db)
+    fake = RoutingCompleter()
+    service = make_service(db, fake, shuffle_options=True)
+
+    quiz = service.get_or_create(article, "B1")
+
+    for question in quiz.choice_questions:
+        assert question.options[question.answer_index] == "Option B"
+        assert set(question.options) == {"Option A", "Option B", "Option C", "Option D"}
+
+
+def test_boundary_level_uses_stage_one_accuracy() -> None:
+    assert choose_boundary_level("B1", 3, 3) == "B2"
+    assert choose_boundary_level("B1", 2, 3) == "B2"
+    assert choose_boundary_level("B1", 1, 3) == "A2"
+    assert choose_boundary_level("B1", 0, 3) == "A2"
+    assert choose_boundary_level("C1", 3, 3) == "C1"
+    assert choose_boundary_level("A2", 0, 3) == "A2"
+
+
+# ------------------------------------------------------------------ 出题 / 缓存
+def test_get_or_create_generates_stage_one_and_reviews(db: Database) -> None:
+    article = make_article(db)
+    fake = RoutingCompleter()
+    service = make_service(db, fake)
+
+    first = service.get_or_create(article, "B1")
+    second = service.get_or_create(article, "B1")
+
+    assert fake.calls == ["stage_one", "review"]
+    assert first.id is not None and second.id == first.id
+    assert first.stage == 1
+    assert first.choice_total == 3
+    assert first.short_total == 0
+    assert first.completed is False
+
+
+def test_get_or_create_retries_when_stage_one_invalid(db: Database) -> None:
+    article = make_article(db)
+    fake = RoutingCompleter(stage_one=["垃圾", stage_one_payload()])
+    service = make_service(db, fake)
+
+    quiz = service.get_or_create(article, "B1")
+
+    assert quiz.choice_total == 3
+    assert fake.calls == ["stage_one", "stage_one", "review"]
+
+
+def test_question_review_can_drop_and_regenerate(db: Database) -> None:
+    article = make_article(db)
+    # 第一次审核把 3 道题全判无效，第二次审核通过。
+    fake = RoutingCompleter(
+        stage_one=[stage_one_payload(), stage_one_payload()],
+        review=[review_payload((0, 1, 2)), review_payload()],
+    )
+    service = make_service(db, fake)
+
+    quiz = service.get_or_create(article, "B1")
+
+    assert quiz.choice_total == 3
+    assert fake.calls.count("stage_one") == 2
+
+
+def test_get_or_create_requires_saved_article(db: Database) -> None:
+    article = Article(
+        article_date=TODAY,
+        title="Unsaved",
+        content=ARTICLE_CONTENT,
+        level="B1",
+        word_count=18,
+    )
+    with pytest.raises(AIError, match="保存"):
+        make_service(db, RoutingCompleter()).get_or_create(article, "B1")
+
+
+def test_advance_stage_appends_boundary_questions(db: Database) -> None:
+    article = make_article(db)
+    fake = RoutingCompleter()
+    service = make_service(db, fake)
+
+    quiz = service.get_or_create(article, "B1")
+    advanced = service.advance_stage(article, quiz, (1, 1, 1))
+
+    assert advanced.stage == 2
+    assert advanced.choice_total == 5
+    assert advanced.short_total == 2
+    assert advanced.answers == (1, 1, 1)
+    assert "stage_two" in fake.calls
+    assert advanced.questions[-2].skill == "writing"
+    assert advanced.questions[-1].skill == "rewrite"
+
+    again = service.advance_stage(article, advanced, (1, 1, 1))
+    assert again.questions == advanced.questions
+
+
+def test_stage_two_missing_difficulty_falls_back_to_boundary_level() -> None:
+    payload = json.loads(stage_two_payload("B2"))
+    for entry in payload["questions"]:
+        entry.pop("difficulty", None)
+
+    questions = parse_stage_two_questions(json.dumps(payload, ensure_ascii=False), "B1", "B2")
+
+    assert all(question.difficulty == "B2" for question in questions)
+
+
+def test_advance_stage_saves_answers_before_generation(db: Database) -> None:
+    article = make_article(db)
+    # 第二轮两次都返回垃圾，generate_stage_two 最终抛 AIError。
+    fake = RoutingCompleter(stage_two=["垃圾", "垃圾"])
+    service = make_service(db, fake)
+    quiz = service.get_or_create(article, "B1")
+
+    with pytest.raises(AIError, match="第二轮"):
+        service.advance_stage(article, quiz, (1, 0, 1))
+
+    stored = db.quizzes.get_by_article(article.id)
+    assert stored is not None
+    assert stored.stage == 1
+    assert stored.answers == (1, 0, 1)
+
+
+def test_advance_stage_requires_all_answers(db: Database) -> None:
+    article = make_article(db)
+    service = make_service(db, RoutingCompleter())
+    quiz = service.get_or_create(article, "B1")
+
+    with pytest.raises(AIError, match="选择题"):
+        service.advance_stage(article, quiz, (1, -1, 1))
+
+
+def test_stage_two_targets_lower_level_after_poor_stage_one(db: Database) -> None:
+    article = make_article(db)
+    fake = RoutingCompleter()
+    service = make_service(db, fake)
+
+    quiz = service.get_or_create(article, "B1")
+    service.advance_stage(article, quiz, (0, 0, 1))
+
+    stage_two_prompt = next(
+        messages[-1]["content"]
+        for messages in fake.messages
+        if "边界探测题" in messages[-1]["content"]
+    )
+    assert "A2" in stage_two_prompt
+
+
+# ------------------------------------------------------------------ 提交
+def test_submit_records_posterior_evidence_and_productions(db: Database, profile: Profile) -> None:
+    article = make_article(db)
+    fake = RoutingCompleter()
+    service = make_service(db, fake)
+    quiz = service.get_or_create(article, "B1")
+    quiz = service.advance_stage(article, quiz, (1, 1, 1))
+
+    outcome = service.submit(
+        article,
+        quiz,
+        (1, 1, 1, 1, 1),
+        profile,
+        production_texts=("Habits add up.", "Small habits change lives."),
+        self_report="ok",
+    )
+
+    assert isinstance(outcome, QuizOutcome)
+    assert outcome.score == 7
+    assert outcome.total == 7
+    assert outcome.quiz.production_score == 2
+    assert outcome.quiz.stage == 2
+    assert outcome.quiz.completed is True
+    assert outcome.quiz.level_confidence > 0
+    assert len(outcome.quiz.posterior) == 4
+    assert outcome.posterior is not None
+    assert outcome.confidence >= 0.6
+    # 第一次向上证据只记录待定
+    assert outcome.previous_level == "B1"
+    assert outcome.profile.cefr_level == "B1"
+    assert outcome.recommended_level == "B2"
+    assert outcome.pending_level == "B2"
+    assert outcome.pending_count == 1
+
+    stored_profile = db.profiles.get()
+    assert stored_profile is not None
+    assert stored_profile.level_confidence > 0
+    assert "后验" in stored_profile.level_updated_reason
+    assert db.evidence.count() == 1
+    evidence = db.evidence.list_recent(1)[0]
+    assert evidence.source == "quiz"
+    assert evidence.quiz_id == quiz.id
+    assert evidence.confidence > 0
+    # 盲评 B1 与当前等级相同，不产生观测：5 选择 + 2 产出。
+    assert len(evidence.observations) == 7
+    assert evidence.evidence_date == TODAY
+
+    stored_quiz = db.quizzes.get_by_article(article.id)
+    assert stored_quiz is not None
+    assert stored_quiz.productions[0].text == "Habits add up."
+    assert stored_quiz.productions[1].score == 1
+
+
+def test_two_up_signals_promote_level(db: Database, profile: Profile) -> None:
+    fake = RoutingCompleter()
+    service = make_service(db, fake)
+    first_article = make_article(db, "2026-11-19")
+    second_article = make_article(db, "2026-11-20")
+
+    _, first_quiz, answers, texts = complete_quiz(service, first_article)
+    first = service.submit(first_article, first_quiz, answers, profile, production_texts=texts)
+    assert first.profile.cefr_level == "B1"
+    assert first.pending_count == 1
+
+    _, second_quiz, answers, texts = complete_quiz(service, second_article)
+    second = service.submit(
+        second_article, second_quiz, answers, first.profile, production_texts=texts
+    )
+
+    assert second.profile.cefr_level == "B2"
+    assert second.level_changed is True
+    assert second.pending_level == ""
+    assert second.quiz.result_level == "B2"
+
+    stored = db.profiles.get()
+    assert stored is not None and stored.cefr_level == "B2"
+
+
+def test_low_score_downgrades_immediately(db: Database, profile: Profile) -> None:
+    article = make_article(db)
+    fake = RoutingCompleter(
+        stage_two=stage_two_payload("A2", difficulty="A2"),
+        grading=grading_payload(production_scores=(0, 0)),
+    )
+    service = make_service(db, fake)
+    quiz = service.get_or_create(article, "B1")
+    quiz = service.advance_stage(article, quiz, (0, 0, 0))
+
+    outcome = service.submit(
+        article,
+        quiz,
+        (0, 0, 0, 0, 0),
+        profile,
+        production_texts=("", ""),
+    )
+
+    assert outcome.score == 0
+    assert outcome.recommended_level == "A2"
+    assert outcome.profile.cefr_level == "A2"
+    assert outcome.level_changed is True
+    assert outcome.pending_level == ""
+
+
+def test_same_day_second_quiz_is_practice_mode(db: Database, profile: Profile) -> None:
+    fake = RoutingCompleter()
+    service = make_service(db, fake)
+
+    first_article = make_article(db, "2026-11-19")
+    _, first_quiz, answers, texts = complete_quiz(service, first_article)
+    first = service.submit(first_article, first_quiz, answers, profile, production_texts=texts)
+    assert first.pending_level == "B2"
+
+    # 同一天换一篇再来一次：只练手，不累计证据、不改等级。
+    second_article = db.articles.replace_by_date(
+        Article(
+            article_date="2026-11-19",
+            title="Another Article",
+            content=ARTICLE_CONTENT,
+            level="B1",
+            word_count=18,
+            created_at=now_iso(),
+        )
+    )
+    _, second_quiz, answers, texts = complete_quiz(service, second_article)
+    second = service.submit(
+        second_article,
+        second_quiz,
+        answers,
+        first.profile,
+        production_texts=texts,
+    )
+
+    assert second.practice_mode is True
+    assert second.profile.cefr_level == "B1"
+    assert second.quiz.practice_mode is True
+    assert second.profile.pending_level == "B2"
+    assert second.profile.pending_count == 1
+    assert second.quiz.result_level == "B1"
+    # 练习模式不写等级证据，后续正式检测不会被它影响
+    assert db.evidence.count() == 1
+
+
+def test_stage_one_cannot_be_submitted_directly(db: Database, profile: Profile) -> None:
+    article = make_article(db)
+    fake = RoutingCompleter()
+    service = make_service(db, fake)
+    quiz = service.get_or_create(article, "B1")
+
+    with pytest.raises(AIError, match="第一轮"):
+        service.submit(article, quiz, (1, 1, 1), profile, production_texts=("a", "b"))
+
+
+def test_empty_production_forces_zero(db: Database, profile: Profile) -> None:
+    article = make_article(db)
+    fake = RoutingCompleter(grading=grading_payload(production_scores=(1, 1)))
+    service = make_service(db, fake)
+    quiz = service.get_or_create(article, "B1")
+    quiz = service.advance_stage(article, quiz, (1, 1, 1))
+
+    outcome = service.submit(
+        article,
+        quiz,
+        (1, 1, 1, 1, 1),
+        profile,
+        production_texts=("Habits add up.", ""),
+    )
+
+    assert outcome.quiz.productions[0].score == 1
+    assert outcome.quiz.productions[1].score == 0
+    assert outcome.score == 6
+
+
+def test_error_types_are_aligned_and_correct_is_none(db: Database, profile: Profile) -> None:
+    article = make_article(db)
+    fake = RoutingCompleter(
+        grading=grading_payload(
+            error_types=[
+                "vocabulary",
+                "vocabulary",
+                "inference",
+                "detail",
+                "careless",
+                "short_answer",
+                "short_answer",
+            ]
+        )
+    )
+    service = make_service(db, fake)
+    quiz = service.get_or_create(article, "B1")
+    quiz = service.advance_stage(article, quiz, (1, 1, 1))
+
+    outcome = service.submit(
+        article,
+        quiz,
+        (1, 0, 1, 1, 1),
+        profile,
+        production_texts=("Habits add up.", "Small habits change lives."),
+    )
+
+    assert len(outcome.quiz.error_types) == 7
+    assert outcome.quiz.error_types[0] == "none"
+    assert outcome.quiz.error_types[1] == "vocabulary"
+    assert outcome.quiz.error_types[2] == "none"
+    assert outcome.quiz.error_types[-1] == "short_answer"
+
+
+def test_bad_grading_json_keeps_profile_and_allows_retry(db: Database, profile: Profile) -> None:
+    article = make_article(db)
+    fake = RoutingCompleter(grading=["不是 JSON", grading_payload()])
+    service = make_service(db, fake)
+    quiz = service.get_or_create(article, "B1")
+    quiz = service.advance_stage(article, quiz, (1, 1, 1))
+
+    with pytest.raises(AIError, match="讲评"):
+        service.submit(
+            article,
+            quiz,
+            (1, 1, 1, 1, 1),
+            profile,
+            production_texts=("Habits add up.", "Small habits change lives."),
+        )
+
+    stored = db.profiles.get()
+    assert stored is not None and stored.cefr_level == "B1"
+    stored_quiz = db.quizzes.get_by_article(article.id)
+    assert stored_quiz is not None and stored_quiz.completed is False
+
+    retried = service.submit(
+        article,
+        stored_quiz,
+        (1, 1, 1, 1, 1),
+        profile,
+        production_texts=("Habits add up.", "Small habits change lives."),
+    )
+    assert retried.quiz.completed is True
+
+
+def test_blind_suggestion_affects_current_but_not_stored_history(
+    db: Database, profile: Profile
+) -> None:
+    article = make_article(db)
+    fake = RoutingCompleter(blind=blind_payload("B2"))
+    service = make_service(db, fake)
+    quiz = service.get_or_create(article, "B1")
+    quiz = service.advance_stage(article, quiz, (1, 1, 1))
+
+    outcome = service.submit(
+        article,
+        quiz,
+        (1, 1, 1, 1, 1),
+        profile,
+        production_texts=("Habits add up.", "Small habits change lives."),
+    )
+
+    assert outcome.blind_level == "B2"
+    evidence = db.evidence.list_recent(1)[0]
+    # 盲评只影响本次后验，不写入证据表，避免通过历史回放累积权重。
+    assert all(item.source != "blind" for item in evidence.observations)
+    assert len(evidence.observations) == 7  # 5 选择 + 2 产出
+
+
+def test_blind_failure_does_not_block_local_posterior(db: Database, profile: Profile) -> None:
+    article = make_article(db)
+    fake = RoutingCompleter(blind=AIError("网关超时", "稍后重试"))
+    service = make_service(db, fake)
+    quiz = service.get_or_create(article, "B1")
+    quiz = service.advance_stage(article, quiz, (1, 1, 1))
+
+    outcome = service.submit(
+        article,
+        quiz,
+        (1, 1, 1, 1, 1),
+        profile,
+        production_texts=("Habits add up.", "Small habits change lives."),
+    )
+
+    assert outcome.blind_level == ""
+    assert outcome.quiz.completed is True
+    assert outcome.posterior is not None
+
+
+def test_completed_quiz_cannot_be_resubmitted(db: Database, profile: Profile) -> None:
+    article = make_article(db)
+    fake = RoutingCompleter()
+    service = make_service(db, fake)
+    quiz = service.get_or_create(article, "B1")
+    quiz = service.advance_stage(article, quiz, (1, 1, 1))
+    completed = service.submit(
+        article,
+        quiz,
+        (1, 1, 1, 1, 1),
+        profile,
+        production_texts=("Habits add up.", "Small habits change lives."),
+    ).quiz
+
+    with pytest.raises(AIError, match="已经完成"):
+        service.submit(
+            article,
+            completed,
+            (1, 1, 1, 1, 1),
+            profile,
+            production_texts=("Habits add up.", "Small habits change lives."),
+        )
+
+
+def test_missing_fields_keep_old_profile_details(db: Database, profile: Profile) -> None:
+    article = make_article(db)
+    fake = RoutingCompleter(grading=json.dumps({"comment": "保持"}))
+    service = make_service(db, fake)
+    quiz = service.get_or_create(article, "B1")
+    quiz = service.advance_stage(article, quiz, (1, 1, 1))
+
+    outcome = service.submit(
+        article,
+        quiz,
+        (1, 1, 1, 1, 1),
+        profile,
+        production_texts=("Habits add up.", "Small habits change lives."),
+    )
+
+    assert outcome.profile.vocab_estimate == 3800
+    assert outcome.profile.strengths == ("阅读理解",)
+    assert outcome.profile.weaknesses == ("学术词汇",)
+    assert len(outcome.quiz.explanations) == 7
+
+
+def test_legacy_single_stage_quiz_can_still_submit(db: Database, profile: Profile) -> None:
+    """升级前的“5 选择 + 1 短答”旧题（stage 默认 2）仍可正常提交。"""
+    article = make_article(db)
+    legacy = db.quizzes.insert(replace(make_quiz(level="B1"), id=None, article_id=article.id))
+    assert legacy.stage == 2
+    assert legacy.choice_total == 5
+    assert legacy.short_total == 1
+
+    fake = RoutingCompleter(
+        grading=json.dumps(
+            {
+                "vocab_estimate": 4000,
+                "strengths": ["细节理解"],
+                "weaknesses": ["推断题"],
+                "comment": "",
+                "explanations": ["讲评"] * 6,
+                "error_types": ["none"] * 6,
+                "production_scores": [1],
+                "production_feedbacks": ["短答达意。"],
+            },
+            ensure_ascii=False,
+        )
+    )
+    service = make_service(db, fake)
+
+    outcome = service.submit(
+        article,
+        legacy,
+        (1, 1, 1, 1, 1),
+        profile,
+        short_answer_text="Habits add up.",
+    )
+
+    assert outcome.quiz.completed is True
+    assert outcome.quiz.total == 6
+    assert outcome.quiz.short_total == 1
+    assert outcome.quiz.production_score == 1
+    assert outcome.quiz.productions[0].text == "Habits add up."
+
+
+def test_history_prompt_contains_previous_quiz(db: Database, profile: Profile) -> None:
+    fake = RoutingCompleter()
+    service = make_service(db, fake)
+    first_article = make_article(db, "2026-11-18")
+    _, first_quiz, answers, texts = complete_quiz(service, first_article)
+    service.submit(first_article, first_quiz, answers, profile, production_texts=texts)
+
+    second_article = make_article(db, "2026-11-19")
+    _, second_quiz, answers, texts = complete_quiz(service, second_article)
+    service.submit(
+        second_article,
+        second_quiz,
+        answers,
+        db.profiles.get(),
+        production_texts=texts,
+    )
+
+    grading_prompts = [
+        messages[-1]["content"]
+        for messages in fake.messages
+        if "逐题用中文讲评" in messages[-1]["content"]
+    ]
+    assert grading_prompts
+    assert "最近检测历史" in grading_prompts[-1]
+    assert ARTICLE_TITLE in grading_prompts[-1]
+
+
+# ------------------------------------------------------------------ 本地统计
+def test_quiz_calibration_groups_by_difficulty_and_skill() -> None:
+    completed = ReadingQuiz(
+        article_id=1,
+        article_date=TODAY,
+        level="B1",
+        questions=make_quiz(difficulties=("A2", "B1", "B2", "C1", "B1")).questions,
+        answers=(1, 0, 1, 0, 1),
+        completed_at=now_iso(),
+    )
+
+    outcomes = question_outcomes(completed)
+    assert len(outcomes) == 6
+    assert outcomes[0].correct is True
+    assert outcomes[1].correct is False
+
+    by_difficulty = {stat.level: stat for stat in difficulty_stats([completed])}
+    assert by_difficulty["A2"].total == 1
+    assert by_difficulty["C1"].correct == 0
+    assert sum(stat.total for stat in by_difficulty.values()) == 6
+
+    by_skill = {stat.skill: stat for stat in skill_stats([completed])}
+    assert by_skill["writing"].total == 1

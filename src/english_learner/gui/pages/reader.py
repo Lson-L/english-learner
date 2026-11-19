@@ -15,12 +15,13 @@ from __future__ import annotations
 import logging
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -28,7 +29,9 @@ from PySide6.QtWidgets import (
 from ...models.entities import Article, Highlight, now_iso, today_str
 from ...services.app_context import AppContext
 from ...services.dictionary_service import LookupResult, normalize_lemma
+from ...services.reading_quiz_service import UPGRADE_EVIDENCE_REQUIRED
 from ..level_feedback_dialog import LevelFeedbackDialog
+from ..reading_quiz_dialog import ReadingQuizDialog
 from ..regenerate_dialog import RegenerateDialog
 from ..widgets import ArticleView, WordPanel
 from ..workers import TaskWorker
@@ -60,7 +63,8 @@ class ReaderPage(QWidget):
         header_row.addWidget(
             PageHeader(
                 "阅读",
-                "双击任意英文单词查看语境释义；加入生词本后正文会永久高亮。",
+                "双击任意英文单词查看语境释义；读完后点「阅读完成」做几道题，"
+                "AI 会讲评并动态调整等级。",
             ),
             1,
         )
@@ -69,6 +73,12 @@ class ReaderPage(QWidget):
         self._generate_button.setObjectName("primaryButton")
         self._generate_button.clicked.connect(self._on_generate_clicked)
         header_row.addWidget(self._generate_button, 0, Qt.AlignmentFlag.AlignBottom)
+
+        self._quiz_button = QPushButton("阅读完成")
+        self._quiz_button.setObjectName("primaryButton")
+        self._quiz_button.setToolTip("读完后做几道题，AI 会讲评并根据答题情况调整等级")
+        self._quiz_button.clicked.connect(self._on_quiz_clicked)
+        header_row.addWidget(self._quiz_button, 0, Qt.AlignmentFlag.AlignBottom)
 
         self._regenerate_button = QPushButton("换一篇")
         self._regenerate_button.setObjectName("secondaryButton")
@@ -94,22 +104,29 @@ class ReaderPage(QWidget):
         self._status = QLabel("")
         layout.addWidget(self._status)
 
+        # 正文占满整页；释义卡是浮在页面上的子控件，不再占用固定右栏。
         self._view = ArticleView()
         self._view.word_selected.connect(self._on_word_selected)
+        self._view.background_clicked.connect(self._hide_word_card)
+        self._view.verticalScrollBar().valueChanged.connect(self._hide_word_card)
+        layout.addWidget(self._view, 1)
 
-        self._panel = WordPanel()
+        self._panel = WordPanel(self)
         self._panel.add_requested.connect(self._on_add_requested)
+        self._panel.close_requested.connect(self._hide_word_card)
+        shadow = QGraphicsDropShadowEffect(self._panel)
+        shadow.setBlurRadius(28)
+        shadow.setColor(QColor(15, 23, 42, 70))
+        shadow.setOffset(0, 8)
+        self._panel.setGraphicsEffect(shadow)
+        self._panel.hide()
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._view)
-        splitter.addWidget(self._panel)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
-        splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(12)
-        layout.addWidget(splitter, 1)
+        self._close_shortcut = QShortcut(QKeySequence("Escape"), self)
+        self._close_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._close_shortcut.activated.connect(self._hide_word_card)
 
         self._generate_button.setVisible(False)
+        self._quiz_button.setEnabled(False)
         self._regenerate_button.setEnabled(False)
         self._feedback_button.setEnabled(False)
         set_status(self._status, "进入本页会自动准备今天的文章。", "hint")
@@ -128,6 +145,7 @@ class ReaderPage(QWidget):
         if self._worker is not None and self._worker.isRunning():
             return
 
+        self._hide_word_card()
         self._generate_button.setVisible(False)
         article = self._context.article_repo.get_by_date(today_str())
         if article is None:
@@ -135,6 +153,8 @@ class ReaderPage(QWidget):
             self._view.set_article(None)
             self._title_label.setText("今日文章 · 尚未生成")
             self._meta_label.setText("")
+            self._quiz_button.setText("阅读完成")
+            self._quiz_button.setEnabled(False)
             self._feedback_button.setEnabled(False)
             self._start_generation(regenerate=False)
             return
@@ -145,6 +165,7 @@ class ReaderPage(QWidget):
         self._article = article
         self._view.set_article(article)
         self._reload_highlights()
+        self._hide_word_card()
         self._panel.show_placeholder()
         self._pending = None
         self._current_word_id = None
@@ -158,6 +179,7 @@ class ReaderPage(QWidget):
         self._generate_button.setVisible(False)
         self._regenerate_button.setEnabled(True)
         self._feedback_button.setEnabled(self._context.profile() is not None)
+        self._refresh_quiz_button(article)
         set_status(self._status, "双击单词查看释义，加入生词本即自动高亮。", "hint")
 
         if article.id is not None and self._context.article_repo.mark_read(article.id, now_iso()):
@@ -166,6 +188,8 @@ class ReaderPage(QWidget):
     def _start_generation(self, *, regenerate: bool, user_request: str = "") -> None:
         if self._worker is not None and self._worker.isRunning():
             return
+
+        self._hide_word_card()
 
         profile = self._context.profile()
         if profile is None:
@@ -209,10 +233,57 @@ class ReaderPage(QWidget):
             return
         if self._worker is not None and self._worker.isRunning():
             return
+        self._hide_word_card()
         dialog = RegenerateDialog(parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self._start_generation(regenerate=True, user_request=dialog.request_text())
+
+    def _on_quiz_clicked(self) -> None:
+        """阅读完成 → 出题 / 查看结果。AI 调用都在弹窗自己的 worker 里。"""
+        if self._article is None or self._article.id is None:
+            return
+        if self._worker is not None and self._worker.isRunning():
+            return
+        if self._context.profile() is None:
+            set_status(self._status, "请先在「今日」页完成水平测评，再做阅读检测。", "hint")
+            return
+
+        self._hide_word_card()
+        dialog = ReadingQuizDialog(self._context, self._article, parent=self)
+        dialog.exec()
+
+        quiz = dialog.result_quiz
+        if quiz is None:
+            return
+        self._refresh_quiz_button(self._article)
+        if not quiz.completed:
+            return
+
+        if quiz.practice_mode:
+            text = (
+                f"阅读检测完成：得分 {quiz.score}/{quiz.total}；"
+                "今天已完成过一次正式检测，本次为练习模式，等级保持"
+                f" {quiz.result_level}。"
+            )
+        elif quiz.waiting_for_upgrade:
+            text = (
+                f"阅读检测完成：得分 {quiz.score}/{quiz.total}，"
+                f"后验建议升到 {quiz.pending_level}；已积累 "
+                f"{quiz.pending_count}/{UPGRADE_EVIDENCE_REQUIRED} 次向上证据，"
+                f"等级暂时保持 {quiz.result_level}。"
+            )
+        elif quiz.level_changed:
+            text = (
+                f"阅读检测完成：得分 {quiz.score}/{quiz.total}，"
+                f"等级 {quiz.previous_level} → {quiz.result_level}。"
+            )
+        else:
+            text = (
+                f"阅读检测完成：得分 {quiz.score}/{quiz.total}，"
+                f"等级保持 {quiz.result_level or self._context.level()}。"
+            )
+        set_status(self._status, text, "success")
 
     def _on_feedback_clicked(self) -> None:
         """写下阅读感受 → AI 重新定级并换一篇。"""
@@ -224,6 +295,7 @@ class ReaderPage(QWidget):
             set_status(self._status, "请先在「今日」页完成水平测评，再调整难度。", "hint")
             return
 
+        self._hide_word_card()
         dialog = LevelFeedbackDialog(self._context, self._article, parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted or dialog.result_outcome is None:
             return
@@ -272,6 +344,7 @@ class ReaderPage(QWidget):
         self._pending = (lemma, start, end, sentence)
         self._current_word_id = None
         self._panel.show_loading(lemma)
+        self._show_word_card()
         set_status(self._status, f"正在查询 {lemma} …", "loading")
 
         article_id = self._article.id
@@ -286,22 +359,29 @@ class ReaderPage(QWidget):
         worker.start()
 
     def _on_lookup_ready(self, result: object) -> None:
+        if self._pending is None:
+            # 用户已经收起卡片（点击别处/滚动/切文章），迟到的结果不再弹出。
+            return
         if not isinstance(result, LookupResult):
             self._panel.show_error("查词返回了意外数据。")
             return
-        sentence = self._pending[3] if self._pending is not None else ""
+        sentence = self._pending[3]
         self._current_word_id = result.word.id
         self._panel.show_definition(result.word, sentence, cached=result.cached)
+        self._show_word_card()
 
         if self._pending is not None and self._has_highlight_at(self._pending[1], self._pending[2]):
             self._panel.mark_added(False)
             set_status(self._status, "这个位置已经标注过了。", "hint")
         else:
-            source = "已命中词库缓存" if result.cached else "AI 释义已缓存"
+            source = "已命中释义缓存" if result.cached else "AI 释义已缓存"
             set_status(self._status, f"{source}，确认后点「加入生词本」。", "hint")
 
     def _on_lookup_failed(self, message: str) -> None:
+        if self._pending is None:
+            return
         self._panel.show_error(message)
+        self._show_word_card()
         set_status(self._status, message, "error")
 
     def _on_add_requested(self) -> None:
@@ -335,6 +415,20 @@ class ReaderPage(QWidget):
             set_status(self._status, "已加入生词本，今日生词 +1。", "success")
 
     # ------------------------------------------------------------------ 辅助
+    def _refresh_quiz_button(self, article: Article) -> None:
+        """根据当天是否已完成检测，切换“阅读完成 / 查看答题结果”。"""
+        quiz = (
+            self._context.quiz_repo.get_by_article(article.id) if article.id is not None else None
+        )
+        completed = quiz is not None and quiz.completed
+        if completed:
+            self._quiz_button.setText("查看答题结果")
+        elif quiz is not None:
+            self._quiz_button.setText("继续检测")
+        else:
+            self._quiz_button.setText("阅读完成")
+        self._quiz_button.setEnabled(self._context.profile() is not None)
+
     def _reload_highlights(self) -> None:
         if self._article is None or self._article.id is None:
             self._highlights = []
@@ -351,6 +445,9 @@ class ReaderPage(QWidget):
     def _set_busy(self, busy: bool) -> None:
         has_article = self._article is not None
         self._generate_button.setEnabled(not busy)
+        self._quiz_button.setEnabled(
+            (not busy) and has_article and self._context.profile() is not None
+        )
         self._regenerate_button.setEnabled((not busy) and has_article)
         self._feedback_button.setEnabled(
             (not busy) and has_article and self._context.profile() is not None
@@ -361,6 +458,51 @@ class ReaderPage(QWidget):
         self._set_busy(False)
         if self._article is not None:
             self._regenerate_button.setEnabled(True)
+
+    # ------------------------------------------------------------ 悬浮释义卡
+    def _show_word_card(self) -> None:
+        """按最近一次取词的位置摆放释义卡，并置于最上层。"""
+        self._position_word_card()
+        self._panel.show()
+        self._panel.raise_()
+
+    def _hide_word_card(self) -> None:
+        """收起卡片，并让进行中的查词结果作废（避免迟到的结果又弹出来）。"""
+        had_pending = self._pending is not None
+        self._panel.hide()
+        self._pending = None
+        self._current_word_id = None
+        if had_pending:
+            set_status(self._status, "已收起释义卡。", "hint")
+
+    def _position_word_card(self) -> None:
+        margin = 12
+        width = self._panel.width()
+        max_height = max(220, min(480, self.height() - margin * 2))
+        preferred = self._panel.sizeHint().height()
+        height = min(max_height, max(self._panel.minimumHeight(), preferred))
+        self._panel.resize(width, height)
+
+        rect = self._view.last_word_rect()
+        if rect is None:
+            self._panel.move(max(margin, self.width() - width - margin), margin)
+            return
+
+        anchor = self.mapFromGlobal(self._view.viewport().mapToGlobal(rect.bottomLeft()))
+        max_x = max(margin, self.width() - width - margin)
+        x = min(max(margin, anchor.x() - width // 2), max_x)
+        y = anchor.y() + 10
+        if y + height > self.height() - margin:
+            # 下方放不下就翻到单词上方。
+            top_left = self.mapFromGlobal(self._view.viewport().mapToGlobal(rect.topLeft()))
+            y = top_left.y() - height - 10
+        y = max(margin, min(y, max(margin, self.height() - height - margin)))
+        self._panel.move(x, y)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 约定
+        if getattr(self, "_panel", None) is not None:
+            self._hide_word_card()
+        super().resizeEvent(event)
 
     # ------------------------------------------------------------------ 关闭
     def shutdown(self, timeout_ms: int = 3000) -> TaskWorker | None:

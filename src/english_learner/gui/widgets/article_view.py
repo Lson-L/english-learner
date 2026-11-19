@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, Signal
+from PySide6.QtCore import QPoint, QRect, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QTextBlockFormat, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QFrame, QTextEdit, QWidget
 
@@ -25,6 +25,8 @@ class ArticleView(QTextEdit):
     """正文区域。`word_selected` 的参数：单词、起始偏移、结束偏移、所在句子。"""
 
     word_selected = Signal(str, int, int, str)
+    # 点击正文空白 / 其他位置时发出，页面据此收起悬浮释义卡。
+    background_clicked = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -43,6 +45,8 @@ class ArticleView(QTextEdit):
 
         self._plain_text = ""
         self._highlights: tuple[Highlight, ...] = ()
+        # 最近一次双击取词的位置（视口坐标），用于把悬浮卡放在单词附近。
+        self._last_word_rect: QRect | None = None
 
     # ------------------------------------------------------------------ 内容
     def set_article(self, article: Article | None) -> None:
@@ -81,7 +85,22 @@ class ArticleView(QTextEdit):
         start = cursor.selectionStart()
         end = cursor.selectionEnd()
         sentence = extract_sentence(self._plain_text, start, end)
+        # cursorRect 只给光标位置，拼出单词首尾才能得到覆盖整词的矩形。
+        start_cursor = QTextCursor(self.document())
+        start_cursor.setPosition(start)
+        end_cursor = QTextCursor(self.document())
+        end_cursor.setPosition(end)
+        self._last_word_rect = self.cursorRect(start_cursor).united(self.cursorRect(end_cursor))
         return text, start, end, sentence
+
+    def last_word_rect(self) -> QRect | None:
+        """最近一次取词的矩形（视口坐标）；没有取过词时为 None。"""
+        return self._last_word_rect
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt 约定
+        # 单击正文任意位置先收起旧卡片；双击会紧接着触发新的查询。
+        self.background_clicked.emit()
+        super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt 约定
         found = self.word_at_position(event.position().toPoint())

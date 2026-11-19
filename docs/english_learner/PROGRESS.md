@@ -1,7 +1,7 @@
 # Daily English 开发进度与交接
 
 - 最后更新：2026-11-19
-- 当前阶段：**M3 核心项已完成（数据导出、Key 加密、可取消请求、生词本增强、性能）**
+- 当前阶段：**M3 核心 + M3.5 ~ M3.10 + M3.11（Phase 2 / Phase 3）已完成**
 - 产品方向：[PRODUCT.md](PRODUCT.md)
 
 > 本文档是跨会话交接的唯一事实来源。每完成一个里程碑，更新「当前状态」「验证记录」
@@ -18,6 +18,13 @@
 | M1.5 | 阅读反馈调难度：AI 重新定级 + 按反馈重写今日文章 | ✅ 2026-11-18 |
 | M2 | 生词本、SM-2 复习、高亮持久化、首页真实数据 | ✅ 2026-11-19 |
 | M3 | 数据导出、Key 加密、请求取消、错误分类、生词本增强、性能 | ✅ 核心完成 2026-11-19 |
+| M3.5 | 生词原形/文章词形、AI 记忆方法、复习“忘记/模糊”求助 | ✅ 2026-11-19 |
+| M3.6 | 阅读器改为正文全宽 + 双击弹出悬浮释义卡 | ✅ 2026-11-19 |
+| M3.7 | 查词与生词本分离（in_vocabulary）+ 生词本右侧排版修复 | ✅ 2026-11-19 |
+| M3.8 | 阅读完成后 AI 出题、答题讲评与动态调级 | ✅ 2026-11-19 |
+| M3.9 | 阅读检测第一阶段：混合难度、短答、错因、连续证据 | ✅ 2026-11-19 |
+| M3.10 | 生词本详情回显复习求助记录（用户输入 + AI 帮记） | ✅ 2026-11-19 |
+| M3.11 | Phase 2：本地后验 + 置信度 + 历史证据；Phase 3：自适应出题、盲评、产出题、每周复盘 | ✅ 2026-11-19 |
 | M4 | 深色模式、安装器 / 自动更新（可选，未排期） | ⬜ 未开始 |
 
 M0 结束时，应用可以：启动 → 强制配置 AI → 真实请求测试 → 保存配置 →
@@ -41,8 +48,8 @@ M2 结束时，产品闭环第一次完整可走：
 
 M3 核心项完成（2026-11-19）：
 
-- **数据导出**：设置页可导出 JSON（完整快照）或 CSV（六张表各一个文件，
-  `utf-8-sig`，Excel 直接打开）；导出在 TaskWorker 里执行；
+- **数据导出**：设置页可导出 JSON（完整快照）或 CSV（当时七张表各一个文件，
+  `utf-8-sig`，Excel 直接打开；M3.8 起为八张表）；导出在 TaskWorker 里执行；
 - **API Key 加密**：Windows DPAPI（与当前用户绑定），旧明文配置可直接读取；
 - **请求可取消**：`TaskWorker` 增加协作式取消与 `cancelled` 信号，
   关闭窗口时先取消并等待，避免 QThread 销毁警告；
@@ -53,6 +60,117 @@ M3 核心项完成（2026-11-19）：
 - **性能**：大列表刷新时暂停表格重绘、复习队列上限 200、导出不阻塞 UI。
 
 深色模式与安装器 / 自动更新列为可选 M4，尚未实现。
+
+M3.5 完成（2026-11-19）：
+
+- **生词按原形入库**：查词时由 AI 判断词典原形（went→go），`words.lemma` 存原形，
+  `words.display_form` 保留文章中的形态；新增 `word_forms` 词形缓存，
+  同一词形第二次查询直接命中、不再调用 AI；
+- **AI 记忆方法**：查词时一并生成 `mnemonic` 写入词库，阅读释义卡、生词本详情、
+  复习答案页都会展示；老词条可在生词本详情点「AI 生成记忆方法」补生成；
+- **复习求助**：复习时点「忘记 / 模糊」会弹出原因框（快捷原因 + 自由文本），
+  AI 结合原因给出针对性建议并更新记忆方法；用户也可跳过 AI 直接记录评分，
+  离线时复习不受影响；原因与建议写入 `review_logs.note / advice`；
+- **数据库升级**：schema v1 → v2（`words.mnemonic`、`review_logs.note/advice`、
+  `word_forms` 表），原地 `ALTER TABLE`，旧数据保留；
+- **换一篇带上下文**：用户在「换一篇」里写了提示词时，请求会附带当前文章
+  （标题、等级、主题、正文），便于理解“这个话题 / 这种结构”等指代；
+  没写提示词时不带原文。
+
+M3.6 完成（2026-11-19）：
+
+- **阅读器布局**：移除右侧固定释义栏，正文占满整页；
+- **悬浮释义卡**：双击单词后在词旁浮出 380px 卡片（带阴影、可滚动、带关闭按钮），
+  点击正文 / 滚动 / 按 Esc / 切页都会收起；卡片始终夹在页面可视范围内。
+
+M3.7 完成（2026-11-19）：
+
+- **查词不再等于加入生词本**：`words` 新增 `in_vocabulary` 标记；双击只写查词缓存，
+  必须点「加入生词本」才进入生词本、复习队列和首页统计；
+- **生词本右侧排版**：详情内容放进滚动区，字段多或窗口矮时不再重叠/挤压；
+- 数据库 schema v2 → v3，升级前的旧词统一保留为“已加入”（无法区分历史行为，
+  宁可保留也不误删），新查词默认只进缓存。
+
+M3.8 完成（2026-11-19）：
+
+- **阅读完成入口**：阅读页标题栏新增「阅读完成」主按钮；已有当天检测结果时
+  自动变为「查看答题结果」；
+- **AI 出题**：按当天文章出 5 道单选题（主旨 / 细节 / 推断 / 语境词义），
+  题目与解析落库缓存，同一篇文章只出一次题，重开不重复消耗 token；
+- **答题与讲评**：弹窗内逐题选择后提交；客观题本地判分，AI 返回逐题中文解析、
+  总评与新等级建议；结果页展示得分、正确率、等级变化和每题解析；
+- **大屏答题**：弹窗带最大化按钮，并支持 F11 全屏 / Esc 退出全屏，
+  题目与解析区随窗口自动铺满；
+- **动态调级**：每次最多调整一档；全对至少升一档、答对不到一半至少降一档，
+  其余尊重 AI 建议；调级结果写回 `profile`；
+- **失败兜底**：出题/讲评失败都可重试，题目缓存保留；讲评失败时画像与题目
+  状态都不改，不会出现“等级变了但没有结果”；
+- **数据库升级**：schema v3 → v4，新增 `reading_quizzes` 表
+  （`article_id` 唯一，文章替换时级联删除）；导出与 CSV 同步包含该表。
+
+M3.9 第一阶段完成（2026-11-19）——让阅读检测更像“测评”，而不是“五道对错题”：
+
+- **混合难度出题**：5 道选择题按“2 题当前等级 + 1 题低一档 + 1 题高一档 +
+  1 题高两档”生成，每题带 `skill`（主旨/细节/推断/词汇/语法）和
+  `difficulty`（A2/B1/B2/C1）；高难度题用来探上限，低难度题排查粗心；
+- **英文短答**：额外 1 道短答题，要求写 1~2 句；选择题本地判分，短答由 AI
+  给 0/1 分，补充“主动产出”信号；
+- **错因归因**：AI 对每题返回 `error_types`
+  （vocabulary / inference / detail / main_idea / grammar / careless / unknown），
+  结果页对错题展示“错因”；
+- **用户自评**：提交前可选择“这篇读起来：轻松 / 刚好 / 吃力”，作为弱证据；
+- **本地证据评分**：按题目难度加权（答对高难度加分更多、答错低难度扣分更多），
+  形成 -1~+1 的证据强度；AI 建议与本地证据同向才走，强证据可压过矛盾建议；
+- **连续证据策略**：升级需要连续 2 次向上证据，第一次只记录
+  `pending_level / pending_count`；降级立即生效；结果页明确显示
+  “保持 B1 · 建议升到 B2（1/2）”；
+- **数据库升级**：schema v4 → v5（`profile.pending_level/pending_count`；
+  `reading_quizzes` 增加短答、错因、自评、建议等级、待定状态、证据强度）；
+- **导出**：JSON / CSV 同步包含新增字段。
+
+M3.10 完成（2026-11-19）——生词本回显复习求助：
+
+- 复习时点「忘记 / 模糊」，在弹窗里写的原因（`review_logs.note`）和点
+  「请 AI 帮我记」得到的建议（`review_logs.advice`）此前只落库、界面看不到；
+- 生词本右侧详情新增「复习求助记录」区块，按时间倒序展示最近 5 条，
+  每条带时间、评分档位（忘记 / 模糊）、「我的输入」和「AI 帮记」；
+- 没有原因/建议的普通评分记录（认识 / 太简单）不展示；超过 5 条时提示
+  “更早的 N 次求助已省略”；
+- 数据仍只存 `review_logs`，不新增表/列，导出行为不变；
+- 外部验收：两轮 GLM-5，**复用同一 session**，最终无 P0/P1/P2；详见
+  [VERIFICATION_M3.10.md](VERIFICATION_M3.10.md)。
+
+M3.11（Phase 2 / Phase 3）完成（2026-11-19）——把“单次检测调级”升级为“长期、可置信的水平估计”：
+
+**Phase 2：本地证据模型 + 置信度**
+
+- **等级证据表**：新增 `level_evidence`（题目级观测 `observations_json`、后验、
+  置信度、错因、耗时等）；文章替换/检测被级联删除时证据仍保留（`quiz_id` 置空）；
+- **本地后验**：`services/level_estimator.py` 用逻辑斯蒂模型
+  `P(correct | L, d) = 1/(1+exp(k*(index(d)-index(L))))` 计算 A2/B1/B2/C1 后验；
+  先验锚定当前等级，历史证据按 0.75 衰减回放最近 5 次；
+- **置信度与决策**：只在“当前 ±1 档”窗口内取后验峰值；置信度 < 0.6 时保持当前等级；
+  升级仍需连续两次向上证据，降级立即生效；
+- **弱证据**：AI 盲评等级（权重 0.5）、自评（0.25）、按 CEFR 词档聚合的复习正确率
+  （最多 0.8）都只作为弱观测；查词时 AI 顺带标注 `words.cefr_band`；
+- **历史趋势**：讲评 prompt 附带最近 8 次检测摘要与难度/技能正确率；今日页显示
+  近 4 周等级记录；结果页显示「B1（置信度 0.62）」与四档后验分布。
+
+**Phase 3：自适应出题与更强诊断**
+
+- **两阶段自适应**：第一轮 3 道当前等级题；答对 ≥ 2 道往上一档、否则往下一档，
+  再出 2 道边界选择题 + 2 道产出题（多一次出题调用）；
+- **题目审核**：每次出题后增加审核 pass，明确不合格的题丢弃并重出；
+- **更强产出信号**：短答 + 句子改写/翻译各 1 道，评分固定「内容 / 语法 / 词汇」；
+- **盲评与防作弊**：等级评估与讲评分两次调用，盲评 prompt 不含当前等级；
+  选项顺序随机打乱并重映射正确答案；同一天只允许一次正式检测，
+  换文章后的第二次检测自动进入练习模式（不写画像、不写证据）；
+- **每周复盘**：今日页新增「本周复盘」，AI 汇总检测/生词/复习数据，
+  只给建议；用户点「应用建议等级」后才写回画像，同一周结果缓存；
+- **数据库升级**：schema v5 → v6（profile 置信度/原因；words.cefr_band；
+  reading_quizzes 多产出题/后验/练习模式/阶段；新增 level_evidence、weekly_reviews）；
+- **测试**：273 passed（新增估计器、自适应、盲评、练习模式、每周复盘、v5→v6 迁移等）；
+- **外部验收**：见 [VERIFICATION_M3.11.md](VERIFICATION_M3.11.md)。
 
 ## 2. 环境（实测）
 
@@ -92,7 +210,7 @@ uv run pyinstaller --noconfirm --clean DailyEnglish.spec
 日志：`%APPDATA%\EnglishLearner\logs\app.log`
 想重演首次启动：删除上面的 `config.json`，或加 `--reconfigure`。
 
-## 4. 文件地图（M3 核心完成后的现状）
+## 4. 文件地图（M3.11 完成后的现状）
 
 ```
 src/english_learner/
@@ -102,11 +220,11 @@ src/english_learner/
 ├── assets/
 │   └── fonts/                  内置开源字体 Inter + Literata（OFL 1.1，见 OFL-*.txt）
 ├── models/
-│   └── entities.py             Profile / Article / Word / Highlight / DailyStats 等
-│                               frozen dataclass + from_row / to_params + 时间与 JSON 辅助
+│   └── entities.py             Profile / Article / Word / Highlight / DailyStats /
+│                               ReadingQuiz 等 frozen dataclass + from_row / to_params
 ├── storage/
-│   ├── db.py                   SQLite 连接、PRAGMA、建表迁移、事务、仓库入口
-│   └── repositories.py         ProfileRepo / ArticleRepo / WordRepo / StatsRepo（纯 SQL）
+│   ├── db.py                   SQLite 连接、PRAGMA、建表迁移（schema v6）、事务、仓库入口
+│   └── repositories.py         Profile / Article / Word / Review / Stats / Quiz / Evidence / WeeklyReview 仓库（纯 SQL）
 ├── services/
 │   ├── ai_client.py            OpenAI 兼容客户端；test_connection / complete / complete_json
 │   ├── ai_protocol.py          TextCompleter 协议（业务层只依赖一个方法）
@@ -114,15 +232,20 @@ src/english_learner/
 │   ├── config_store.py         AIConfig、JSON 配置读写、URL 规范化、Key 脱敏
 │   ├── provider_presets.py     服务商预设
 │   ├── json_utils.py           parse_json_object 三档兜底 + 字段类型转换
-│   ├── prompts.py              全部提示词 + PROMPT_VERSION = "m1-2"
+│   ├── prompts.py              全部提示词 + PROMPT_VERSION = "m3-11"
 │   ├── assessment_bank.py      3 套固定题（A2/B1/B2），默认 B1
 │   ├── assessment_service.py   本地计分、AI 评分、CEFR 回退、手动选级、落库
 │   ├── article_service.py      文章生成、JSON 校验、重试一次、当天缓存、换一篇
 │   ├── dictionary_service.py   lemma 规范化、句子提取、查词缓存、加入生词本
 │   ├── level_feedback_service.py 阅读反馈调级：AI 重新定级 + 软约束重写今日文章
+│   ├── reading_quiz_service.py 阅读检测：自适应两阶段、盲评、产出题、本地后验与调级
+│   ├── level_estimator.py      纯函数后验估计器（逻辑斯蒂 + 先验 + 历史衰减）
+│   ├── quiz_calibration.py     难度/技能正确率与逐题对错统计
+│   ├── weekly_review_service.py 每周复盘：汇总数据 + AI 建议 + 用户确认
 │   ├── srs.py                  简化 SM-2 调度 + ReviewService（纯本地，不依赖 AI）
 │   ├── secret_store.py         API Key 的 Windows DPAPI 加解密（非 Windows 回退明文）
-│   └── export_service.py       JSON / CSV 数据导出（六张表）
+│   ├── export_service.py       JSON / CSV 数据导出（十张表，含等级证据与每周复盘）
+│   └── review_help_service.py  复习“忘记/模糊”求助：AI 建议 + 更新记忆方法
 └── gui/
     ├── fonts.py                内置字体注册 + 全局英文字体（默认 Lexend，可选 Literata/Georgia/Inter）
     ├── theme.py                全局 QSS（含阅读器/释义卡/测评短文样式）
@@ -130,19 +253,22 @@ src/english_learner/
     ├── onboarding.py           3 步配置向导
     ├── assessment_dialog.py     摸底测评弹窗（答题 → 评分 → 结果/手动选级）
     ├── level_feedback_dialog.py 阅读感受弹窗（快捷选项 + 文本 → 调级并换文章）
+    ├── reading_quiz_dialog.py  阅读检测弹窗（两轮自适应 + 产出题 + 置信度结果）
+    ├── review_help_dialog.py   复习求助弹窗（原因 → AI 建议 → 更新记忆方法）
+    ├── weekly_review_dialog.py 每周复盘弹窗（AI 总结 → 用户确认后改级）
     ├── main_window.py          导航 + 页面栈 + AppContext + 首次测评触发
     ├── widgets/
     │   ├── article_view.py     只读 QTextEdit：双击取词、高亮、17px/1.8 行距
-    │   └── word_panel.py       右侧释义卡 + 加入生词本按钮
+    │   └── word_panel.py       悬浮释义卡（可滚动/关闭）+ 加入生词本按钮
     └── pages/
         ├── common.py           Card / PageHeader / StatCard(可刷新) / set_status
         ├── today.py            今日页：连续天数/到期复习/累计生词/文章状态/测评入口
-        ├── reader.py           阅读页：生成文章、查词、加生词、换一篇、调整难度
-        ├── vocabulary.py       生词本页：筛选/搜索/排序/编辑/批量删除/脏检查
+        ├── reader.py           阅读页：正文全宽 + 悬浮释义卡、换一篇、调整难度、阅读完成
+        ├── vocabulary.py       生词本页：筛选/搜索/排序/编辑/批量删除/脏检查/求助记录回显
         ├── review.py           复习页：卡片翻面、1~4 评分、会话统计（M2）
         └── settings.py         配置、字体、数据位置、JSON/CSV 导出（M3 滚动区）
 
-tests/（共 156 个用例，全部 mock AI、无网络）
+tests/（共 218 个用例，全部 mock AI、无网络）
 ├── test_english_learner_config.py        配置读写/校验/脱敏
 ├── test_english_learner_ai_client.py     连接测试与错误翻译
 ├── test_english_learner_storage.py       建表幂等/CRUD/唯一约束/级联/统计/文章替换
@@ -150,10 +276,14 @@ tests/（共 156 个用例，全部 mock AI、无网络）
 ├── test_english_learner_assessment.py    计分/评分/容错/手动选级/落库
 ├── test_english_learner_article.py       生成校验/软约束/重试/缓存/换一篇
 ├── test_english_learner_feedback.py      反馈调级/软约束重写/失败不改旧数据
+├── test_english_learner_reading_quiz.py  混合难度/短答/证据评分/连续调级/失败兜底
+├── test_english_learner_reading_quiz_dialog.py 弹窗：缓存/答题/短答/自评/结果/全屏
 ├── test_english_learner_reader.py        lemma/句子提取/查词缓存/高亮/阅读页
 ├── test_english_learner_srs.py           SM-2 四档调度/易度边界/间隔上限/复习服务落库
+├── test_english_learner_review_help.py   复习求助：建议解析/记忆方法落库/失败兜底
+├── test_english_learner_review_help_dialog.py 求助弹窗：快捷原因/AI 建议/跳过
 ├── test_english_learner_review_page.py   复习页状态机/翻面/评分/会话统计/队列上限
-├── test_english_learner_vocabulary_page.py 生词本筛选/搜索/排序/编辑/批量删除/脏检查
+├── test_english_learner_vocabulary_page.py 生词本筛选/搜索/排序/编辑/批量删除/脏检查/求助记录回显
 ├── test_english_learner_secret_store.py   DPAPI 往返/明文兼容/损坏密文
 ├── test_english_learner_export.py        JSON 快照/CSV 分表/空库/原子写入
 ├── test_english_learner_workers.py       TaskWorker 成功/失败/取消/关闭等待
@@ -244,6 +374,154 @@ M3 仍未验证 / 需要人工确认：
 2. **关闭窗口的等待体验**：网络请求进行中关闭窗口时最长等待一次 HTTP 超时，
    需要真实弱网环境观察是否可接受；
 3. **深色模式 / 安装器**：未实现（可选 M4）。
+
+### 5.5 M3.5（2026-11-19）
+
+| 检查 | 结果 |
+|---|---|
+| `.venv/Scripts/python.exe -m pytest` | **179 passed** |
+| `ruff check` / `ruff format --check` | 通过 / 64 files formatted |
+| schema v1 → v2 | 旧库原地升级、旧词条与复习记录保留、新列/`word_forms` 就位 |
+| 原形与词形 | went→go 入库、display_form=Went、二次查 went 命中缓存不调 AI |
+| 记忆方法 | 查词写入、老词单次生成、失败抛 AIError；释义卡/生词本/复习页展示 |
+| 复习求助 | 建议解析、mnemonic 落库、无 advice 报错、跳过/取消不误记评分 |
+| 复习日志 | `note / advice` 随评分落库并可导出 |
+| 导出 | 当时七张表（新增 `word_forms`）与新增字段全部包含（M3.8 起为八表） |
+| 换一篇上下文 | 有提示词时 prompt 含当前文章正文；无提示词时不含（含 builder 兜底） |
+
+M3.5 仍未验证 / 需要人工确认：
+
+1. **真实模型的原形判断质量**：went→go、better→good 等是否稳定；错判时目前没有
+   “手动改原形”的入口（只能删词重查）；
+2. **记忆方法质量**：联想/谐音是否真的容易记，需真实使用后调 prompt；
+3. **复习求助的成本与节奏**：每点一次“忘记/模糊”就多一次 AI 调用，
+   若觉得太频繁，可增加“本次复习不再提示”或按等级开关。
+
+### 5.6 M3.6 阅读器悬浮卡（2026-11-19）
+
+| 检查 | 结果 |
+|---|---|
+| `.venv/Scripts/python.exe -m pytest` | **180 passed** |
+| `ruff check` / `ruff format --check` | 通过 / 64 files formatted |
+| 布局 | 阅读页无 QSplitter，正文占满；释义卡是页面子控件，默认隐藏 |
+| 定位 | 有取词矩形时贴在词下方，越界会翻到上方并夹在页面内 |
+| 收起 | 点击正文、滚动正文、按 Esc、点关闭按钮、切文章/切页都会隐藏 |
+| 内容 | 卡片宽度 380px，释义内容放滚动区，长内容不截断 |
+
+M3.6 仍未验证 / 需要人工确认：
+
+1. **真实窗口的视觉效果**：阴影、圆角、卡片与单词的相对位置需要在真实桌面看；
+2. **offscreen 布局限制**：`cursorRect` 在无窗口的 offscreen 环境下可能尚未计算，
+   因此相关单测只验证“记录了矩形 + 卡片夹取”，真实取词位置需人工确认。
+
+### 5.7 M3.7 查词/生词本分离与排版（2026-11-19）
+
+| 检查 | 结果 |
+|---|---|
+| `.venv/Scripts/python.exe -m pytest` | **181 passed** |
+| `ruff check` / `ruff format --check` | 通过 / 64 files formatted |
+| schema v2 → v3 | 真实库副本升级成功：13 个旧词全部保留并标记为已加入 |
+| 查词缓存 | 新的 `lookup()` 写入 `in_vocabulary=0`，不出现在生词本/复习队列/统计 |
+| 加入生词本 | `add_to_vocabulary()` 置 1；重复加入幂等，状态不回退 |
+| 生词本排版 | 右侧详情放入 QScrollArea；offscreen 验证无重叠、无横向滚动 |
+| 导出 | 导出仍包含全部缓存词（`include_cache=True`） |
+
+M3.7 仍未验证 / 需要人工确认：
+
+1. **真实窗口右侧排版**：滚动条外观、底部按钮位置需要真实桌面确认；
+2. **历史自动词条**：升级前的词无法区分“查过”与“真正加入”，全部保留；
+   如不需要可在生词本里批量删除。
+
+### 5.8 M3.8 阅读检测（2026-11-19）
+
+| 检查 | 结果 |
+|---|---|
+| `.venv/Scripts/python.exe -m pytest` | **205 passed** |
+| `ruff check` / `ruff format --check` | 通过 / 68 files formatted |
+| 出题解析 | 支持 `answer_index` 数字 / “B” / “B. xxx”；不足 3 题判失败并重试 |
+| 缓存 | 同一篇文章第二次 `get_or_create` 不再调用 AI |
+| 判分 | 本地按下标判分；满分 5/5、3/5、0/5 均正确 |
+| 调级约束 | 全对至少升一档、低分至少降一档、每次最多一档、非法等级回退 |
+| 失败兜底 | 讲评 JSON 失败不改 profile、题目仍未完成，可直接重试 |
+| 存储 | `reading_quizzes` 往返、唯一约束、文章删除级联清理 |
+| 导出 | JSON 含题目数组与 total；CSV 第 8 张表 `reading_quizzes.csv` |
+| GUI | 缓存题目直接展示、未答完拦截、提交后结果页、已完成直接看结果 |
+| 全屏 | 最大化按钮存在；F11 进入全屏、再按 Esc 只退出全屏不关窗 |
+
+M3.8 仍未验证 / 需要人工确认：
+
+1. **真实模型的出题质量**：干扰项是否合理、答案是否唯一、解析是否准确，
+   需要真实文章多次实测后调 prompt；
+2. **调级体感**：全对必升一档是否过于激进、3/5 保持是否合适，
+   建议连续使用一周后看等级变化曲线；
+3. **真实窗口排版**：题目选项较长时的换行、结果页多题解析的滚动体验需要
+   真实桌面确认；
+4. **重复检测**：当前设计是一篇文章一套题、只能提交一次；如果用户中途关闭，
+   重开会继续用同一套题（这是有意的缓存行为）。
+
+### 5.9 M3.9 阅读检测第一阶段（2026-11-19）
+
+| 检查 | 结果 |
+|---|---|
+| `.venv/Scripts/python.exe -m pytest` | **212 passed** |
+| `ruff check` / `ruff format --check` | 通过 / 68 files formatted |
+| 混合难度 | 5 道选择题覆盖低一档/当前/高一档/高两档；解析缺失难度回退本卷等级 |
+| 短答 | 必须写 1~2 句；空短答强制 0 分；AI 给 0/1 分 |
+| 错因 | 每题 error_types 与题目对齐；答对强制 none，短答固定 short_answer |
+| 证据评分 | 高难度答对权重更高；本地 ratio 与 AI 建议冲突时强证据可压过 AI |
+| 连续调级 | 第一次向上只记 pending(1/2)；第二次才升级；降级立即生效 |
+| 存储 | schema v5 迁移、profile pending 字段、quiz 新字段往返 |
+| 导出 | JSON / CSV 包含短答、错因、自评、建议等级、待定状态、证据强度 |
+| 外部验收 | 两轮 GLM-5 复验：第 1 轮发现 1 个 P1 + 2 个 P2，已修复；第 2 轮通过。详见 [VERIFICATION_M3.9.md](VERIFICATION_M3.9.md) |
+
+M3.9 仍未验证 / 需要人工确认：
+
+1. **真实模型出题质量**：混合难度的配比是否被模型遵守、短答评分是否稳定；
+2. **等级变化体感**：连续两次升级是否太慢/太快，需要连续使用一周观察；
+3. **真实窗口排版**：短答输入框、自评下拉、结果页长解析在全屏/小窗口下的体验；
+4. **降级策略**：目前降级不等待连续证据，是否会在疲劳答题时误降，需要实测。
+
+### 5.10 M3.10 生词本回显复习求助（2026-11-19）
+
+| 检查 | 结果 |
+|---|---|
+| `.venv/Scripts/python.exe -m pytest` | **218 passed** |
+| `ruff check` / `ruff format --check` | 通过 / 68 files formatted |
+| 有求助记录 | 详情显示时间、评分档位、用户输入、AI 帮记内容 |
+| 无求助记录 | 显示引导文案；「认识 / 太简单」的空记录不展示 |
+| 多条记录 | 最新在前，最多 5 条；更多时提示更早 N 次已省略 |
+| 数据层 | 复用 `review_logs.note / advice`，无 schema 变更、导出行为不变 |
+| 仓库层 | `list_help_for_word / count_help_for_word` 的过滤、倒序、并列时间、limit 边界有直接单测 |
+| 外部验收 | 两轮 GLM-5 **同一 session**：第 1 轮 13 项通过 + 2 个 P3；第 2 轮确认无 P0/P1/P2。详见 [VERIFICATION_M3.10.md](VERIFICATION_M3.10.md) |
+
+M3.10 仍未验证 / 需要人工确认：
+
+1. **真实窗口排版**：右侧 360px 面板里长建议的换行与滚动体验需真实桌面确认；
+2. **记录时效**：本次求助只有在点「完成」记录评分后才落库；如果用户生成
+   AI 建议后直接关窗取消评分，该条建议不会出现在生词本（符合现有评分语义）。
+
+### 5.11 M3.11 Phase 2 / Phase 3（2026-11-19）
+
+| 检查 | 结果 |
+|---|---|
+| `uv run pytest` | **273 passed** |
+| `uv run ruff check` / `ruff format --check` | 通过 / 通过 |
+| 本地后验 | 逻辑斯蒂模型 + 先验 + 历史衰减；全对/全错/混合/缺失难度/边界等级单测；简单题不升级、高难题升一档场景回放 |
+| 自适应出题 | 3 道当前等级 → 按 2/3 正确率选边界 → 2 选择题 + 2 产出题；第一轮答案先落库、重开回显 |
+| 盲评 | 独立调用、prompt 不含当前等级与难度；高于当前 → 正向证据，低于当前 → 负向证据；失败不阻塞 |
+| 反作弊 | 选项打乱 + answer_index 重映射；同一天第二次检测进入练习模式，不写画像/证据/历史统计 |
+| 每周复盘 | 同一周缓存；AI 只建议；最多一档、置信度 < 0.6 保持；用户确认后才写 profile |
+| 迁移 | v5 → v6 原地迁移；旧检测不回填、stage 默认 2、可继续提交；新增 `level_evidence` / `weekly_reviews` |
+| 导出 | JSON / CSV 十张表，含两张新表与全部新列 |
+| 外部验收 | 4 轮静态审查（同一 session + 新 session）：P2 盲评方向 + 多个 P3 已修复，无 P0/P1/P2；外部 CLI 权限层始终不放行 pytest/ruff，动态检查以开发会话自检 273 passed 归档。详见 [VERIFICATION_M3.11.md](VERIFICATION_M3.11.md) |
+
+M3.11 仍未验证 / 需要人工确认：
+
+1. **真实模型出题/审核质量**：自适应边界题、改写题和审核 pass 的实际稳定性；
+2. **后验阈值体感**：斜率 1.1、先验 0.4、置信度 0.6、历史衰减 0.75 仍是经验值；
+3. **真实窗口排版**：两轮答题、长解析、产出题输入框和每周复盘弹窗需真实桌面确认；
+4. **AI 调用成本**：一次完整检测最多 4 次调用（两轮出题 + 盲评 + 讲评）+ 审核，
+   真实网关较慢时需要观察体感。
 
 ## 6. 关键实现说明（避免下次踩坑）
 
@@ -434,6 +712,208 @@ M3 仍未验证 / 需要人工确认：
 - **性能取舍**：生词本仍在 UI 线程全量查询 + 重建表格（几百到几千条），
   但重建期间 `setUpdatesEnabled(False)`；如果将来上万条，再上分页或模型视图，
   不要在没有实测的情况下提前引入 `QAbstractTableModel`。
+
+### 6.16 M3.5：原形、词形缓存、记忆方法、复习求助
+
+- **schema v2**：`SCHEMA_SQL` 里的新库直接带 `words.mnemonic`、
+  `review_logs.note/advice`、`word_forms`；旧库在 `_apply_schema()` 里按版本
+  `ALTER TABLE ADD COLUMN`。加列前用 `PRAGMA table_info` 判断，重复启动幂等。
+  **不要删列重建表**，SQLite 的 ADD COLUMN 足够且不会丢数据。
+- **原形判定**：`DictionaryService.lookup()` 先查 `word_forms`（文章词形），
+  再查 `words.lemma`，都未命中才调 AI。AI 返回的 `lemma` 用
+  `normalize_lemma()` 校验，非法时回退当前词形；`display_form` 以**原文中
+  实际选中的文本**为准（保留大小写、去首尾标点），不信任模型回填。
+- **词形缓存**：`word_forms.form` 是 `COLLATE NOCASE PRIMARY KEY`，
+  `remember_form()` 用 `ON CONFLICT DO UPDATE` 更新映射；删词时外键级联清理。
+  旧版本已入库的词不回填词形，但这些词按原形查询仍能命中 `words.lemma`。
+- **记忆方法**：查词 prompt 一次返回 `mnemonic`；老词条用
+  `DictionaryService.generate_mnemonic()` + `WordRepo.update_mnemonic()`。
+  `upsert` 对 mnemonic 采用“新值非空才覆盖”，避免查词把用户/复习中更新过的
+  记忆方法冲掉；`display_form` 也是保留第一次记录的文章形态。
+- **复习求助**：只有 rating 1/2 触发。流程是「弹窗收集原因 → 可选 AI →
+  然后才调用 `ReviewService.review()`」，所以用户 Esc/关闭弹窗**不会记录评分**；
+  “跳过，直接记录”会带着原因落库但不调 AI。AI 失败时评分仍可跳过完成，
+  保证离线复习可用。
+- **日志**：`review_logs.note` 存用户原因（截断 500 字），`advice` 存 AI 建议
+  （截断 1000 字）；两者只用于回顾/导出，不参与调度。
+- **弹窗细节**：复习页 `_collect_review_help()` 在弹窗期间禁用 1~4 快捷键，
+  避免在原因输入框里按数字误触评分；弹窗请求进行中拒绝关闭（同其他 AI 弹窗）。
+- **导出**：新增 `word_forms` 表和 `words.mnemonic`、`review_logs.note/advice`
+  列；JSON 自动包含，CSV 列顺序在 `export_service.CSV_COLUMNS` 固定。
+- **prompt 版本**：M3.5 时为 `PROMPT_VERSION = "m3-2"`（M3.8 起为 `m3-8`），新增
+  `build_mnemonic_messages` / `build_review_help_messages`，查词契约新增
+  `lemma 必须是原形` 与 `mnemonic` 字段。
+- **换一篇的上下文**：只有用户在「换一篇」弹窗里写了要求时，
+  `regenerate_today()` 才把**当前文章**传给 prompt（标题、等级、主题、正文），
+  让模型理解“这个话题 / 这种结构”等指代，并明确要求不要逐句改写；
+  没写要求时不带原文，避免模型被带偏、也节省 token。
+  同时，有用户要求时当前标题不再列进 `avoid_titles`，避免“参考这篇”和
+  “禁止重复这个主题”两条指令互相打架。prompt builder 里也做了兜底：
+  `user_request` 为空时忽略 `current_article`。
+
+### 6.17 M3.6：正文全宽与悬浮释义卡
+
+- **为什么不用 QSplitter**：右侧固定栏在没查词时是一大片空白，而且挤压正文宽度。
+  现在 `ReaderPage` 直接用 `layout.addWidget(self._view, 1)`，`WordPanel` 以
+  `self` 为 parent 但不加入布局，按几何位置浮在页面上，`raise_()` 保证在最上层。
+- **为什么不用 Qt.Popup**：Popup 是独立窗口，会抢鼠标抓取、样式和主窗口不完全一致，
+  也难保证滚动/切页时的收起行为；页内子控件更可控，阴影用
+  `QGraphicsDropShadowEffect` 实现。
+- **取词位置**：`ArticleView.word_at_position()` 在取词时记录
+  `cursorRect(start).united(cursorRect(end))`（视口坐标）；`ReaderPage` 用
+  `viewport().mapToGlobal()` + `mapFromGlobal()` 转成页面坐标。
+  `cursorRect` 依赖文档布局，offscreen 下未显示时可能返回默认值，真实窗口正常。
+- **定位规则**：默认贴在单词下方 10px、水平居中；下方放不下翻到单词上方；
+  x/y 都夹在页面边距内，卡片高度最大 480px，超出由内部滚动区消化。
+- **收起时机**：正文 `mousePressEvent` 发 `background_clicked`、滚动条
+  `valueChanged`、Esc 快捷键、卡片关闭按钮、加载/切换文章、页面 resize 都会隐藏。
+  收起时同时清空 `_pending`：查询中收起卡片后，迟到的结果会被丢弃，不会再次弹出。
+- **WordPanel 结构**：宽度固定 380；标题/释义/例句/记忆方法放进 `QScrollArea`，
+  「加入生词本」和状态固定在底部；关闭按钮 `×` 通过 `close_requested` 信号通知页面。
+  它不再显示占位文案（卡片未选中时直接隐藏）。
+- **测试注意**：不要断言 offscreen 下的具体 `cursorRect` 像素，测试应验证
+  “矩形已记录 + 页面定位/夹取 + 各收起路径”。
+
+### 6.18 M3.7：查词缓存 vs 生词本（in_vocabulary）
+
+- **问题根源**：`lookup()` 为了缓存释义会把词写进 `words`，而 M1/M2 的生词本
+  直接 `list_all()` 全表，于是“双击查词”看起来等于“自动加入”。M3.7 之前只有
+  `highlights` 能间接区分，但它会随文章替换被级联删除，不可靠。
+- **字段语义**：`words.in_vocabulary`：0 = 仅查词缓存，1 = 用户明确加入。
+  `DictionaryService.add_to_vocabulary()` 先 `mark_in_vocabulary()` 再插高亮；
+  查词 `upsert` 永远写 0，但 SQL 里做了
+  `CASE WHEN words.in_vocabulary = 1 THEN 1 ELSE excluded.in_vocabulary END`，
+  已加入的词不会被后续查词降级。
+- **所有“生词本口径”的查询都要过滤 `in_vocabulary = 1`**：
+  `WordRepo.list_all / count / list_due / list_created_on / count_unmastered`、
+  `StatsRepo.count_due`；导出是例外，用 `list_all(include_cache=True)` 保留全量。
+  新增查询时先想清楚：这是“生词本”还是“查词缓存”。
+- **迁移 v2 → v3**：`ALTER TABLE words ADD COLUMN in_vocabulary ...` 后，
+  把旧词全部 `UPDATE ... SET in_vocabulary = 1`。旧版本无法区分，保留比误删安全；
+  已在真实库副本上验证 13 个旧词全部保留。
+- **UI 文案**：缓存命中时提示“已有释义缓存，点加入才会收进生词本”；
+  已加入的词按钮显示“加入本篇高亮”，不会重复入本。
+- **排版修复**：生词本右侧详情字段变多后，QSplitter 分配的高度不足会导致
+  QLabel/QPlainTextEdit 互相重叠；把 `_detail_body` 放进 `QScrollArea`
+  （隐藏/显示滚动区而不是 body）即可，内容少时无滚动条、内容多时可滚动。
+
+### 6.19 M3.8：阅读检测与动态调级
+
+- **表结构（schema v4）**：`reading_quizzes` 一篇文章一行，`article_id UNIQUE` +
+  `ON DELETE CASCADE`；题目、作答、解析都存 JSON 文本，结果字段平铺
+  （`score / previous_level / result_level / feedback / completed_at`）。
+  `completed_at IS NULL` 是“已出题未提交”的唯一判据，不要用 `score == 0` 判断。
+- **两层缓存**：`get_or_create()` 先查 `reading_quizzes`，命中就完全不再调 AI；
+  判分失败时题目保留，用户重试只重新请求讲评。每日文章缓存与检测缓存相互独立，
+  但文章被“换一篇/调整难度”替换时会级联删掉旧检测（旧题已不对应新正文）。
+- **本地判分**：答案下标在出题时就由 AI 给出，提交后 `submit()` 在本地算
+  `score`；讲评 prompt 明确“得分已由系统算好，不要重算”，避免模型算术漂移。
+- **调级硬约束**（`constrain_level`，纯函数）：
+  - 全对（5/5）→ 至少升一档；
+  - 答对不到一半 → 至少降一档；
+  - 其他情况尊重 AI，但夹在当前等级 ±1 内；A1 归一到 A2，非法等级回退当前。
+  这样即使模型给出跨两级或与得分矛盾的结论，用户画像也不会跳变。
+- **失败语义**：调级 JSON 解析失败 → 抛 `AIError`，profile 不动、quiz 仍未完成；
+  只有讲评成功后才依次保存 profile 与 quiz 结果。界面右上角始终可重试。
+- **UI 状态机**：`loading → quiz → result` 三页；已完成的检测再次打开直接进
+  `result`，不重新判分；阅读页按钮文案据此切换为「查看答题结果」。
+  出题/判分都在弹窗自己的 `TaskWorker` 里，进行中拒绝关闭。
+- **全屏**：`setWindowFlags(WindowMinMaxButtonsHint)` 必须在 `setModal(True)` 之前
+  （重建原生窗口会丢模态状态）；F11 用 `WidgetWithChildrenShortcut`，
+  `keyPressEvent` 拦截“全屏状态下的 Esc”，避免用户想退出全屏却把弹窗关掉。
+- **循环导入**：`gui/pages/__init__.py` 改为模块级 `__getattr__` 按需导入。
+  弹窗要 import `pages.common`，如果包初始化时急切加载 reader，会形成
+  “弹窗 → pages 包 → reader → 弹窗”的循环；按需加载后单独跑弹窗测试也正常。
+- **导出**：`snapshot()` 中 `reading_quizzes` 用 `asdict` + 补充 `total`；
+  CSV 的 `questions` 是嵌套结构，`_csv_value` 对“含 dict/list 的列表”整体
+  `json.dumps`，简单列表仍用 `; ` 拼接。
+
+### 6.20 M3.9：混合难度、短答与连续证据
+
+- **schema v5**：`profile` 增加 `pending_level / pending_count`；
+  `reading_quizzes` 增加 `error_types_json`、`short_answer_text`、
+  `short_answer_score`、`self_report`、`recommended_level`、`pending_level`、
+  `pending_count`、`evidence_ratio`。旧库用 `_add_column` 原地升级。
+- **题目结构**：`QuizQuestion.kind` 区分 `choice / short`；选择题有
+  `options + answer_index`，短答题有 `reference_answer`。每题都有
+  `skill / difficulty`，AI 不返回时分别回退 `unknown` / 本卷等级。
+- **混合难度**：`prompts._quiz_difficulty_plan()` 根据当前等级算出
+  低一档/当前/高一档/高两档；prompt 要求 2+1+1+1 配比，再加 1 道短答。
+  本地允许 3~6 道选择题，但必须有且只有 1 道短答，否则重试。
+- **证据评分**（`score_quiz_evidence`，纯函数）：
+  - 同档答对 +1、答错 -1；
+  - 每高一档，答对额外 +0.5、答错少扣 0.5；每低一档反之；
+  - 短答按题目难度同样计分；自评“轻松/吃力”只做 ±0.25 弱修正；
+  - `ratio = points / max(1, 题数)`，夹在 [-1, 1]；
+  - `>= 0.45` 偏强、`<= -0.35` 偏弱、其余中性。
+- **AI 与证据结合**（`decide_recommended_level`）：AI 建议先归一到合法等级，
+  最多一档；同向直接走，一方中性听另一方；双方相反时，只有
+  `abs(ratio) >= 0.6` 的强证据才压过 AI，否则保持不动。
+- **连续证据**（`apply_level_policy`）：向上需要 2 次同向建议，第一次只写
+  `pending_level / pending_count`；第二次才真正改 `cefr_level`。中间出现
+  “保持当前等级”会清空待定；降级立即生效，保护学习体验。
+- **短答评分**：AI 返回 0/1；空短答本地强制 0，避免“没写也得 1 分”；
+  短答反馈优先写进 `explanations` 的短答位置，缺失时用
+  `short_answer_feedback` 兜底。
+- **错因**：`_parse_error_types()` 把 AI 结果整理成与题目等长的元组；
+  选择题答对强制 `none`，短答固定 `short_answer`，非法值归 `unknown`。
+- **UI**：答题页有自评下拉、短答输入框、难度/题型标签；结果页显示
+  “选择题 X/Y · 短答 0/1 · 证据强度 ±x.xx”，等级卡区分
+  “保持 / 建议升级（1/2）/ 已升级 / AI 建议但本次保持”。
+- **测试注意**：证据与连续策略都是纯函数，直接单测；服务测试用两个不同
+  日期的文章模拟“连续两次向上”。
+
+### 6.21 M3.10：生词本回显复习求助
+
+- **数据来源**：求助原因与 AI 建议在 M3.5 就已写入 `review_logs.note / advice`，
+  本次只做展示，**不要**再往 `words` 表加字段，也不要改变求助弹窗/评分流程；
+- **查询**：`ReviewRepo.list_help_for_word(word_id, limit=5)` 在 SQL 里用
+  `TRIM(note) <> '' OR TRIM(advice) <> ''` 过滤后按 `reviewed_at DESC, id DESC`
+  取最近 5 条；`count_help_for_word()` 单独统计总数用于“更早的 N 次”。
+  过滤必须下推到 SQL，不能先按普通复习记录取 N 条再过滤，否则大量
+  「认识 / 太简单」记录会把更早的求助挤出窗口；
+- **刷新时机**：生词本 `on_activated()` → `refresh()` → 重建表格并恢复选中行
+  → `_show_detail()`，所以复习完切到生词本即可看到新记录，无需额外信号；
+- **展示口径**：标题行 `YYYY-MM-DD HH:MM · 忘记/模糊`，正文分
+  「我的输入」「AI 帮记」两行；只有其中一项时另一行省略；
+- **空状态**：没有记录时显示引导文案，不隐藏整个区块，避免用户以为功能缺失。
+
+### 6.22 M3.11：本地后验、自适应出题与每周复盘
+
+- **schema v6**：`profile.level_confidence / level_updated_reason`；
+  `words.cefr_band`；`reading_quizzes.productions_json / level_confidence /
+  posterior_json / practice_mode / stage`；新增 `level_evidence`、
+  `weekly_reviews`。`idx_words_band` 必须等 ALTER TABLE 之后再建，
+  否则旧库执行 `SCHEMA_SQL` 会报 `no such column: cefr_band`（已实测踩过）。
+- **估计器（`level_estimator.py`）**：纯函数。先验以当前等级为中心
+  （距离权重 0.4），似然用 `1/(1+exp(1.1*(d-L)))`，概率裁剪到 [0.02, 0.98]。
+  决策只在“当前 ±1 档”窗口内取峰值；窗口概率 < 0.6 时保持当前等级。
+  `confidence` 是**窗口内**峰值占比，不是全四档的 MAP 概率——这样“B1 全对高难度题”
+  不会因为 C1 分走部分概率而显示成低置信。
+- **证据分层**：本次检测的题目观测 weight=1.0；盲评 0.5；自评 0.25；
+  复习词档最多 0.8。**只有题目/产出题观测写入 `level_evidence`**；盲评与自评
+  只影响当前这次后验，不参与历史回放（否则 0.5 的盲评会沿衰减回放累积到 ~1.5）。
+  历史检测按 0.75^age 回放最近 5 次。练习模式不写证据，也不进入讲评历史/难度统计。
+- **两阶段状态机**：`stage=1` 只有 3 道题；`advance_stage()` 先把第一轮答案写入
+  `answers_json`（只写前 3 个），再追加阶段二题目并置 `stage=2`。重开弹窗时
+  第一轮答案锁定展示，用户只需补第二轮。
+- **盲评**：`build_blind_level_messages()` 不传 profile 等级、也不展示题目难度
+  （第一轮难度恒为当前等级，展示会反推出画像）；盲评失败只记日志、不阻塞讲评与
+  本地后验。盲评建议按方向编码：高于当前 → `(盲评档, correct=True)` 向上；
+  低于当前 → `(盲评档, correct=False)` 向下；相同不产生观测。讲评 prompt 才包含
+  当前等级、历史摘要与难度/技能正确率。
+- **题目审核**：`_review_questions()` 调用一次审核 prompt，按 `invalid_indices`
+  剔除；审核失败（网络/JSON）保留原题。审核后数量不足才重出，最多两次。
+- **选项打乱**：`shuffle_question_options()` 重排选项并重映射 `answer_index`；
+  服务默认开启，测试可传 `shuffle_options=False` 以固定下标作答。
+- **每日一次正式检测**：用 `level_evidence.count_on(evidence_date)` 判断，
+  而不是 `reading_quizzes.article_date`——文章被“换一篇”替换时旧检测会级联删除，
+  只有证据表能记住“今天已经正式测过”。练习模式不写 profile/证据。
+- **每周复盘**：`WeeklyReviewService.get_or_generate()` 按周一缓存；
+  AI 建议经 `_clamp_suggestion()` 限制为最多一档、置信度 < 0.6 时保持；
+  `apply_suggestion()` 才写 profile 并标记 `applied_*`。
+- **导出**：JSON/CSV 新增 `level_evidence`、`weekly_reviews` 两张表；
+  `reading_quizzes` 增加 productions/后验/练习模式/阶段列。
 
 ## 7. M1 详细任务（已全部完成）
 
@@ -692,7 +1172,7 @@ Prompt 要点：
 ```
 src/english_learner/gui/pages/reader.py          # 替换占位
 src/english_learner/gui/widgets/__init__.py
-src/english_learner/gui/widgets/word_panel.py    # 右侧释义卡
+src/english_learner/gui/widgets/word_panel.py    # 释义卡（M3.6 起为悬浮卡）
 src/english_learner/gui/widgets/article_view.py  # QTextEdit 子类（双击取词）
 src/english_learner/services/dictionary_service.py
 ```
@@ -811,7 +1291,8 @@ def lookup(word: str, sentence: str, article_id: int, level: str) -> WordDefinit
 > 状态（2026-11-19）：核心项 1~6 全部完成，验证见 5.4；可选项未做。
 
 1. **数据导出** ✅：`services/export_service.py` + 设置页“数据导出”卡片，
-   JSON 快照 / CSV 六表；JSON 原子写入，CSV 用 `utf-8-sig`；
+   JSON 快照 / CSV 分表（M3.5 起为七表，M3.8 起为八表，含 `reading_quizzes`）；JSON 原子写入，
+   CSV 用 `utf-8-sig`；
    仓库新增 `ArticleRepo.list_all`、`WordRepo.list_all_highlights`、
    `ReviewRepo.list_all`、`StatsRepo.list_all`；
 2. **API Key 加密** ✅：`services/secret_store.py` 用 ctypes 调 Windows DPAPI，
@@ -842,7 +1323,7 @@ def lookup(word: str, sentence: str, article_id: int, level: str) -> WordDefinit
 | API Key 加密边界 | Windows 用 DPAPI；非 Windows 或加密失败会回退明文（日志有告警） | 保持；如支持更多平台再引入 keyring |
 | 取消是协作式 | `cancel()` 不会打断底层 HTTP，只让结果作废；关窗最多等一次 30s 超时 | 保持；如体验差再调短 AIClient 超时 |
 | SQLite 跨线程 | 连接 `check_same_thread=False` + 一把 RLock；所有仓库调用都走锁 | 保持；不要绕过 Database 直接执行 SQL |
-| 查词即入词库 | 按 M1 设计，`lookup()` 把结果写入 `words`（兼作缓存）。M2/M3 已确认**不改数据结构**：查过的词也会出现在生词本里，用户可手动（批量）删除 | M4 再决定是否加 `in_vocabulary` 标志列 |
+| 旧词无法区分来源 | M3.7 之前 `lookup()` 即写 `words`，升级时无法判断旧词是“查过”还是“加入过”，统一保留为已加入 | 保留优先；不需要的可在生词本批量删除 |
 | 测评题库固定 B1 | A2/B2 套已写好，UI 暂不提供选择 | 以后做自适应或设置项 |
 | 文章重试成本 | 校验失败会重试一次，失败的那次也计费 | 可接受；如频繁失败再调 prompt / 放宽校验 |
 | `json_mode` 兼容性 | 已实现 `complete_json()` 降级 + 本地三档解析；真实网关报错文案覆盖度待实测 | 实测后补充识别关键字 |
@@ -859,6 +1340,28 @@ def lookup(word: str, sentence: str, article_id: int, level: str) -> WordDefinit
 | 复习落库非原子 | `review()` 依次写词条、`review_logs`、`daily_stats`，未包同一个事务 | 概率极低；M4 视需要包进 `Database.transaction()` |
 | 生词本全量刷新 | 仍是全量查询 + 重建 QTableWidget；几百到几千条可接受 | 上万条再上分页 / 模型视图 |
 | CSV 无版本字段 | JSON 有 `version`，CSV 没有；跨版本迁移优先用 JSON | 可接受 |
+| 原形依赖 AI | went→go 等由模型判断，错判会写错 lemma；目前无手动改原形入口 | 视实际错判率决定是否加编辑/重新解析 |
+| 旧词不回填原形 | 升级前入库的词 lemma 仍是当时词形（如 went），不会自动改成 go | 新查词才走原形；需要整理时删旧词重查 |
+| 记忆方法质量 | 联想/谐音由模型生成，可能牵强或格式不统一 | 收集实际效果后迭代 prompt |
+| 复习求助成本 | 每次点“忘记/模糊”多一次 AI 调用 | 可加“本次不再提示”或按等级开关 |
+| 悬浮卡随滚动收起 | 滚动正文会隐藏释义卡，避免卡片与单词错位 | 可接受；如需跟随需重算锚点 |
+| 阅读检测出题质量 | 干扰项合理性、答案唯一性、解析准确性依赖模型；JSON 通过校验不代表题好 | 真实使用后收集差题，必要时在 prompt 增加“禁止模糊选项” |
+| 升级节奏 | 连续两次向上才升级，正常；但降级立即生效，疲劳答题可能误降 | 实测后考虑“降级也需两次”或加入“本次状态不好”开关 |
+| 短答评分主观 | AI 给 0/1，边界答案（关键词堆砌/语法差但达意）可能不稳定 | 收集样本后细化 0/1 rubric，或改为 0/1/2 三档 |
+| 本地证据阈值 | 0.45/0.35/0.6 是经验值，未用真实数据校准 | Phase 2 用历史检测 + 复习数据回归/校准 |
+| 一篇文章只能测一次 | 已完成的检测不重复判分，避免反复刷等级 | 如需重测可先“换一篇”，或后续加“仅重做不调级”选项 |
+| 检测成本 | 一次完整检测 = 出题 + 讲评两次 AI 调用；出题结果已缓存 | 可接受；如太贵可减少题数或复用文章生成时顺带出题 |
+| 外部验收依赖网关 | 验收模型通过 `--settings` 覆盖网关；模型/网关变化会影响复现 | 记录在 VERIFICATION_M3.9.md，换网关时重新跑 |
+| 后验阈值经验值 | 斜率 1.1、先验 0.4、置信度 0.6、历史衰减 0.75 均未用真实用户数据校准 | Phase 2 已把观测落库；积累真实数据后可回归校准 |
+| 题目审核成本 | 每次出题多一次 AI 调用；审核失败保留原题 | 可接受；如太贵可只在第一轮开审核或合并进讲评 |
+| 自适应第二轮成本 | 一次完整检测最多 4 次 AI 调用（两轮出题 + 盲评 + 讲评），另加审核 | 这是边界探测的代价；真实网关慢时可考虑合并审核 |
+| 每周复盘缓存粒度 | 同一周只生成一次；周一生成后，后续几天的数据不会更新该周复盘 | 符合“每周一次”；如需刷新可加“重新生成”按钮 |
+| 旧词无词档 | 升级前入库的词 `cefr_band` 为空，不参与复习词档证据 | 新查词才带词档；需要时删旧词重查 |
+| 题目历史正确率口径 | 每篇文章的题都是 AI 现出的，同一道题不会重复出现；本地统计按 difficulty/skill 聚合 | 逐题对错仍在 `reading_quizzes` 的 questions/answers/productions 中，可离线回放 |
+| 每周复盘建议依赖模型 | `suggested_level` 仍由 AI 给出，本地只做合法性/跳档/置信度钳制 | 用户必须确认才生效；不满意可保持当前 |
+| 产出题评分缺失 | 模型完全省略 `production_scores` 时按 0 分容错（2 道产出题不会重试） | 若真实网关频繁出现，改为抛格式错误让用户重试 |
+| 检测结果三写非原子 | `profile` → `reading_quizzes` → `level_evidence` 依次写入，未包同一事务 | 与复习落库同类；概率极低，M4 视需要包 `Database.transaction()` |
+| 外部验收动态执行受限 | 本机外部 CLI 在 4 轮验收中均无法执行 pytest/ruff（权限层），只能静态审查 | 动态检查以开发会话自检结果归档；换环境/授权后可复跑 |
 
 ## 12. 下次会话开工指令
 
@@ -866,9 +1369,10 @@ def lookup(word: str, sentence: str, article_id: int, level: str) -> WordDefinit
 
 ```text
 继续 py-learn 的 english_learner。先读 CLAUDE.md、docs/english_learner/PRODUCT.md
-和 docs/english_learner/PROGRESS.md，确认当前 M3 核心项已完成，剩下的是可选 M4
-（深色模式、安装器 / 自动更新）与真实环境调优。先跑 pytest/ruff 确认基线，再按
-PROGRESS.md 第 10、11 节决定做哪一项；每完成一块补测试并更新状态与验证记录。
+和 docs/english_learner/PROGRESS.md，确认 M3.11（Phase 2 本地后验 + Phase 3 自适应/
+盲评/每周复盘）已完成，当前基线应为 273 passed。下一步优先做真实环境调优：
+混合难度与自适应出题质量、置信度阈值校准、每周复盘文案；可选 M4（深色模式、
+安装器 / 自动更新）继续保留。每完成一块补测试并更新状态与验证记录。
 不要引入 ORM，不要跳过 TaskWorker 直接调 AI，services/storage 不得 import PySide6。
 ```
 
@@ -879,3 +1383,68 @@ uv sync
 uv run pytest -q
 uv run ruff check src/english_learner tests
 ```
+
+## 13. M3.9 后续优化阶段（Phase 2 / Phase 3，已完成 → M3.11）
+
+> 第一阶段（M3.9）已经把“AI 直接给等级”改成“AI 出证据 + 本地连续策略”。
+> 下面两阶段用于把“单次检测”升级成“长期、可置信的水平估计”。
+> **状态（2026-11-19）：Phase 2 / Phase 3 均已完成，实现细节见 1. 当前状态 M3.11
+> 与 6.22；外部验收见 `VERIFICATION_M3.11.md`。** 下面保留原始任务书作为对照。
+
+### Phase 2：本地证据模型 + 置信度（✅ 已完成）
+
+目标：让等级变化基于多次观测的后验，而不是两次二值信号。
+
+1. **数据结构**
+   - 新增 `level_evidence` 表（或扩展 `reading_quizzes`）：
+     `source`（assessment/feedback/quiz/review）、`observed_at`、
+     `quiz_id`、`choice_correct/total`、`short_score`、
+     `weighted_points`、`evidence_ratio`、`error_type_summary_json`、
+     `posterior_json`、`confidence`。
+   - `profile` 增加 `level_confidence REAL`、`level_updated_reason TEXT`；
+     `pending_level/pending_count` 保留，作为后验未达阈值时的过渡状态。
+2. **本地估计**
+   - 用简单的 Rasch/逻辑斯蒂模型：
+     `P(correct | L, d) = 1 / (1 + exp(k * (index(d) - index(L))))`，
+     对 A2/B1/B2/C1 四个候选等级计算似然，再乘当前先验得到后验。
+   - 题目难度由 AI 标注（已有 `difficulty`），本地只做算术；
+     短答按一道同档/高档题计入。
+   - 等级只在后验 MAP 与当前不同且 `confidence >= 0.6` 时改变；
+     升级仍可要求连续两次，降级可一次。
+3. **历史与长期信号**
+   - 讲评 prompt 附带最近 5~10 次检测摘要（文章等级、得分、难度分布、错因），
+     让 AI 做趋势判断；本地仍保留最终决定权。
+   - 查词/生词本增加 `cefr_band` 或频率档（AI 查词时顺带标注）；
+     统计用户查得最多、复习最稳的词档，作为弱证据。
+   - 复习评分（`review_logs.rating`）按词档聚合，纳入证据模型。
+4. **UI**
+   - 结果页显示「B1（置信度 0.62）/ 建议 B2（观察中）」；
+   - 今日页可显示等级趋势（最近 4 周），不做复杂图表，先文字/小条形。
+5. **验收标准**
+   - 纯函数估计器单测：全对/全错/混合难度/缺失难度/边界等级；
+   - 两个用户场景回放：连续简单题不应快速升级、连续高难度题应升级；
+   - 旧库 v5 → v6 原地迁移，旧检测结果不回填、不阻塞。
+
+### Phase 3：自适应出题与更强诊断（✅ 已完成）
+
+1. **两阶段自适应**
+   - 先出 3 道当前等级题；根据正确率再出 2 道高一档或低一档题，
+     用“边界探测”替代固定配比；代价是多一次出题调用。
+2. **题目质量校准**
+   - AI 出题后增加一次“题目审核”pass：检查答案唯一、干扰项合理、
+     是否必须读文章才能答；不合格题丢弃/重出。
+   - 记录每题历史正确率（本地统计），逐步形成文章题库的难度校准。
+3. **更强产出信号**
+   - 短答从 1 题扩展到 1 题短答 + 1 题句子改写/翻译（按等级可选）；
+   - AI 评分 rubric 固定为“内容 / 语法 / 词汇”三项，减少主观漂移。
+4. **盲评与反作弊**
+   - 等级评估与讲评分两次调用：讲评模型看到当前等级；
+     等级评估模型不看当前等级（blind），减少锚定偏差。
+   - 选项随机排序、同一天只允许一次正式检测；重做只练手不调级。
+5. **长期复盘**
+   - 每周一次 AI 复盘：汇总检测、生词、复习数据，输出“本周水平判断 +
+     下周建议”；用户确认后才改等级。
+6. **验收标准**
+   - 自适应题目的难度选择有单测（mock AI）；
+   - 盲评分数与当前等级的相关性可用历史数据回放；
+   - 任何 AI 失败都不改画像，用户可跳过/重试。

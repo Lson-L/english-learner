@@ -56,6 +56,7 @@ def make_word(lemma: str, **overrides) -> Word:
         "example_en": f"This is {lemma}.",
         "example_cn": f"这是 {lemma}。",
         "context_sentence": f"A sentence with {lemma} in it.",
+        "in_vocabulary": True,
         "status": "new",
         "ease": 2.5,
         "interval_days": 0,
@@ -108,6 +109,8 @@ def test_session_reveal_rate_and_finish(db: Database, tmp_path: Path) -> None:
     page = ReviewPage(make_context(db, tmp_path))
     page.on_activated()
     page._start_session()
+    # “忘记”会弹复习帮助框；单测直接跳过 AI 弹窗，验证评分与调度。
+    page._collect_review_help = lambda _rating: ("", "")
 
     # 第一张：alpha
     assert page._current is not None
@@ -153,6 +156,44 @@ def test_no_due_words_disables_start(db: Database, tmp_path: Path) -> None:
     page._start_session()
     assert page._stack.currentWidget() is page._idle_page
     assert "没有到期" in page._status.text()
+
+
+def test_forgot_logs_reason_and_advice(db: Database, tmp_path: Path) -> None:
+    get_app()
+    stored = db.words.upsert(make_word("alpha"))
+    assert stored.id is not None
+
+    page = ReviewPage(make_context(db, tmp_path))
+    page.on_activated()
+    page._start_session()
+    page._reveal()
+    page._collect_review_help = lambda _rating: ("总是和 beta 混淆", "alpha 更像…")
+
+    page._rate(RATING_FORGOT)
+
+    logs = db.reviews.list_for_word(stored.id)
+    assert len(logs) == 1
+    assert logs[0].note == "总是和 beta 混淆"
+    assert logs[0].advice == "alpha 更像…"
+
+
+def test_cancelled_help_does_not_rate(db: Database, tmp_path: Path) -> None:
+    get_app()
+    stored = db.words.upsert(make_word("alpha"))
+    assert stored.id is not None
+
+    page = ReviewPage(make_context(db, tmp_path))
+    page.on_activated()
+    page._start_session()
+    page._reveal()
+    page._collect_review_help = lambda _rating: None
+
+    page._rate(RATING_FORGOT)
+
+    assert page._index == 0
+    assert db.reviews.list_for_word(stored.id) == []
+    reloaded = db.words.get_by_id(stored.id)
+    assert reloaded is not None and reloaded.repetitions == 0
 
 
 def test_shortcuts_are_installed(db: Database, tmp_path: Path) -> None:

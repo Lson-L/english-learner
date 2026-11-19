@@ -7,13 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from english_learner.models.entities import Profile, Word, now_iso
+from english_learner.models.entities import Article, Profile, Word, now_iso
 from english_learner.services.ai_client import AIError
 from english_learner.services.article_service import (
     ArticleService,
     InvalidArticleError,
     parse_article_draft,
 )
+from english_learner.services.prompts import build_article_messages
 from english_learner.storage.db import Database
 
 # 12 个词；重复 6 次 = 72 词，3 段 = 216 词，落在 200~400 的校验区间内。
@@ -153,6 +154,7 @@ def test_due_words_are_sent_to_prompt(db: Database, profile: Profile) -> None:
     db.words.upsert(
         Word(
             lemma="resilient",
+            in_vocabulary=True,
             due_date="2026-11-18",
             created_at=now_iso(),
             updated_at=now_iso(),
@@ -231,6 +233,57 @@ def test_regenerate_follows_user_request(db: Database, profile: Profile) -> None
     assert "写一篇关于深海生物的文章" in prompt
     assert "主题：history" not in prompt
     assert "切入角度" not in prompt
+
+
+def test_regenerate_with_request_includes_current_article(db: Database, profile: Profile) -> None:
+    """用户写了换一篇要求时，要把当前文章一起发给模型，便于理解指代。"""
+    fake = FakeCompleter(payload_text(title="First"), payload_text(title="Second"))
+    service = make_service(db, fake)
+
+    service.get_or_create_today(profile, today="2026-11-18")
+    service.regenerate_today(
+        profile,
+        today="2026-11-18",
+        user_request="沿用这篇的叙事方式，但换成深海主题",
+    )
+
+    prompt = fake.messages[1][1]["content"]
+    assert "【当前文章（仅作参考）】" in prompt
+    assert "标题：First" in prompt
+    assert BASE_SENTENCE in prompt
+    assert "不要逐句改写" in prompt
+    # 用户要的是“按这篇参考”，不能再把当前标题列进“禁止重复”，避免指令冲突。
+    assert "下面这些文章已经写过了" not in prompt
+
+
+def test_regenerate_without_request_omits_current_article(db: Database, profile: Profile) -> None:
+    """没写要求时不带当前文章，避免模型被原文带偏、也节省 token。"""
+    fake = FakeCompleter(payload_text(title="First"), payload_text(title="Second"))
+    service = make_service(db, fake)
+
+    service.get_or_create_today(profile, today="2026-11-18")
+    service.regenerate_today(profile, today="2026-11-18")
+
+    prompt = fake.messages[1][1]["content"]
+    assert "【当前文章（仅作参考）】" not in prompt
+    assert BASE_SENTENCE not in prompt
+    # 仍会为了避免重复而列出旧标题
+    assert "First" in prompt
+
+
+def test_prompt_ignores_current_article_without_request(db: Database) -> None:
+    """底层 prompt 也做兜底：没有 user_request 就不渲染当前文章。"""
+    article = Article(
+        article_date="2026-11-18",
+        title="First",
+        content=BASE_SENTENCE,
+        level="B1",
+        word_count=12,
+        created_at=now_iso(),
+    )
+
+    messages = build_article_messages("B1", [], "psychology", current_article=article)
+    assert "【当前文章（仅作参考）】" not in messages[1]["content"]
 
 
 def test_regenerate_failure_keeps_old_article(db: Database, profile: Profile) -> None:

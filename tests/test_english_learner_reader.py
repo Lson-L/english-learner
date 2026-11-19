@@ -10,16 +10,19 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtCore import QRect  # noqa: E402
+from PySide6.QtWidgets import QApplication, QSplitter  # noqa: E402
 
 from english_learner.gui.pages.reader import ReaderPage  # noqa: E402
 from english_learner.gui.regenerate_dialog import RegenerateDialog  # noqa: E402
-from english_learner.gui.widgets import ArticleView  # noqa: E402
+from english_learner.gui.widgets import ArticleView, WordPanel  # noqa: E402
 from english_learner.gui.workers import TaskWorker  # noqa: E402
 from english_learner.models.entities import (  # noqa: E402
     Article,
     Highlight,
     Profile,
+    QuizQuestion,
+    ReadingQuiz,
     Word,
     now_iso,
     today_str,
@@ -82,6 +85,7 @@ def make_word(**overrides) -> Word:
         "lemma": "habits",
         "display_form": "habits",
         "meaning_cn": "习惯",
+        "in_vocabulary": True,
         "status": "new",
         "due_date": today_str(),
         "created_at": now_iso(),
@@ -146,6 +150,7 @@ def test_lookup_new_word_calls_ai_and_stores(db: Database) -> None:
         "meaning_en": "able to recover quickly",
         "example_en": "Children are resilient.",
         "example_cn": "孩子很有韧性。",
+        "mnemonic": "re-silient：像弹簧一样重新弹起来",
     }
     fake = FakeCompleter(json.dumps(payload, ensure_ascii=False))
     service = DictionaryService(fake, db.words, db.stats)
@@ -155,11 +160,91 @@ def test_lookup_new_word_calls_ai_and_stores(db: Database) -> None:
     assert fake.calls == 1
     assert result.cached is False
     assert result.word.meaning_cn == "有韧性的"
+    assert result.word.mnemonic.startswith("re-silient")
     assert result.word.id is not None
     stored = db.words.get_by_lemma("resilient")
     assert stored is not None
     assert stored.due_date == today_str()
     assert stored.context_sentence == "Resilient people keep going."
+
+
+def test_lookup_stores_cefr_band_and_tolerates_invalid(db: Database) -> None:
+    payload = {
+        "lemma": "resilient",
+        "meaning_cn": "有韧性的",
+        "cefr_band": "b2",
+    }
+    service = DictionaryService(
+        FakeCompleter(json.dumps(payload, ensure_ascii=False)), db.words, db.stats
+    )
+
+    result = service.lookup("Resilient", "Resilient people keep going.", None, "B1")
+    assert result.word.cefr_band == "B2"
+
+    payload["lemma"] = "stubborn"
+    payload["cefr_band"] = "Z9"
+    service = DictionaryService(
+        FakeCompleter(json.dumps(payload, ensure_ascii=False)), db.words, db.stats
+    )
+    invalid = service.lookup("Stubborn", "Stubborn people keep going.", None, "B1")
+    assert invalid.word.cefr_band == ""
+
+
+def test_lookup_uses_base_form_and_caches_inflection(db: Database) -> None:
+    """went 应存成 go；再次查 went 直接命中词形缓存，不再调用 AI。"""
+    payload = {
+        "lemma": "go",
+        "display_form": "went",
+        "phonetic": "/ɡoʊ/",
+        "pos": "v.",
+        "meaning_cn": "去；走（go 的过去式）",
+        "meaning_en": "to move or travel to a place (past tense of go)",
+        "example_en": "She went home after work.",
+        "example_cn": "她下班后回家了。",
+        "mnemonic": "go-went-gone：想象一个人出门又走远",
+    }
+    fake = FakeCompleter(json.dumps(payload, ensure_ascii=False))
+    service = DictionaryService(fake, db.words, db.stats)
+
+    first = service.lookup("Went", "She went home after work.", None, "B1")
+
+    assert first.cached is False
+    assert first.word.lemma == "go"
+    assert first.word.display_form == "Went"
+    assert first.word.mnemonic.startswith("go-went-gone")
+
+    second = service.lookup("went", "She went home after work.", None, "B1")
+    assert second.cached is True
+    assert fake.calls == 1
+    assert second.word.id == first.word.id
+    # 查词只写缓存，不自动加入生词本
+    assert first.word.in_vocabulary is False
+    assert db.words.count() == 0
+    assert db.words.count(include_cache=True) == 1
+    assert {form.form for form in db.words.list_all_forms()} == {"went", "go"}
+
+
+def test_generate_mnemonic_for_existing_word(db: Database) -> None:
+    word = db.words.upsert(make_word(lemma="resilient"))
+    assert word.id is not None
+
+    fake = FakeCompleter(json.dumps({"mnemonic": "re + silent：重新安静下来就有韧性"}))
+    service = DictionaryService(fake, db.words, db.stats)
+
+    updated = service.generate_mnemonic(word, "B1")
+
+    assert fake.calls == 1
+    assert updated.mnemonic == "re + silent：重新安静下来就有韧性"
+    stored = db.words.get_by_id(word.id)
+    assert stored is not None and stored.mnemonic == updated.mnemonic
+
+
+def test_generate_mnemonic_requires_meaningful_reply(db: Database) -> None:
+    word = db.words.upsert(make_word(lemma="resilient"))
+    service = DictionaryService(FakeCompleter(json.dumps({})), db.words, db.stats)
+
+    with pytest.raises(AIError):
+        service.generate_mnemonic(word, "B1")
 
 
 def test_lookup_rejects_non_word(db: Database) -> None:
@@ -170,8 +255,10 @@ def test_lookup_rejects_non_word(db: Database) -> None:
 
 def test_add_to_vocabulary_is_idempotent(db: Database) -> None:
     article = db.articles.insert(make_article())
-    word = db.words.upsert(make_word())
+    # 模拟“双击查词后只进缓存”的状态，再显式加入生词本
+    word = db.words.upsert(make_word(in_vocabulary=False))
     assert article.id is not None and word.id is not None
+    assert db.words.count() == 0
     service = DictionaryService(FakeCompleter(), db.words, db.stats)
 
     first = service.add_to_vocabulary(
@@ -192,9 +279,58 @@ def test_add_to_vocabulary_is_idempotent(db: Database) -> None:
     assert second is False
     assert len(db.words.list_highlights(article.id)) == 1
     assert db.stats.get(today_str()).words_added == 1
+    stored = db.words.get_by_id(word.id)
+    assert stored is not None and stored.in_vocabulary is True
+    assert db.words.count() == 1
 
 
 # ------------------------------------------------------------------ 阅读器
+def test_reader_page_uses_floating_word_card(db: Database) -> None:
+    """阅读器不再有右侧固定栏，释义卡是浮在页面上的子控件。"""
+    get_app()
+    db.articles.insert(make_article())
+    context = AppContext(
+        AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
+        ConfigStore(Path("unused.json")),
+        db,
+    )
+    page = ReaderPage(context)
+    page.resize(1000, 700)
+    page.on_activated()
+
+    assert page.findChildren(QSplitter) == []
+    assert page._panel.parent() is page
+    assert page._panel.isHidden() is True
+
+    word = db.words.upsert(make_word())
+    page._panel.show_definition(word, "Small habits are powerful.")
+    # 模拟双击时记录的单词矩形，验证卡片定位/夹取逻辑。
+    page._view._last_word_rect = QRect(600, 600, 80, 20)
+    page._show_word_card()
+
+    assert page._panel.isHidden() is False
+    assert page._panel.width() == 380
+    assert page._panel.x() >= 0 and page._panel.y() >= 0
+    assert page._panel.x() + page._panel.width() <= page.width()
+    assert page._panel.y() + page._panel.height() <= page.height()
+
+    # 点击正文 / 关闭按钮 / Esc 路径都会收起卡片
+    page._view.background_clicked.emit()
+    assert page._panel.isHidden() is True
+
+    page._show_word_card()
+    page._panel._close_button.click()
+    assert page._panel.isHidden() is True
+
+    # 收起后迟到的查词结果不应让卡片再次弹出
+    page._pending = ("late", 0, 4, "")
+    page._show_word_card()
+    page._hide_word_card()
+    page._on_lookup_ready(object())
+    assert page._pending is None
+    assert page._panel.isHidden() is True
+
+
 def test_article_view_renders_highlights(db: Database) -> None:
     get_app()
     view = ArticleView()
@@ -248,6 +384,51 @@ def test_reader_feedback_button_needs_profile_and_article(db: Database) -> None:
     assert page._feedback_button.isEnabled() is True
 
 
+def test_reader_quiz_button_reflects_completion(db: Database) -> None:
+    get_app()
+    article = db.articles.insert(make_article())
+    db.profiles.save(Profile(cefr_level="B1"))
+    context = AppContext(
+        AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
+        ConfigStore(Path("unused.json")),
+        db,
+    )
+
+    page = ReaderPage(context)
+    page.on_activated()
+    assert page._quiz_button.isEnabled() is True
+    assert page._quiz_button.text() == "阅读完成"
+
+    assert article.id is not None
+    quiz = db.quizzes.insert(
+        ReadingQuiz(
+            article_id=article.id,
+            article_date=today_str(),
+            level="B1",
+            questions=(
+                QuizQuestion(prompt="Q?", options=("a", "b", "c"), answer_index=0),
+                QuizQuestion(prompt="Q2?", options=("a", "b", "c"), answer_index=1),
+                QuizQuestion(prompt="Q3?", options=("a", "b", "c"), answer_index=2),
+            ),
+            created_at=now_iso(),
+        )
+    )
+    assert quiz.id is not None
+    db.quizzes.save_result(
+        quiz.id,
+        answers=(0, 1, 2),
+        explanations=("", "", ""),
+        score=3,
+        previous_level="B1",
+        result_level="B2",
+        feedback="全对，升一档。",
+    )
+
+    page.refresh()
+    assert page._quiz_button.text() == "查看答题结果"
+    assert page._quiz_button.isEnabled() is True
+
+
 def test_regenerate_dialog_returns_input_or_empty() -> None:
     get_app()
     dialog = RegenerateDialog()
@@ -255,6 +436,27 @@ def test_regenerate_dialog_returns_input_or_empty() -> None:
 
     dialog._request_edit.setPlainText("  写一篇关于深海生物的文章  ")
     assert dialog.request_text() == "写一篇关于深海生物的文章"
+
+
+def test_word_panel_shows_original_form_and_mnemonic() -> None:
+    get_app()
+    panel = WordPanel()
+    word = Word(
+        lemma="go",
+        display_form="went",
+        meaning_cn="去；走（go 的过去式）",
+        mnemonic="go-went-gone：出门又走远",
+        created_at=now_iso(),
+        updated_at=now_iso(),
+    )
+
+    panel.show_definition(word, "She went home after work.")
+
+    assert panel._title.text() == "went"
+    assert panel._lemma.text() == "原形：go"
+    assert panel._lemma.isHidden() is False
+    assert "go-went-gone" in panel._mnemonic.text()
+    assert panel._mnemonic.isHidden() is False
 
 
 def test_reader_shutdown_returns_worker_that_ignores_cancel(db: Database) -> None:
@@ -302,4 +504,5 @@ def test_reader_page_without_profile_does_not_generate(db: Database) -> None:
 
     assert page._worker is None
     assert not page._generate_button.isHidden()
+    assert page._quiz_button.isEnabled() is False
     assert "测评" in page._status.text()

@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
 import pytest
 
-from english_learner.models.entities import Article, Profile, Word, now_iso
+from english_learner.models.entities import (
+    Article,
+    Profile,
+    QuizQuestion,
+    ReadingQuiz,
+    Word,
+    now_iso,
+)
 from english_learner.storage.db import SCHEMA_VERSION, Database, DuplicateError
 
 
@@ -42,6 +51,7 @@ def make_word(**overrides) -> Word:
         "pos": "adj.",
         "meaning_cn": "有韧性的",
         "meaning_en": "able to recover quickly",
+        "in_vocabulary": True,
         "due_date": "2026-11-18",
         "created_at": now_iso(),
         "updated_at": now_iso(),
@@ -63,8 +73,531 @@ def test_initialize_is_idempotent(tmp_path: Path) -> None:
         str(item["name"])
         for item in second.query_all("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
-    assert {"profile", "articles", "words", "highlights", "review_logs", "daily_stats"} <= tables
+    assert {
+        "profile",
+        "articles",
+        "words",
+        "word_forms",
+        "highlights",
+        "review_logs",
+        "daily_stats",
+        "reading_quizzes",
+    } <= tables
     second.close()
+
+
+def test_migrate_v1_database_adds_new_columns(tmp_path: Path) -> None:
+    """M3 之前的数据库要能原地升级，旧词条/复习记录不能丢。"""
+    path = tmp_path / "v1.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE words (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lemma TEXT NOT NULL COLLATE NOCASE UNIQUE,
+            display_form TEXT NOT NULL DEFAULT '',
+            phonetic TEXT NOT NULL DEFAULT '',
+            pos TEXT NOT NULL DEFAULT '',
+            meaning_cn TEXT NOT NULL DEFAULT '',
+            meaning_en TEXT NOT NULL DEFAULT '',
+            example_en TEXT NOT NULL DEFAULT '',
+            example_cn TEXT NOT NULL DEFAULT '',
+            context_sentence TEXT NOT NULL DEFAULT '',
+            article_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'new',
+            ease REAL NOT NULL DEFAULT 2.5,
+            interval_days INTEGER NOT NULL DEFAULT 0,
+            repetitions INTEGER NOT NULL DEFAULT 0,
+            due_date TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE review_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            word_id INTEGER NOT NULL,
+            rating INTEGER NOT NULL,
+            prev_interval INTEGER NOT NULL,
+            next_interval INTEGER NOT NULL,
+            reviewed_at TEXT NOT NULL
+        );
+        INSERT INTO words (lemma, meaning_cn, created_at, updated_at)
+            VALUES ('legacy', '旧词条', '2026-11-01T10:00:00', '2026-11-01T10:00:00');
+        INSERT INTO review_logs (word_id, rating, prev_interval, next_interval, reviewed_at)
+            VALUES (1, 3, 0, 1, '2026-11-01T10:00:00');
+        PRAGMA user_version = 1;
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    try:
+        word_columns = {str(row["name"]) for row in db.query_all("PRAGMA table_info(words)")}
+        log_columns = {str(row["name"]) for row in db.query_all("PRAGMA table_info(review_logs)")}
+        profile_columns = {str(row["name"]) for row in db.query_all("PRAGMA table_info(profile)")}
+        quiz_columns = {
+            str(row["name"]) for row in db.query_all("PRAGMA table_info(reading_quizzes)")
+        }
+        assert "mnemonic" in word_columns
+        assert "in_vocabulary" in word_columns
+        assert {"note", "advice"} <= log_columns
+        assert {"pending_level", "pending_count"} <= profile_columns
+        assert {
+            "error_types_json",
+            "short_answer_text",
+            "short_answer_score",
+            "self_report",
+            "recommended_level",
+            "pending_level",
+            "pending_count",
+            "evidence_ratio",
+        } <= quiz_columns
+
+        word = db.words.get_by_lemma("legacy")
+        assert word is not None and word.meaning_cn == "旧词条"
+        assert word.mnemonic == ""
+        # 旧版本查词即入本，升级时统一保留为“已加入”
+        assert word.in_vocabulary is True
+
+        assert word.id is not None
+        logs = db.reviews.list_for_word(word.id)
+        assert len(logs) == 1
+        assert logs[0].note == "" and logs[0].advice == ""
+
+        row = db.query_one("PRAGMA user_version")
+        assert row is not None and int(row[0]) == SCHEMA_VERSION
+        forms = db.query_one(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'word_forms'"
+        )
+        assert forms is not None
+        quizzes = db.query_one(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reading_quizzes'"
+        )
+        assert quizzes is not None
+    finally:
+        db.close()
+
+
+def test_migrate_v4_database_adds_m39_columns(tmp_path: Path) -> None:
+    """已存在 v4 检测数据时，原地加列不能丢题目/结果。"""
+    path = tmp_path / "v4.db"
+    questions = [
+        {
+            "prompt": f"Q{index}?",
+            "options": ["a", "b", "c"],
+            "answer_index": 0,
+            "explanation": "",
+            "skill": "detail",
+            "difficulty": "B1",
+            "kind": "choice",
+        }
+        for index in range(1, 6)
+    ]
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE profile (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            cefr_level TEXT NOT NULL,
+            vocab_estimate INTEGER NOT NULL DEFAULT 0,
+            strengths_json TEXT NOT NULL DEFAULT '[]',
+            weaknesses_json TEXT NOT NULL DEFAULT '[]',
+            comment TEXT NOT NULL DEFAULT '',
+            assessed_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE articles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            article_date TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            level TEXT NOT NULL,
+            topic TEXT NOT NULL DEFAULT '',
+            word_count INTEGER NOT NULL DEFAULT 0,
+            target_words_json TEXT NOT NULL DEFAULT '[]',
+            read_at TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE reading_quizzes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            article_id INTEGER NOT NULL UNIQUE,
+            article_date TEXT NOT NULL,
+            level TEXT NOT NULL,
+            questions_json TEXT NOT NULL,
+            answers_json TEXT NOT NULL DEFAULT '[]',
+            explanations_json TEXT NOT NULL DEFAULT '[]',
+            score INTEGER NOT NULL DEFAULT 0,
+            previous_level TEXT NOT NULL DEFAULT '',
+            result_level TEXT NOT NULL DEFAULT '',
+            feedback TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+        INSERT INTO profile (
+            id, cefr_level, vocab_estimate, strengths_json, weaknesses_json,
+            comment, assessed_at, updated_at
+        ) VALUES (1, 'B1', 3800, '[]', '[]', '旧画像', '2026-11-01T10:00:00',
+                  '2026-11-01T10:00:00');
+        INSERT INTO articles (
+            article_date, title, content, level, topic, word_count, created_at
+        ) VALUES ('2026-11-19', 'Old Article', 'Old content.', 'B1', 'test', 2,
+                  '2026-11-19T08:00:00');
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO reading_quizzes (
+            article_id, article_date, level, questions_json, answers_json,
+            explanations_json, score, previous_level, result_level, feedback,
+            created_at, completed_at
+        ) VALUES (1, '2026-11-19', 'B1', ?, '[0, 0, 0, 0, 0]', '[]', 5, 'B1',
+                  'B2', '旧结果', '2026-11-19T09:00:00', '2026-11-19T09:10:00')
+        """,
+        (json.dumps(questions, ensure_ascii=False),),
+    )
+    conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    try:
+        version_row = db.query_one("PRAGMA user_version")
+        assert version_row is not None and int(version_row[0]) == SCHEMA_VERSION
+
+        profile = db.profiles.get()
+        assert profile is not None
+        assert profile.cefr_level == "B1"
+        assert profile.comment == "旧画像"
+        assert profile.pending_level == ""
+        assert profile.pending_count == 0
+
+        quiz = db.quizzes.get_by_article(1)
+        assert quiz is not None
+        assert quiz.completed is True
+        assert quiz.choice_total == 5
+        assert quiz.short_total == 0
+        assert quiz.total == 5
+        assert quiz.score == 5
+        assert quiz.result_level == "B2"
+        assert quiz.short_answer_text == ""
+        assert quiz.short_answer_score == 0
+        assert quiz.error_types == ()
+        assert quiz.evidence_ratio == 0
+
+        columns = {str(row["name"]) for row in db.query_all("PRAGMA table_info(reading_quizzes)")}
+        assert {"short_answer_text", "short_answer_score", "evidence_ratio"} <= columns
+    finally:
+        db.close()
+
+
+def test_migrate_v5_database_adds_phase2_columns(tmp_path: Path) -> None:
+    """v5（M3.9）数据库原地升级到 v6：新列/新表补齐，旧检测不回填、不阻塞。"""
+    path = tmp_path / "v5.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE profile (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            cefr_level TEXT NOT NULL,
+            vocab_estimate INTEGER NOT NULL DEFAULT 0,
+            strengths_json TEXT NOT NULL DEFAULT '[]',
+            weaknesses_json TEXT NOT NULL DEFAULT '[]',
+            comment TEXT NOT NULL DEFAULT '',
+            assessed_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            pending_level TEXT NOT NULL DEFAULT '',
+            pending_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE words (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lemma TEXT NOT NULL COLLATE NOCASE UNIQUE,
+            display_form TEXT NOT NULL DEFAULT '',
+            phonetic TEXT NOT NULL DEFAULT '',
+            pos TEXT NOT NULL DEFAULT '',
+            meaning_cn TEXT NOT NULL DEFAULT '',
+            meaning_en TEXT NOT NULL DEFAULT '',
+            example_en TEXT NOT NULL DEFAULT '',
+            example_cn TEXT NOT NULL DEFAULT '',
+            mnemonic TEXT NOT NULL DEFAULT '',
+            context_sentence TEXT NOT NULL DEFAULT '',
+            article_id INTEGER,
+            in_vocabulary INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'new',
+            ease REAL NOT NULL DEFAULT 2.5,
+            interval_days INTEGER NOT NULL DEFAULT 0,
+            repetitions INTEGER NOT NULL DEFAULT 0,
+            due_date TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE reading_quizzes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            article_id INTEGER NOT NULL UNIQUE,
+            article_date TEXT NOT NULL,
+            level TEXT NOT NULL,
+            questions_json TEXT NOT NULL,
+            answers_json TEXT NOT NULL DEFAULT '[]',
+            explanations_json TEXT NOT NULL DEFAULT '[]',
+            error_types_json TEXT NOT NULL DEFAULT '[]',
+            short_answer_text TEXT NOT NULL DEFAULT '',
+            short_answer_score INTEGER NOT NULL DEFAULT 0,
+            self_report TEXT NOT NULL DEFAULT '',
+            score INTEGER NOT NULL DEFAULT 0,
+            recommended_level TEXT NOT NULL DEFAULT '',
+            previous_level TEXT NOT NULL DEFAULT '',
+            result_level TEXT NOT NULL DEFAULT '',
+            pending_level TEXT NOT NULL DEFAULT '',
+            pending_count INTEGER NOT NULL DEFAULT 0,
+            feedback TEXT NOT NULL DEFAULT '',
+            evidence_ratio REAL NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            completed_at TEXT
+        );
+        INSERT INTO profile (
+            id, cefr_level, vocab_estimate, assessed_at, updated_at,
+            pending_level, pending_count
+        ) VALUES (1, 'B1', 3800, '2026-11-01T10:00:00', '2026-11-01T10:00:00', 'B2', 1);
+        INSERT INTO words (lemma, meaning_cn, in_vocabulary, created_at, updated_at)
+            VALUES ('legacy', '旧词条', 1, '2026-11-01T10:00:00', '2026-11-01T10:00:00');
+        INSERT INTO reading_quizzes (
+            article_id, article_date, level, questions_json, answers_json,
+            score, previous_level, result_level, feedback, created_at, completed_at
+        ) VALUES (1, '2026-11-19', 'B1', '[]', '[0,0,0]', 3, 'B1', 'B1',
+                  '旧结果', '2026-11-19T09:00:00', '2026-11-19T09:10:00');
+        PRAGMA user_version = 5;
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    try:
+        version_row = db.query_one("PRAGMA user_version")
+        assert version_row is not None and int(version_row[0]) == SCHEMA_VERSION
+
+        profile = db.profiles.get()
+        assert profile is not None
+        assert profile.cefr_level == "B1"
+        assert profile.pending_level == "B2"
+        assert profile.level_confidence == 0
+        assert profile.level_updated_reason == ""
+
+        word = db.words.get_by_lemma("legacy")
+        assert word is not None
+        assert word.cefr_band == ""
+
+        quiz = db.quizzes.get_by_article(1)
+        assert quiz is not None
+        assert quiz.completed is True
+        assert quiz.stage == 2  # 旧检测默认视为完整卷
+        assert quiz.productions == ()
+        assert quiz.level_confidence == 0
+        assert quiz.posterior == ()
+        assert quiz.practice_mode is False
+
+        tables = {
+            str(item["name"])
+            for item in db.query_all("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert {"level_evidence", "weekly_reviews"} <= tables
+        # 旧检测不回填证据，避免把 M3.9 的旧结果当成新观测。
+        assert db.evidence.count() == 0
+    finally:
+        db.close()
+
+
+def test_level_evidence_and_weekly_review_roundtrip(db: Database) -> None:
+    from english_learner.models.entities import (
+        BandReviewStat,
+        EvidenceObservation,
+        LevelEvidence,
+        WeeklyReview,
+    )
+
+    article = db.articles.insert(make_article())
+    assert article.id is not None
+    quiz = db.quizzes.insert(
+        ReadingQuiz(
+            article_id=article.id,
+            article_date=article.article_date,
+            level="B1",
+            questions=(QuizQuestion(prompt="Q1?", options=("a", "b"), answer_index=1),),
+            stage=1,
+            created_at=now_iso(),
+        )
+    )
+    assert quiz.id is not None
+    evidence = db.evidence.insert(
+        LevelEvidence(
+            source="quiz",
+            observed_at="2026-11-19T20:00:00",
+            evidence_date="2026-11-19",
+            article_level="B1",
+            quiz_id=quiz.id,
+            choice_correct=1,
+            choice_total=1,
+            observations=(
+                EvidenceObservation("B2", True, 0.5, "blind"),
+                EvidenceObservation("B1", True, 1.0),
+            ),
+            posterior=(0.05, 0.2, 0.6, 0.15),
+            confidence=0.6,
+        )
+    )
+
+    assert evidence.id is not None
+    loaded = db.evidence.list_recent(1)[0]
+    assert loaded.quiz_id == quiz.id
+    assert loaded.evidence_date == "2026-11-19"
+    assert loaded.observations[0] == EvidenceObservation("B2", True, 0.5, "blind")
+    assert loaded.posterior_map["B2"] == pytest.approx(0.6)
+    assert db.evidence.count_on("2026-11-19") == 1
+    assert db.evidence.count_on("2026-11-20") == 0
+
+    review = db.weekly_reviews.save(
+        WeeklyReview(
+            week_start="2026-11-16",
+            summary="本周稳定。",
+            suggested_level="B2",
+            focus=("推断题",),
+            quiz_count=1,
+            review_count=3,
+            words_added=2,
+            confidence=0.7,
+            created_at="2026-11-19T21:00:00",
+        )
+    )
+    assert review.id is not None
+    assert db.weekly_reviews.get_by_week("2026-11-16") == review
+    assert db.weekly_reviews.list_recent(1) == [review]
+
+    applied = db.weekly_reviews.mark_applied("2026-11-16", "B2", "2026-11-19T22:00:00")
+    assert applied is not None and applied.applied is True
+    assert applied.applied_level == "B2"
+
+    # 删除文章会级联删检测，但证据保留（quiz_id 置空）。
+    db.articles.delete_by_date(article.article_date)
+    kept = db.evidence.list_recent(1)
+    assert len(kept) == 1 and kept[0].quiz_id is None
+    assert isinstance(BandReviewStat("B2", 2, 1), BandReviewStat)
+
+
+def test_cache_only_word_is_not_in_vocabulary(db: Database) -> None:
+    """双击查词只写缓存：不出现在生词本/复习队列，显式加入后才算。"""
+    word = db.words.upsert(make_word(lemma="cacheonly", in_vocabulary=False))
+    assert word.id is not None
+
+    assert db.words.count() == 0
+    assert db.words.count(include_cache=True) == 1
+    assert db.words.list_all() == []
+    assert db.words.list_due("2026-11-18") == []
+    assert db.stats.count_due("2026-11-18") == 0
+
+    marked = db.words.mark_in_vocabulary(word.id)
+    assert marked is not None and marked.in_vocabulary is True
+    assert db.words.count() == 1
+    assert [item.lemma for item in db.words.list_due("2026-11-18")] == ["cacheonly"]
+    assert db.stats.count_due("2026-11-18") == 1
+
+
+def test_word_form_cache_mnemonic_and_cascade(db: Database) -> None:
+    word = db.words.upsert(make_word(lemma="go", display_form="went"))
+    assert word.id is not None
+
+    db.words.remember_form("Went", word.id)
+    cached = db.words.get_by_form("went")
+    assert cached is not None and cached.id == word.id
+    assert [form.form for form in db.words.list_all_forms()] == ["went"]
+
+    updated = db.words.update_mnemonic(word.id, "go-went-gone：出门又走远")
+    assert updated is not None
+    assert updated.mnemonic == "go-went-gone：出门又走远"
+
+    assert db.words.update_mnemonic(9999, "x") is None
+    assert db.words.delete(word.id) is True
+    assert db.words.get_by_form("went") is None
+
+
+def test_quiz_roundtrip_result_and_cascade(db: Database) -> None:
+    article = db.articles.insert(make_article())
+    assert article.id is not None
+    questions = (
+        QuizQuestion(prompt="Q1?", options=("a", "b", "c"), answer_index=1, explanation="解析"),
+        QuizQuestion(prompt="Q2?", options=("a", "b", "c"), answer_index=2),
+        QuizQuestion(prompt="Q3?", options=("a", "b", "c"), answer_index=0),
+        QuizQuestion(
+            prompt="Summarize it.",
+            kind="short",
+            skill="writing",
+            difficulty="B1",
+            reference_answer="A reference.",
+        ),
+    )
+    stored = db.quizzes.insert(
+        ReadingQuiz(
+            article_id=article.id,
+            article_date=article.article_date,
+            level="B1",
+            questions=questions,
+            created_at=now_iso(),
+        )
+    )
+
+    assert stored.id is not None
+    assert stored.completed is False
+    loaded = db.quizzes.get_by_article(article.id)
+    assert loaded == stored
+    assert [question.prompt for question in loaded.questions] == [  # type: ignore[union-attr]
+        "Q1?",
+        "Q2?",
+        "Q3?",
+        "Summarize it.",
+    ]
+
+    with pytest.raises(DuplicateError):
+        db.quizzes.insert(stored)
+
+    completed = db.quizzes.save_result(
+        stored.id,
+        answers=(1, 2, 0),
+        explanations=("对了", "", "再看原文", "短答反馈"),
+        error_types=("none", "vocabulary", "none", "short_answer"),
+        short_answer_text="Habits add up over time.",
+        short_answer_score=1,
+        self_report="hard",
+        score=3,
+        recommended_level="B2",
+        previous_level="B1",
+        result_level="B1",
+        pending_level="B2",
+        pending_count=1,
+        feedback="细节题需要再练。",
+        evidence_ratio=0.5,
+        completed_at="2026-11-19T20:00:00",
+    )
+    assert completed.completed is True
+    assert completed.score == 3
+    assert completed.total == 4
+    assert completed.percent == 75
+    assert completed.previous_level == "B1"
+    assert completed.result_level == "B1"
+    assert completed.recommended_level == "B2"
+    assert completed.level_changed is False
+    assert completed.waiting_for_upgrade is True
+    assert completed.pending_level == "B2"
+    assert completed.pending_count == 1
+    assert completed.answers == (1, 2, 0)
+    assert completed.explanations == ("对了", "", "再看原文", "短答反馈")
+    assert completed.error_types == ("none", "vocabulary", "none", "short_answer")
+    assert completed.short_answer_text == "Habits add up over time."
+    assert completed.short_answer_score == 1
+    assert completed.self_report == "hard"
+    assert completed.evidence_ratio == pytest.approx(0.5)
+    assert db.quizzes.list_all() == [completed]
+
+    # 文章被替换/删除时，题目随外键级联清理
+    db.articles.delete_by_date(article.article_date)
+    assert db.quizzes.get_by_article(article.id) is None
 
 
 def test_profile_roundtrip_and_overwrite(db: Database) -> None:
@@ -75,6 +608,8 @@ def test_profile_roundtrip_and_overwrite(db: Database) -> None:
         weaknesses=("学术词汇",),
         comment="整体 B1 偏上",
         assessed_at="2026-11-18T10:00:00",
+        pending_level="B2",
+        pending_count=1,
     )
     stored = db.profiles.save(profile)
 
@@ -83,6 +618,8 @@ def test_profile_roundtrip_and_overwrite(db: Database) -> None:
     assert loaded == stored
     assert loaded is not None
     assert loaded.strengths == ("阅读理解", "基础语法")
+    assert loaded.pending_level == "B2"
+    assert loaded.pending_count == 1
 
     db.profiles.save(Profile(cefr_level="B2", assessed_at="2026-11-19T10:00:00"))
     updated = db.profiles.get()
@@ -247,6 +784,134 @@ def test_review_repo_logs_recent_and_count(db: Database) -> None:
     assert db.reviews.count_for_date("2026-11-18") == 1
     assert db.reviews.count_for_date("2026-11-19") == 1
     assert db.reviews.count_for_date("2026-11-20") == 0
+
+
+def test_review_repo_help_logs_filter_order_and_limit(db: Database) -> None:
+    """求助记录只保留有原因/建议的条目，按时间倒序，limit 与并列时间稳定。"""
+    word = db.words.upsert(make_word())
+    assert word.id is not None
+
+    db.reviews.log(
+        word_id=word.id,
+        rating=3,
+        prev_interval=0,
+        next_interval=1,
+        reviewed_at="2026-11-19T10:00:00",
+    )
+    note_only = db.reviews.log(
+        word_id=word.id,
+        rating=2,
+        prev_interval=0,
+        next_interval=1,
+        reviewed_at="2026-11-19T09:00:00",
+        note="只记得大概意思",
+    )
+    advice_only = db.reviews.log(
+        word_id=word.id,
+        rating=1,
+        prev_interval=0,
+        next_interval=1,
+        reviewed_at="2026-11-19T11:00:00",
+        advice="拆词根记",
+    )
+    # note/advice 全为空白：log() 会 strip 成空串，等同于普通记录。
+    db.reviews.log(
+        word_id=word.id,
+        rating=1,
+        prev_interval=0,
+        next_interval=1,
+        reviewed_at="2026-11-19T12:00:00",
+        note="   ",
+        advice="  ",
+    )
+    # 相同时间戳：靠 id DESC 保证后写入的排前面。
+    tie_first = db.reviews.log(
+        word_id=word.id,
+        rating=2,
+        prev_interval=0,
+        next_interval=1,
+        reviewed_at="2026-11-19T13:00:00",
+        note="并列 A",
+    )
+    tie_second = db.reviews.log(
+        word_id=word.id,
+        rating=2,
+        prev_interval=0,
+        next_interval=1,
+        reviewed_at="2026-11-19T13:00:00",
+        note="并列 B",
+    )
+
+    assert db.reviews.count_help_for_word(word.id) == 4
+    logs = db.reviews.list_help_for_word(word.id)
+    assert [log.id for log in logs] == [
+        tie_second.id,
+        tie_first.id,
+        advice_only.id,
+        note_only.id,
+    ]
+
+    limited = db.reviews.list_help_for_word(word.id, limit=2)
+    assert [log.id for log in limited] == [tie_second.id, tie_first.id]
+
+    assert db.reviews.list_help_for_word(9999) == []
+    assert db.reviews.count_help_for_word(9999) == 0
+
+
+def test_review_band_stats_and_stats_summary(db: Database) -> None:
+    easier = db.words.upsert(make_word(lemma="easyword", cefr_band="A2"))
+    harder = db.words.upsert(make_word(lemma="hardword", cefr_band="C1"))
+    unbanded = db.words.upsert(make_word(lemma="unbanded", cefr_band=""))
+    assert easier.id is not None and harder.id is not None and unbanded.id is not None
+
+    db.reviews.log(
+        word_id=easier.id,
+        rating=4,
+        prev_interval=0,
+        next_interval=1,
+        reviewed_at="2026-11-19T09:00:00",
+    )
+    db.reviews.log(
+        word_id=easier.id,
+        rating=3,
+        prev_interval=1,
+        next_interval=6,
+        reviewed_at="2026-11-19T10:00:00",
+    )
+    db.reviews.log(
+        word_id=harder.id,
+        rating=1,
+        prev_interval=0,
+        next_interval=1,
+        reviewed_at="2026-11-19T11:00:00",
+    )
+    db.reviews.log(
+        word_id=unbanded.id,
+        rating=4,
+        prev_interval=0,
+        next_interval=1,
+        reviewed_at="2026-11-19T12:00:00",
+    )
+
+    stats = {item.band: item for item in db.reviews.list_band_stats()}
+    assert stats["A2"].total == 2 and stats["A2"].known == 2
+    assert stats["C1"].total == 1 and stats["C1"].known == 0
+    assert "unbanded" not in {item.band for item in db.reviews.list_band_stats()}
+    weekly = {item.band: item for item in db.reviews.list_band_stats("2026-11-19", "2026-11-19")}
+    assert weekly["A2"].total == 2 and weekly["C1"].total == 1
+    assert db.reviews.list_band_stats("2026-11-20", "2026-11-21") == []
+    assert db.reviews.count_between("2026-11-19", "2026-11-19") == 4
+    assert db.reviews.count_between("2026-11-20", "2026-11-21") == 0
+
+    db.stats.bump("2026-11-18", article_read=1, words_added=2, reviews_done=3)
+    db.stats.bump("2026-11-19", article_read=1, words_added=1, reviews_done=2)
+    summary = db.stats.summarize_between("2026-11-16", "2026-11-22")
+    assert summary == {"articles": 2, "words": 3, "reviews": 5}
+    assert db.stats.summarize_between("2026-11-01", "2026-11-02") == {
+        "articles": 0,
+        "words": 0,
+        "reviews": 0,
+    }
 
 
 def test_save_schedule_only_touches_scheduling_fields(db: Database) -> None:

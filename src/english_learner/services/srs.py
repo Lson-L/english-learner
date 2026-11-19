@@ -152,8 +152,19 @@ class ReviewService:
         return len(self.due_words())
 
     # ------------------------------------------------------------------ 评分
-    def review(self, word: Word, rating: int) -> ReviewOutcome:
-        """应用评分：写回调度字段 → 记一条复习历史 → 今日复习数 +1。"""
+    def review(
+        self,
+        word: Word,
+        rating: int,
+        *,
+        note: str = "",
+        advice: str = "",
+    ) -> ReviewOutcome:
+        """应用评分：写回调度字段 → 记一条复习历史 → 今日复习数 +1。
+
+        `note` 是用户对“为什么没记住”的说明，`advice` 是 AI 给出的记忆建议，
+        两者只进 review_logs，不影响调度。
+        """
         if word.id is None:
             raise ValueError("review() 需要已落库的词条（word.id 不能为空）")
 
@@ -166,6 +177,8 @@ class ReviewService:
                 rating=rating,
                 prev_interval=int(word.interval_days),
                 next_interval=int(saved.interval_days),
+                note=note[:500],
+                advice=advice[:1000],
             )
         if self._stats is not None:
             self._stats.bump(self._today(), reviews_done=1)
