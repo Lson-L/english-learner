@@ -31,6 +31,8 @@ uv run ruff format src/english_learner tests
 - `docs/english_learner/ARCHITECTURE.md`：**按需**。文件地图 + 关键实现与踩坑说明；
   改 AI 客户端、存储、阅读检测、导出等模块前定向读对应小节；
 - `docs/english_learner/TECH_DEBT.md`：**按需**。已知问题与技术债完整表格；
+- `docs/english_learner/AI_STRATEGY.md`：**按需**。AI 能力规划提案（现状盘点、
+  三个缺口、P0/P1/P2 建议、成本与 schema 草案），排下一轮功能前读；
 - `docs/english_learner/HISTORY.md`：**默认不读**。已完成里程碑的交付记录、
   旧任务书与验证记录，只在排查历史决策时检索；
 - `docs/english_learner/PRODUCT.md`：产品定位、MVP 范围、已确认决策。

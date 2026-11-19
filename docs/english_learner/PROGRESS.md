@@ -12,6 +12,7 @@
 > - 历史交付、旧任务书与验证记录在 [HISTORY.md](HISTORY.md)，
 >   只在排查“以前为什么这么改”时检索，**不要默认加载**；
 > - 重构 / 修 bug / 规划 M4 前扫一遍 [TECH_DEBT.md](TECH_DEBT.md)；
+> - 规划下一轮功能（AI 该用在哪、优先级、成本）读 [AI_STRATEGY.md](AI_STRATEGY.md)；
 > - 完成里程碑：更新本文件看板，并在 HISTORY.md 追加交付记录，
 >   **不要再把细节堆回本文件**。
 
