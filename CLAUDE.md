@@ -27,7 +27,7 @@ uv run ruff format src/english_learner tests
 ## 文档索引（改代码前先读）
 
 - `docs/english_learner/PRODUCT.md`：产品定位、MVP 范围、已确认决策；
-- `docs/english_learner/PROGRESS.md`：**当前进度、各里程碑实现细节、M3 任务清单、
+- `docs/english_learner/PROGRESS.md`：**当前进度、各里程碑实现细节、M4 可选任务、
   已知问题、下次开工指令**。每完成一个里程碑必须更新它。
 
 ## 硬性约定
@@ -61,7 +61,8 @@ uv run ruff format src/english_learner tests
 
 ## 当前状态
 
-- **M0 / M1 / M1.5 / M2 完成**（M2 于 2026-11-19）：配置、测评、每日文章、阅读划词、
-  生词本、SM-2 复习、首页真实数据全部可用；复习完全本地化，不依赖 AI。
-- **下一步：M3**（数据导出、Key 加密、请求取消、错误兜底、性能）。任务顺序与
-  已知技术债见 `docs/english_learner/PROGRESS.md` 第 9、10 节。
+- **M0 / M1 / M1.5 / M2 / M3 核心项完成**（2026-11-19）：配置、测评、每日文章、
+  阅读划词、生词本、SM-2 复习、数据导出、DPAPI Key 加密、可取消请求全部可用；
+  复习与生词本完全本地化，不依赖 AI。
+- **剩余为可选 M4**（深色模式、安装器 / 自动更新）与真实环境调优。任务说明与
+  已知技术债见 `docs/english_learner/PROGRESS.md` 第 10、11 节。

@@ -25,6 +25,7 @@ from .article_service import ArticleService
 from .assessment_service import AssessmentService
 from .config_store import AIConfig, ConfigStore
 from .dictionary_service import DictionaryService
+from .export_service import ExportService
 from .level_feedback_service import LevelFeedbackService
 from .srs import ReviewService
 
@@ -81,6 +82,16 @@ class AppContext:
     def review_service(self) -> ReviewService:
         """复习完全本地化：不注入 AI 客户端，断网也能用。"""
         return ReviewService(self.word_repo, self.review_repo, self.stats_repo)
+
+    def export_service(self) -> ExportService:
+        """数据导出同样是纯本地操作。"""
+        return ExportService(
+            self.profile_repo,
+            self.article_repo,
+            self.word_repo,
+            self.review_repo,
+            self.stats_repo,
+        )
 
     # ------------------------------------------------------------------ 便捷
     def profile(self) -> Profile | None:

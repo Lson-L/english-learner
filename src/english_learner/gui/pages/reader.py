@@ -195,6 +195,7 @@ class ReaderPage(QWidget):
         worker = TaskWorker(task)
         worker.succeeded.connect(self._on_article_ready)
         worker.failed.connect(self._on_article_failed)
+        worker.cancelled.connect(self._on_worker_finished)
         worker.finished.connect(self._on_worker_finished)
         self._worker = worker
         worker.start()
@@ -279,6 +280,7 @@ class ReaderPage(QWidget):
         worker = TaskWorker(lambda: service.lookup(word, sentence, article_id, level))
         worker.succeeded.connect(self._on_lookup_ready)
         worker.failed.connect(self._on_lookup_failed)
+        worker.cancelled.connect(self._on_worker_finished)
         worker.finished.connect(self._on_worker_finished)
         self._worker = worker
         worker.start()
@@ -359,3 +361,15 @@ class ReaderPage(QWidget):
         self._set_busy(False)
         if self._article is not None:
             self._regenerate_button.setEnabled(True)
+
+    # ------------------------------------------------------------------ 关闭
+    def shutdown(self, timeout_ms: int = 3000) -> TaskWorker | None:
+        """窗口关闭时收尾：请求取消并等待；返回超时后仍在运行的线程。"""
+        worker = self._worker
+        # 不能用 isRunning() 判断：start() 后线程可能还没真正跑起来，
+        # 此时 isRunning() 是 False，但线程仍会在稍后执行。
+        if worker is None or worker.isFinished():
+            return None
+        if worker.stop(timeout_ms):
+            return None
+        return worker

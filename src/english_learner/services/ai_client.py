@@ -37,12 +37,31 @@ logger = logging.getLogger(__name__)
 
 
 class AIError(RuntimeError):
-    """AI 调用失败。message 给用户看，hint 给排查建议。"""
+    """AI 调用失败。message 给用户看，hint 给排查建议。
 
-    def __init__(self, message: str, hint: str = "") -> None:
+    `kind` 用于界面/上层做粗分类（auth / network / timeout / rate_limit /
+    not_found / server / request / config / format / unknown）；
+    `retryable=True` 表示“稍后再试可能成功”，例如断网、超时、429、5xx。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        hint: str = "",
+        *,
+        retryable: bool = False,
+        kind: str = "unknown",
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.hint = hint
+        self.retryable = retryable
+        self.kind = kind
+
+    @property
+    def is_offline(self) -> bool:
+        """是否为“网络不可达”类错误（离线时复习/生词本仍应可用）。"""
+        return self.kind in {"network", "timeout"}
 
     def display_message(self) -> str:
         if self.hint:
@@ -87,7 +106,7 @@ class AIClient:
         """
         errors = self.config.validate()
         if errors:
-            raise AIError("配置不完整：" + "；".join(errors))
+            raise AIError("配置不完整：" + "；".join(errors), kind="config")
 
         client = self._build_client()
         started_at = time.perf_counter()
@@ -112,6 +131,7 @@ class AIClient:
                 "服务返回了空内容",
                 "模型可能把 token 全用于思考，或该模型不支持 chat 接口。"
                 "请换一个模型 id，或检查 base_url 是否为 OpenAI 兼容地址。",
+                kind="format",
             )
         return ConnectionResult(reply=content, model=self.config.model, latency_ms=latency_ms)
 
@@ -200,39 +220,51 @@ def translate_error(exc: Exception) -> AIError:
         return AIError(
             "API Key 无效或没有权限（HTTP 401）",
             "请检查 Key 是否复制完整、是否已过期；部分服务商还需要先在控制台开通模型。",
+            kind="auth",
         )
     if isinstance(exc, PermissionDeniedError):
         return AIError(
             "没有访问该模型的权限（HTTP 403）",
             "请在服务商控制台确认账号已开通该模型，或检查 Key 的权限范围。",
+            kind="auth",
         )
     if isinstance(exc, NotFoundError):
         return AIError(
             "模型或接口地址不存在（HTTP 404）",
             "请检查模型 id 拼写；base_url 通常需要以 /v1 结尾"
             "（例如 https://api.deepseek.com/v1）。",
+            kind="not_found",
         )
     if isinstance(exc, RateLimitError):
         return AIError(
             "请求过于频繁或额度不足（HTTP 429）",
             "请稍后再试，或检查账户余额与限流设置。",
+            retryable=True,
+            kind="rate_limit",
         )
     if isinstance(exc, APITimeoutError):
         return AIError(
             "请求超时",
             "请检查网络，或换一个更近的服务地址后重试。",
+            retryable=True,
+            kind="timeout",
         )
     if isinstance(exc, APIConnectionError):
         return AIError(
             "无法连接到服务地址",
             "请检查 base_url 是否正确、本机网络/代理是否可用；本地 Ollama 需先启动服务。",
+            retryable=True,
+            kind="network",
         )
     if isinstance(exc, APIStatusError):
         detail = _extract_error_detail(exc)
         suffix = f"：{detail}" if detail else ""
+        server_side = exc.status_code >= 500 or exc.status_code == 408
         return AIError(
             f"服务端返回 HTTP {exc.status_code}{suffix}",
             "请根据状态码检查配置；如果状态码是 400，通常是模型 id 或参数不被支持。",
+            retryable=server_side,
+            kind="server" if server_side else "request",
         )
     return AIError(f"调用失败：{exc}")
 

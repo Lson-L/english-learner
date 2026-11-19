@@ -9,6 +9,8 @@ M1 的职责：
 
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
@@ -32,6 +34,9 @@ from .assessment_dialog import AssessmentDialog
 from .onboarding import OnboardingDialog
 from .pages import ReaderPage, ReviewPage, SettingsPage, TodayPage, VocabularyPage
 from .theme import build_stylesheet
+from .workers import TaskWorker
+
+logger = logging.getLogger(__name__)
 
 # 页面栈顺序与侧边栏按钮索引硬绑定：改这里必须同步改 _build_sidebar / _go。
 PAGE_TODAY = 0
@@ -73,7 +78,7 @@ class MainWindow(QMainWindow):
         self._reader_page = ReaderPage(self._context)
         self._vocabulary_page = VocabularyPage(self._context)
         self._review_page = ReviewPage(self._context)
-        self._settings_page = SettingsPage(config, store)
+        self._settings_page = SettingsPage(config, store, self._context)
         self._settings_page.reconfigure_requested.connect(self._open_reconfigure)
         self._settings_page.english_font_changed.connect(self._apply_english_font)
         # 全局 QSS 已在 app.main() 按偏好生成；这里只需同步正文文档字体。
@@ -149,7 +154,21 @@ class MainWindow(QMainWindow):
         return button
 
     def _go(self, index: int) -> None:
-        """切换页面，并通知目标页面刷新数据。"""
+        """切换页面，并通知目标页面刷新数据。
+
+        离开当前页前先问它 `can_deactivate()`（生词本用它拦截未保存的释义）；
+        被拒绝时把导航按钮的选中状态恢复到当前页。
+        """
+        current_index = self._stack.currentIndex()
+        if index != current_index:
+            current_page = self._pages[current_index]
+            can_deactivate = getattr(current_page, "can_deactivate", None)
+            if callable(can_deactivate) and not can_deactivate():
+                current_button = self._nav_group.button(current_index)
+                if current_button is not None:
+                    current_button.setChecked(True)
+                return
+
         self._stack.setCurrentIndex(index)
         button = self._nav_group.button(index)
         if button is not None:
@@ -200,5 +219,27 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- 关闭
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt 约定
+        current_page = self._pages[self._stack.currentIndex()]
+        can_deactivate = getattr(current_page, "can_deactivate", None)
+        if callable(can_deactivate) and not can_deactivate():
+            event.ignore()
+            return
+
+        self._stop_worker_threads()
         self._db.close()
         super().closeEvent(event)
+
+    def _stop_worker_threads(self) -> None:
+        """先请求取消并给几秒宽限；仍不结束就阻塞等待，避免 QThread 销毁警告。"""
+        stuck: list[TaskWorker] = []
+        for page in self._pages:
+            shutdown = getattr(page, "shutdown", None)
+            if not callable(shutdown):
+                continue
+            worker = shutdown()
+            if worker is not None:
+                stuck.append(worker)
+
+        for worker in stuck:
+            logger.warning("后台线程未在宽限期内结束，等待其网络超时退出…")
+            worker.wait()

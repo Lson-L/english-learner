@@ -130,6 +130,49 @@ def test_connection_error_is_translated() -> None:
     assert "无法连接" in translated.display_message()
 
 
+def test_error_kinds_classify_offline_and_retryable() -> None:
+    request = httpx2.Request("POST", "https://api.example.com/v1/chat/completions")
+
+    network = ai_module.translate_error(openai.APIConnectionError(request=request))
+    assert network.kind == "network"
+    assert network.retryable is True
+    assert network.is_offline is True
+
+    timeout = ai_module.translate_error(openai.APITimeoutError(request=request))
+    assert timeout.kind == "timeout"
+    assert timeout.retryable is True
+    assert timeout.is_offline is True
+
+    auth = ai_module.translate_error(http_error(401, "bad key"))
+    assert auth.kind == "auth"
+    assert auth.retryable is False
+    assert auth.is_offline is False
+
+    not_found = ai_module.translate_error(http_error(404, "missing"))
+    assert not_found.kind == "not_found"
+    assert not_found.retryable is False
+
+    rate_limit = ai_module.translate_error(http_error(429, "slow down"))
+    assert rate_limit.kind == "rate_limit"
+    assert rate_limit.retryable is True
+
+    bad_request = ai_module.translate_error(http_error(400, "bad params"))
+    assert bad_request.kind == "request"
+    assert bad_request.retryable is False
+
+
+def test_server_error_is_retryable() -> None:
+    request = httpx2.Request("POST", "https://api.example.com/v1/chat/completions")
+    response = httpx2.Response(503, request=request, json={"error": {"message": "busy"}})
+    error = openai.APIStatusError("busy", response=response, body=None)
+
+    translated = ai_module.translate_error(error)
+
+    assert translated.kind == "server"
+    assert translated.retryable is True
+    assert "503" in translated.display_message()
+
+
 def test_complete_uses_configured_temperature(monkeypatch: pytest.MonkeyPatch) -> None:
     completions = FakeCompletions(response=fake_response("hello"))
     monkeypatch.setattr(ai_module, "OpenAI", FakeClient.factory(completions))

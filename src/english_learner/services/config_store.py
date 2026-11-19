@@ -10,9 +10,11 @@ Java 对照：
 - macOS:   ~/Library/Application Support/EnglishLearner/config.json
 - 其他:    $XDG_CONFIG_HOME/english_learner/config.json 或 ~/.config/english_learner/config.json
 
-安全说明（M0 已知限制）：
-- API Key 目前以明文保存在上述用户配置目录，文件权限在类 Unix 下收紧为 600。
-- M1 之后可换成 Windows DPAPI（CryptProtectData）或 keyring，接口不变。
+安全说明：
+- API Key 在 Windows 上用 DPAPI 加密后写入配置（见 `secret_store.py`），
+  密文与当前 Windows 用户绑定；非 Windows 或加密失败时回退明文，文件权限
+  在类 Unix 下收紧为 600；
+- 旧版明文配置可以直接读取，下次保存时自动升级为密文。
 """
 
 from __future__ import annotations
@@ -20,9 +22,11 @@ from __future__ import annotations
 import json
 import os
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
+
+from .secret_store import SecretError, is_encrypted, protect, unprotect
 
 APP_DIR_NAME = "EnglishLearner"
 CONFIG_FILE_NAME = "config.json"
@@ -184,8 +188,18 @@ class ConfigStore:
         if not isinstance(ai_data, dict):
             ai_data = data
         config = AIConfig.from_dict(ai_data).normalized()
-        if config.validate():
-            raise ConfigError("配置文件缺少必要字段：" + "；".join(config.validate()))
+        try:
+            api_key = unprotect(config.api_key)
+        except SecretError as exc:
+            raise ConfigError(
+                f"{exc}\n请点击「重新配置」重新填写 API Key，或删除配置文件后重启。"
+            ) from exc
+        if api_key != config.api_key:
+            config = replace(config, api_key=api_key).normalized()
+
+        errors = config.validate()
+        if errors:
+            raise ConfigError("配置文件缺少必要字段：" + "；".join(errors))
         return config
 
     def save(self, config: AIConfig) -> AIConfig:
@@ -197,7 +211,11 @@ class ConfigStore:
 
         # 保留 ui 段：重新配置 AI 不应该把用户选的字体冲掉。
         ui_data = self._read_payload().get("ui")
-        payload: dict[str, Any] = {"version": CONFIG_VERSION, "ai": normalized.to_dict()}
+        ai_data = normalized.to_dict()
+        # 调用方通常传明文；若已经是密文（例如原样回写），不要二次加密。
+        if not is_encrypted(normalized.api_key):
+            ai_data["api_key"] = protect(normalized.api_key)
+        payload: dict[str, Any] = {"version": CONFIG_VERSION, "ai": ai_data}
         if isinstance(ui_data, dict):
             payload["ui"] = ui_data
         self._write_payload(payload)

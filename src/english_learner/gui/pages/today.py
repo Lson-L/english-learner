@@ -92,6 +92,7 @@ class TodayPage(QWidget):
 
         self._article_desc = QLabel(
             "按你的 CEFR 等级生成 250~350 词短文，并优先复现生词本里到期的词。"
+            "生成文章需要联网；断网时仍可复习生词、查看已缓存的文章。"
         )
         self._article_desc.setObjectName("muted")
         self._article_desc.setWordWrap(True)
@@ -144,7 +145,8 @@ class TodayPage(QWidget):
 
         if due_count:
             self._review_desc.setText(
-                f"今天有 {due_count} 个词到期。先回忆再看答案，按四档反馈即可，3~5 分钟走完。"
+                f"今天有 {due_count} 个词到期。先回忆再看答案，按四档反馈即可，"
+                "3~5 分钟走完，全程离线可用。"
             )
             self._review_button.setText("开始复习")
         else:
@@ -188,7 +190,7 @@ class TodayPage(QWidget):
             self._article_title.setText("今日文章 · 尚未生成")
             self._article_desc.setText(
                 "点击下面的按钮，AI 会按你的等级生成一篇 250~350 词的短文，"
-                "并优先复现生词本里到期的词。"
+                "并优先复现生词本里到期的词。生成需要联网；断网时可先去复习。"
             )
             self._article_button.setText("生成今日文章")
             return

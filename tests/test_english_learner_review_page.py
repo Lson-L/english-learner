@@ -160,3 +160,17 @@ def test_shortcuts_are_installed(db: Database, tmp_path: Path) -> None:
     page = ReviewPage(make_context(db, tmp_path))
     # 空格/回车 + 4 个评分键
     assert len(page._shortcuts) == 6
+
+
+def test_session_respects_queue_limit(db: Database, tmp_path: Path) -> None:
+    """复习队列一次最多 200 词，避免积压时一次性加载过多。"""
+    get_app()
+    for index in range(205):
+        db.words.upsert(make_word(f"word{index:03d}"))
+
+    page = ReviewPage(make_context(db, tmp_path))
+    page.on_activated()
+    page._start_session()
+
+    assert len(page._session) == 200
+    assert page._progress_label.text() == "第 1 / 200 个"

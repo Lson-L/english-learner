@@ -1,10 +1,11 @@
-"""生词本页：列表 + 筛选 + 搜索 + 手动编辑释义 + 删除。
+"""生词本页：列表 + 筛选 + 搜索 + 排序 + 编辑释义 + 批量删除。
 
 数据口径：
 - 列表来自 `words` 表（查词即入库，所以可能包含查过但没点「加入」的词，
   这是 M1 已确认的行为，M2 不改数据结构）；
 - 筛选按 SM-2 状态：未复习（new）/ 学习中（learning）/ 已掌握（mastered）；
-- 编辑只改释义（中英文），不碰调度字段；删除会级联清理高亮与复习历史。
+- 编辑只改释义（中英文），不碰调度字段；删除会级联清理高亮与复习历史；
+- M3 增加：排序、批量删除、未保存释义的脏检查（切页/筛选/排序前提示）。
 
 全部是本地 SQLite 操作，毫秒级，直接在 UI 线程执行。
 """
@@ -48,6 +49,14 @@ _STATUS_OPTIONS: tuple[tuple[str, str | None], ...] = (
     ("已掌握", "mastered"),
 )
 
+# 排序下拉：显示文字 → 排序 key（在内存里排，词库规模几百到几千足够快）。
+_SORT_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("最新加入", "created_desc"),
+    ("最早加入", "created_asc"),
+    ("字母顺序", "lemma"),
+    ("到期日", "due"),
+)
+
 _COLUMNS = ("单词", "释义", "状态", "下次复习")
 
 
@@ -57,6 +66,11 @@ class VocabularyPage(QWidget):
         self._context = context
         self._rows: list[Word] = []
         self._selected: Word | None = None
+        # 详情面板的“原始释义”，用于判断是否有未保存的修改。
+        self._baseline: tuple[str, str] | None = None
+        self._last_filter_index = 0
+        self._last_search_text = ""
+        self._last_sort_index = 0
 
         self._build_ui()
 
@@ -98,15 +112,27 @@ class VocabularyPage(QWidget):
         self._search_edit = QLineEdit()
         self._search_edit.setPlaceholderText("搜索单词或释义…")
         self._search_edit.setClearButtonEnabled(True)
-        self._search_edit.setMaximumWidth(280)
-        self._search_edit.textChanged.connect(self.refresh)
+        self._search_edit.setMaximumWidth(240)
+        self._search_edit.textChanged.connect(self._on_search_changed)
         toolbar.addWidget(self._search_edit)
 
         self._filter_combo = QComboBox()
         for text, status in _STATUS_OPTIONS:
             self._filter_combo.addItem(text, status)
-        self._filter_combo.currentIndexChanged.connect(self.refresh)
+        self._filter_combo.currentIndexChanged.connect(self._on_filter_changed)
         toolbar.addWidget(self._filter_combo)
+
+        self._sort_combo = QComboBox()
+        for text, key in _SORT_OPTIONS:
+            self._sort_combo.addItem(text, key)
+        self._sort_combo.currentIndexChanged.connect(self._on_sort_changed)
+        toolbar.addWidget(self._sort_combo)
+
+        self._batch_delete_button = QPushButton("删除选中")
+        self._batch_delete_button.setObjectName("secondaryButton")
+        self._batch_delete_button.setEnabled(False)
+        self._batch_delete_button.clicked.connect(self._on_batch_delete_clicked)
+        toolbar.addWidget(self._batch_delete_button)
 
         toolbar.addStretch(1)
 
@@ -123,7 +149,7 @@ class VocabularyPage(QWidget):
         self._table.setShowGrid(False)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.setAlternatingRowColors(False)
         self._table.setWordWrap(False)
 
@@ -237,6 +263,7 @@ class VocabularyPage(QWidget):
         if keyword:
             words = [word for word in words if self._matches(word, keyword)]
 
+        words = self._sort_words(words, str(self._sort_combo.currentData() or ""))
         self._rows = words
         self._count_label.setText(f"共 {len(words)} 个词")
         self._empty_label.setVisible(not words)
@@ -247,14 +274,69 @@ class VocabularyPage(QWidget):
         haystack = f"{word.lemma}\n{word.meaning_cn}\n{word.meaning_en}".lower()
         return keyword in haystack
 
+    @staticmethod
+    def _sort_words(words: list[Word], key: str) -> list[Word]:
+        if key == "created_asc":
+            return sorted(words, key=lambda word: (word.created_at, word.id or 0))
+        if key == "lemma":
+            return sorted(words, key=lambda word: (word.lemma.lower(), word.id or 0))
+        if key == "due":
+            return sorted(
+                words,
+                key=lambda word: (word.due_date or "9999-12-31", word.lemma.lower()),
+            )
+        # 默认：最新加入（列表仓库已按此排序，这里再排一次保证切换排序后一致）
+        return sorted(words, key=lambda word: (word.created_at, word.id or 0), reverse=True)
+
+    # -------------------------------------------------------------- 筛选与排序
+    def _on_filter_changed(self, index: int) -> None:
+        if index == self._last_filter_index:
+            return
+        if not self.can_deactivate():
+            self._restore_combo(self._filter_combo, self._last_filter_index)
+            return
+        self._last_filter_index = index
+        self.refresh()
+
+    def _on_sort_changed(self, index: int) -> None:
+        if index == self._last_sort_index:
+            return
+        if not self.can_deactivate():
+            self._restore_combo(self._sort_combo, self._last_sort_index)
+            return
+        self._last_sort_index = index
+        self.refresh()
+
+    def _on_search_changed(self, text: str) -> None:
+        if text == self._last_search_text:
+            return
+        if not self.can_deactivate():
+            self._search_edit.blockSignals(True)
+            self._search_edit.setText(self._last_search_text)
+            self._search_edit.blockSignals(False)
+            return
+        self._last_search_text = text
+        self.refresh()
+
+    @staticmethod
+    def _restore_combo(combo: QComboBox, index: int) -> None:
+        combo.blockSignals(True)
+        combo.setCurrentIndex(index)
+        combo.blockSignals(False)
+
     # ------------------------------------------------------------------ 表格
     def _rebuild_table(self, selected_id: int | None) -> None:
+        # 上千条词时逐行插入会触发大量重绘，先关掉更新再统一打开。
+        self._table.setUpdatesEnabled(False)
         self._table.blockSignals(True)
-        self._table.setRowCount(0)
-        for row, word in enumerate(self._rows):
-            self._table.insertRow(row)
-            self._set_row(row, word)
-        self._table.blockSignals(False)
+        try:
+            self._table.setRowCount(0)
+            for row, word in enumerate(self._rows):
+                self._table.insertRow(row)
+                self._set_row(row, word)
+        finally:
+            self._table.blockSignals(False)
+            self._table.setUpdatesEnabled(True)
 
         target_row = self._row_of(selected_id)
         if target_row is not None:
@@ -264,6 +346,7 @@ class VocabularyPage(QWidget):
         else:
             self._table.clearSelection()
             self._clear_detail()
+        self._update_batch_button()
 
     def _set_row(self, row: int, word: Word) -> None:
         cells = (
@@ -288,11 +371,34 @@ class VocabularyPage(QWidget):
         return None
 
     def _on_selection_changed(self) -> None:
+        self._update_batch_button()
         row = self._table.currentRow()
         if row < 0 or row >= len(self._rows):
             self._clear_detail()
             return
         self._show_detail(self._rows[row])
+
+    def _selected_word_ids(self) -> list[int]:
+        model = self._table.selectionModel()
+        if model is None:
+            return []
+        rows = sorted({index.row() for index in model.selectedRows()})
+        if not rows:
+            row = self._table.currentRow()
+            rows = [row] if row >= 0 else []
+
+        ids: list[int] = []
+        for row in rows:
+            if 0 <= row < len(self._rows):
+                word_id = self._rows[row].id
+                if word_id is not None:
+                    ids.append(word_id)
+        return ids
+
+    def _update_batch_button(self) -> None:
+        count = len(self._selected_word_ids())
+        self._batch_delete_button.setEnabled(count > 0)
+        self._batch_delete_button.setText(f"删除选中 ({count})" if count else "删除选中")
 
     # ------------------------------------------------------------------ 详情
     def _show_detail(self, word: Word) -> None:
@@ -308,6 +414,7 @@ class VocabularyPage(QWidget):
 
         self._meaning_cn_edit.setPlainText(word.meaning_cn)
         self._meaning_en_edit.setPlainText(word.meaning_en)
+        self._baseline = (word.meaning_cn.strip(), word.meaning_en.strip())
 
         status_text = STATUS_LABELS.get(word.status, word.status)
         parts = [f"状态：{status_text}", f"易度 {word.ease:.2f}", f"间隔 {word.interval_days} 天"]
@@ -325,8 +432,49 @@ class VocabularyPage(QWidget):
 
     def _clear_detail(self) -> None:
         self._selected = None
+        self._baseline = None
         self._detail_body.setVisible(False)
         self._detail_placeholder.setVisible(True)
+        self._update_batch_button()
+
+    # -------------------------------------------------------------- 脏检查
+    def _current_edits(self) -> tuple[str, str]:
+        return (
+            self._meaning_cn_edit.toPlainText().strip(),
+            self._meaning_en_edit.toPlainText().strip(),
+        )
+
+    def _has_unsaved_changes(self) -> bool:
+        if self._selected is None or self._baseline is None:
+            return False
+        return self._current_edits() != self._baseline
+
+    def _reset_edits(self) -> None:
+        if self._baseline is None:
+            return
+        self._meaning_cn_edit.setPlainText(self._baseline[0])
+        self._meaning_en_edit.setPlainText(self._baseline[1])
+
+    def can_deactivate(self) -> bool:
+        """主窗口切页/关闭窗口前调用：有未保存释义时询问，返回是否允许离开。"""
+        if not self._has_unsaved_changes():
+            return True
+
+        answer = QMessageBox.question(
+            self,
+            "有未保存的释义",
+            "当前词条的释义还没有保存。\n离开前要保存吗？",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if answer == QMessageBox.StandardButton.Save:
+            return self._save_meaning()
+        if answer == QMessageBox.StandardButton.Discard:
+            self._reset_edits()
+            return True
+        return False
 
     def _source_text(self, word: Word) -> str:
         if word.article_id is None:
@@ -337,15 +485,15 @@ class VocabularyPage(QWidget):
         return f"出处：{article.title}（{article.article_date}）"
 
     # ------------------------------------------------------------------ 操作
-    def _save_meaning(self) -> None:
+    def _save_meaning(self) -> bool:
+        """保存当前词条的释义；返回是否保存成功（can_deactivate 会用到）。"""
         word = self._selected
         if word is None or word.id is None:
-            return
-        meaning_cn = self._meaning_cn_edit.toPlainText().strip()
-        meaning_en = self._meaning_en_edit.toPlainText().strip()
+            return False
+        meaning_cn, meaning_en = self._current_edits()
         if not meaning_cn and not meaning_en:
             set_status(self._status, "中文释义和英文释义至少填一个。", "error")
-            return
+            return False
 
         updated = self._context.word_repo.update_meaning(
             word.id,
@@ -355,11 +503,12 @@ class VocabularyPage(QWidget):
         if updated is None:
             set_status(self._status, "词条已不存在，列表已刷新。", "error")
             self.refresh()
-            return
+            return False
 
         self.refresh()
         name = updated.display_form or updated.lemma
         set_status(self._status, f"「{name}」的释义已保存。", "success")
+        return True
 
     def _on_delete_clicked(self) -> None:
         word = self._selected
@@ -390,3 +539,32 @@ class VocabularyPage(QWidget):
         self._selected = None
         self.refresh()
         set_status(self._status, f"「{name}」已从生词本删除。", "success")
+
+    def _on_batch_delete_clicked(self) -> None:
+        ids = self._selected_word_ids()
+        if not ids:
+            return
+        answer = QMessageBox.question(
+            self,
+            "批量删除",
+            f"确定删除选中的 {len(ids)} 个词吗？\n相关正文高亮和复习记录也会一起删除。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._delete_selected_words()
+
+    def _delete_selected_words(self) -> int:
+        """删除表格中选中的所有词（确认弹窗之后的那一步，单测直接调用）。"""
+        ids = self._selected_word_ids()
+        if not ids:
+            return 0
+
+        deleted = sum(1 for word_id in ids if self._context.word_repo.delete(word_id))
+        self._selected = None
+        self.refresh()
+        if deleted:
+            set_status(self._status, f"已删除 {deleted} 个词。", "success")
+        else:
+            set_status(self._status, "删除失败：选中的词已不存在。", "error")
+        return deleted

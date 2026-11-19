@@ -72,7 +72,7 @@ class ReviewPage(QWidget):
         layout.addWidget(
             PageHeader(
                 "复习",
-                "只复习今天到期的词：先回忆，再翻面，按 1~4 反馈记得牢不牢。",
+                "只复习今天到期的词：先回忆，再翻面，按 1~4 反馈记得牢不牢。全程离线可用。",
             )
         )
 

@@ -137,6 +137,11 @@ class ArticleRepo(_BaseRepo):
         )
         return [Article.from_row(row) for row in rows]
 
+    def list_all(self) -> list[Article]:
+        """全部文章（导出用），按日期倒序。"""
+        rows = self._db.query_all("SELECT * FROM articles ORDER BY article_date DESC, id DESC")
+        return [Article.from_row(row) for row in rows]
+
 
 class WordRepo(_BaseRepo):
     """生词本 + 查词缓存 + 正文高亮。"""
@@ -207,6 +212,11 @@ class WordRepo(_BaseRepo):
             (article_id, word_id, int(start_offset), int(end_offset), sentence),
         )
         return cursor.rowcount > 0
+
+    def list_all_highlights(self) -> list[Highlight]:
+        """全部高亮（导出用）。"""
+        rows = self._db.query_all("SELECT * FROM highlights ORDER BY article_id, start_offset, id")
+        return [Highlight.from_row(row) for row in rows]
 
     def list_highlights(self, article_id: int) -> list[Highlight]:
         rows = self._db.query_all(
@@ -372,6 +382,11 @@ class ReviewRepo(_BaseRepo):
         )
         return [ReviewLog.from_row(row) for row in rows]
 
+    def list_all(self) -> list[ReviewLog]:
+        """全部复习历史（导出用），按时间升序。"""
+        rows = self._db.query_all("SELECT * FROM review_logs ORDER BY reviewed_at, id")
+        return [ReviewLog.from_row(row) for row in rows]
+
     def count_for_date(self, day: str) -> int:
         """某天复习次数（reviewed_at 是 ISO 时间，取前 10 位比较日期）。"""
         row = self._db.query_one(
@@ -420,6 +435,11 @@ class StatsRepo(_BaseRepo):
             (day,),
         )
         return int(row["n"]) if row is not None else 0
+
+    def list_all(self) -> list[DailyStats]:
+        """全部每日统计（导出用），按日期升序。"""
+        rows = self._db.query_all("SELECT * FROM daily_stats ORDER BY stat_date")
+        return [DailyStats.from_row(row) for row in rows]
 
     def streak(self, today: date | None = None) -> int:
         """从今天（今天没学习则从昨天）往回数连续有活动的天数。"""

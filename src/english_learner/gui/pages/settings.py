@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
+from ...models.entities import today_str
 from ...services.ai_client import AIClient, ConnectionResult
+from ...services.app_context import AppContext
 from ...services.config_store import AIConfig, ConfigError, ConfigStore, UiConfig
+from ...services.export_service import ExportResult
 from ..fonts import ENGLISH_FONT_CHOICES, get_english_font
 from ..workers import TaskWorker
 from .common import Card, PageHeader, set_status
@@ -31,22 +40,40 @@ class SettingsPage(QWidget):
     # 英文字体切换：由主窗口负责重建全局 QSS 并同步阅读页。
     english_font_changed = Signal(str)
 
-    def __init__(self, config: AIConfig, store: ConfigStore, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        config: AIConfig,
+        store: ConfigStore,
+        context: AppContext | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._config = config
         self._store = store
+        self._context = context
         self._ui = store.load_ui()
         self._worker: TaskWorker | None = None
 
-        layout = QVBoxLayout(self)
+        # 卡片较多，小窗口下放进滚动区，避免内容被挤压或截断。
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = QWidget()
+        layout = QVBoxLayout(container)
         layout.setContentsMargins(32, 28, 32, 28)
         layout.setSpacing(16)
 
-        layout.addWidget(PageHeader("设置", "AI 服务配置、阅读外观与数据位置。"))
+        layout.addWidget(PageHeader("设置", "AI 服务配置、阅读外观、数据导出与备份。"))
         layout.addWidget(self._build_ai_card())
         layout.addWidget(self._build_appearance_card())
         layout.addWidget(self._build_data_card())
+        layout.addWidget(self._build_export_card())
         layout.addStretch(1)
+
+        scroll.setWidget(container)
+        outer.addWidget(scroll)
 
     # ------------------------------------------------------------------ UI
     def _build_ai_card(self) -> Card:
@@ -158,6 +185,10 @@ class SettingsPage(QWidget):
         form.setVerticalSpacing(10)
         path_value = self._value_label(str(self._store.path))
         form.addRow(self._form_label("配置文件"), path_value)
+        db_value = self._value_label(
+            str(self._context.db.path) if self._context is not None else "（未连接）"
+        )
+        form.addRow(self._form_label("数据库"), db_value)
         card.body.addLayout(form)
 
         open_button = QPushButton("打开配置目录")
@@ -169,12 +200,52 @@ class SettingsPage(QWidget):
         card.body.addLayout(row)
 
         note = QLabel(
-            "M0 暂以明文 JSON 保存 API Key（文件在用户目录，不在 Git 仓库内）。"
-            "计划在 M1 之后换成 Windows DPAPI 或系统 keyring。"
+            "API Key 在 Windows 上使用系统 DPAPI 加密后保存（与本机用户绑定，"
+            "复制到其他电脑无法解密）；其他系统回退明文并收紧文件权限。"
+            "配置和数据都在用户目录，不在 Git 仓库内。"
         )
         note.setObjectName("muted")
         note.setWordWrap(True)
         card.body.addWidget(note)
+        return card
+
+    def _build_export_card(self) -> Card:
+        card = Card()
+        title = QLabel("数据导出")
+        title.setObjectName("cardTitle")
+        card.body.addWidget(title)
+
+        desc = QLabel(
+            "导出全部学习数据：学习画像、文章、生词、高亮、复习记录与打卡统计。"
+            "JSON 适合整体备份，CSV 每张表一个文件（Excel 可直接打开）。"
+        )
+        desc.setObjectName("muted")
+        desc.setWordWrap(True)
+        card.body.addWidget(desc)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(10)
+        self._export_json_button = QPushButton("导出 JSON…")
+        self._export_json_button.setObjectName("primaryButton")
+        self._export_json_button.clicked.connect(self._export_json)
+        buttons.addWidget(self._export_json_button)
+
+        self._export_csv_button = QPushButton("导出 CSV…")
+        self._export_csv_button.setObjectName("secondaryButton")
+        self._export_csv_button.clicked.connect(self._export_csv)
+        buttons.addWidget(self._export_csv_button)
+        buttons.addStretch(1)
+        card.body.addLayout(buttons)
+
+        self._export_status = QLabel("")
+        self._export_status.setObjectName("muted")
+        self._export_status.setWordWrap(True)
+        card.body.addWidget(self._export_status)
+
+        if self._context is None:
+            self._export_json_button.setEnabled(False)
+            self._export_csv_button.setEnabled(False)
+            set_status(self._export_status, "当前页面未连接数据库，导出不可用。", "hint")
         return card
 
     @staticmethod
@@ -213,6 +284,7 @@ class SettingsPage(QWidget):
         worker = TaskWorker(lambda: AIClient(config).test_connection())
         worker.succeeded.connect(self._on_test_succeeded)
         worker.failed.connect(self._on_test_failed)
+        worker.cancelled.connect(self._on_test_finished)
         worker.finished.connect(self._on_test_finished)
         self._worker = worker
         worker.start()
@@ -234,6 +306,85 @@ class SettingsPage(QWidget):
         self._test_button.setEnabled(True)
         self._test_button.setText("测试连接")
         self._worker = None
+
+    # -------------------------------------------------------------- 数据导出
+    def _export_json(self) -> None:
+        if self._context is None:
+            return
+        default_path = Path.home() / f"daily-english-{today_str()}.json"
+        filename, _selected = QFileDialog.getSaveFileName(
+            self,
+            "导出学习数据（JSON）",
+            str(default_path),
+            "JSON 文件 (*.json)",
+        )
+        if not filename:
+            return
+        service = self._context.export_service()
+        self._run_export(lambda: service.export_json(Path(filename)), "正在导出 JSON…")
+
+    def _export_csv(self) -> None:
+        if self._context is None:
+            return
+        directory = QFileDialog.getExistingDirectory(self, "选择导出目录", str(Path.home()))
+        if not directory:
+            return
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        target = Path(directory) / f"daily-english-export-{stamp}"
+        service = self._context.export_service()
+        self._run_export(lambda: service.export_csv(target), "正在导出 CSV…")
+
+    def _run_export(self, task: Callable[[], object], loading_text: str) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            set_status(self._export_status, "已有后台任务在进行，请稍后再试。", "hint")
+            return
+
+        self._set_export_busy(True)
+        set_status(self._export_status, loading_text, "loading")
+        worker = TaskWorker(task)
+        worker.succeeded.connect(self._on_export_succeeded)
+        worker.failed.connect(self._on_export_failed)
+        worker.cancelled.connect(self._on_export_cancelled)
+        worker.finished.connect(self._on_export_finished)
+        self._worker = worker
+        worker.start()
+
+    def _on_export_succeeded(self, result: object) -> None:
+        if not isinstance(result, ExportResult) or not result.files:
+            set_status(self._export_status, "导出完成，但返回了意外数据。", "error")
+            return
+        location = result.files[0] if len(result.files) == 1 else result.files[0].parent
+        set_status(
+            self._export_status,
+            f"导出完成：{result.summary()}\n保存位置：{location}",
+            "success",
+        )
+
+    def _on_export_failed(self, message: str) -> None:
+        set_status(self._export_status, message, "error")
+
+    def _on_export_cancelled(self) -> None:
+        set_status(self._export_status, "导出已取消。", "hint")
+
+    def _on_export_finished(self) -> None:
+        self._set_export_busy(False)
+        self._worker = None
+
+    def _set_export_busy(self, busy: bool) -> None:
+        if self._context is None:
+            return
+        self._export_json_button.setEnabled(not busy)
+        self._export_csv_button.setEnabled(not busy)
+
+    # ------------------------------------------------------------------ 关闭
+    def shutdown(self, timeout_ms: int = 3000) -> TaskWorker | None:
+        """窗口关闭时收尾：测试连接 / 导出都共用 `_worker`。"""
+        worker = self._worker
+        if worker is None or worker.isFinished():
+            return None
+        if worker.stop(timeout_ms):
+            return None
+        return worker
 
     def _open_config_dir(self) -> None:
         directory = self._store.path.parent

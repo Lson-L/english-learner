@@ -1,7 +1,7 @@
 # Daily English 开发进度与交接
 
 - 最后更新：2026-11-19
-- 当前阶段：**M2 已完成（生词本、SM-2 复习、首页真实数据）**
+- 当前阶段：**M3 核心项已完成（数据导出、Key 加密、可取消请求、生词本增强、性能）**
 - 产品方向：[PRODUCT.md](PRODUCT.md)
 
 > 本文档是跨会话交接的唯一事实来源。每完成一个里程碑，更新「当前状态」「验证记录」
@@ -17,7 +17,8 @@
 | M1 | SQLite、摸底测评、每日文章、阅读器、划词释义 | ✅ 完成 |
 | M1.5 | 阅读反馈调难度：AI 重新定级 + 按反馈重写今日文章 | ✅ 2026-11-18 |
 | M2 | 生词本、SM-2 复习、高亮持久化、首页真实数据 | ✅ 2026-11-19 |
-| M3 | 数据导出、Key 加密、请求取消、性能与安装包 | ⬜ 未开始 |
+| M3 | 数据导出、Key 加密、请求取消、错误分类、生词本增强、性能 | ✅ 核心完成 2026-11-19 |
+| M4 | 深色模式、安装器 / 自动更新（可选，未排期） | ⬜ 未开始 |
 
 M0 结束时，应用可以：启动 → 强制配置 AI → 真实请求测试 → 保存配置 →
 进入带 5 个页面的主窗口。
@@ -37,6 +38,21 @@ M2 结束时，产品闭环第一次完整可走：
 生词本页支持全部/未复习/学习中/已掌握筛选、关键词搜索、修改中英文释义、删除；
 复习完全本地化，断网 / AI 不可用也能正常进行。首页「今日待复习」改为按
 `due_date <= 今天` 统计。
+
+M3 核心项完成（2026-11-19）：
+
+- **数据导出**：设置页可导出 JSON（完整快照）或 CSV（六张表各一个文件，
+  `utf-8-sig`，Excel 直接打开）；导出在 TaskWorker 里执行；
+- **API Key 加密**：Windows DPAPI（与当前用户绑定），旧明文配置可直接读取；
+- **请求可取消**：`TaskWorker` 增加协作式取消与 `cancelled` 信号，
+  关闭窗口时先取消并等待，避免 QThread 销毁警告；
+- **错误分类**：`AIError` 增加 `kind / retryable / is_offline`，
+  网络、超时、429、5xx 标记可重试；界面补充“复习离线可用”的提示；
+- **生词本增强**：排序（最新/最早/字母/到期日）、批量删除、
+  未保存释义的脏检查（切页、切筛选、关闭窗口都会提示）；
+- **性能**：大列表刷新时暂停表格重绘、复习队列上限 200、导出不阻塞 UI。
+
+深色模式与安装器 / 自动更新列为可选 M4，尚未实现。
 
 ## 2. 环境（实测）
 
@@ -76,7 +92,7 @@ uv run pyinstaller --noconfirm --clean DailyEnglish.spec
 日志：`%APPDATA%\EnglishLearner\logs\app.log`
 想重演首次启动：删除上面的 `config.json`，或加 `--reconfigure`。
 
-## 4. 文件地图（M2 完成后的现状）
+## 4. 文件地图（M3 核心完成后的现状）
 
 ```
 src/english_learner/
@@ -104,11 +120,13 @@ src/english_learner/
 │   ├── article_service.py      文章生成、JSON 校验、重试一次、当天缓存、换一篇
 │   ├── dictionary_service.py   lemma 规范化、句子提取、查词缓存、加入生词本
 │   ├── level_feedback_service.py 阅读反馈调级：AI 重新定级 + 软约束重写今日文章
-│   └── srs.py                  简化 SM-2 调度 + ReviewService（纯本地，不依赖 AI）
+│   ├── srs.py                  简化 SM-2 调度 + ReviewService（纯本地，不依赖 AI）
+│   ├── secret_store.py         API Key 的 Windows DPAPI 加解密（非 Windows 回退明文）
+│   └── export_service.py       JSON / CSV 数据导出（六张表）
 └── gui/
     ├── fonts.py                内置字体注册 + 全局英文字体（默认 Lexend，可选 Literata/Georgia/Inter）
     ├── theme.py                全局 QSS（含阅读器/释义卡/测评短文样式）
-    ├── workers.py              TaskWorker(QThread)：AI 调用必须走这里
+    ├── workers.py              TaskWorker(QThread)：AI 调用必须走这里；支持协作式取消
     ├── onboarding.py           3 步配置向导
     ├── assessment_dialog.py     摸底测评弹窗（答题 → 评分 → 结果/手动选级）
     ├── level_feedback_dialog.py 阅读感受弹窗（快捷选项 + 文本 → 调级并换文章）
@@ -120,11 +138,11 @@ src/english_learner/
         ├── common.py           Card / PageHeader / StatCard(可刷新) / set_status
         ├── today.py            今日页：连续天数/到期复习/累计生词/文章状态/测评入口
         ├── reader.py           阅读页：生成文章、查词、加生词、换一篇、调整难度
-        ├── vocabulary.py       生词本页：筛选、搜索、编辑释义、删除（M2）
+        ├── vocabulary.py       生词本页：筛选/搜索/排序/编辑/批量删除/脏检查
         ├── review.py           复习页：卡片翻面、1~4 评分、会话统计（M2）
-        └── settings.py         配置展示、测试连接、打开配置目录、重新配置入口
+        └── settings.py         配置、字体、数据位置、JSON/CSV 导出（M3 滚动区）
 
-tests/（共 122 个用例，全部 mock AI、无网络）
+tests/（共 156 个用例，全部 mock AI、无网络）
 ├── test_english_learner_config.py        配置读写/校验/脱敏
 ├── test_english_learner_ai_client.py     连接测试与错误翻译
 ├── test_english_learner_storage.py       建表幂等/CRUD/唯一约束/级联/统计/文章替换
@@ -134,10 +152,14 @@ tests/（共 122 个用例，全部 mock AI、无网络）
 ├── test_english_learner_feedback.py      反馈调级/软约束重写/失败不改旧数据
 ├── test_english_learner_reader.py        lemma/句子提取/查词缓存/高亮/阅读页
 ├── test_english_learner_srs.py           SM-2 四档调度/易度边界/间隔上限/复习服务落库
-├── test_english_learner_review_page.py   复习页状态机/翻面/评分/会话统计/快捷键
-├── test_english_learner_vocabulary_page.py 生词本筛选/搜索/编辑释义/删除
+├── test_english_learner_review_page.py   复习页状态机/翻面/评分/会话统计/队列上限
+├── test_english_learner_vocabulary_page.py 生词本筛选/搜索/排序/编辑/批量删除/脏检查
+├── test_english_learner_secret_store.py   DPAPI 往返/明文兼容/损坏密文
+├── test_english_learner_export.py        JSON 快照/CSV 分表/空库/原子写入
+├── test_english_learner_workers.py       TaskWorker 成功/失败/取消/关闭等待
+├── test_english_learner_settings_export.py 设置页导出入口与状态提示
 ├── test_english_learner_fonts.py         字体文件/字体链/Qt 注册/偏好读写/设置页切换
-└── test_english_learner_gui_smoke.py     offscreen 冒烟（主窗口/今日页/测评/反馈弹窗）
+└── test_english_learner_gui_smoke.py     offscreen 冒烟（主窗口/导航/测评/反馈/脏检查）
 ```
 
 ## 5. 验证记录
@@ -202,6 +224,27 @@ M2 仍未验证 / 需要人工确认：
 3. **生词本规模**：几百条词时 `QTableWidget` 的滚动与全量刷新性能；
 4. **积压复习**：一轮上限 200 词，积压更多时「再检查一次到期词」的体验。
 
+### 5.4 M3 核心项（2026-11-19）
+
+| 检查 | 结果 |
+|---|---|
+| `.venv/Scripts/python.exe -m pytest` | **156 passed** |
+| `ruff check src/english_learner tests` | All checks passed |
+| `ruff format --check` | 60 files already formatted |
+| DPAPI | 加密往返、同一明文两次密文不同、旧明文配置可直接读、损坏密文报 ConfigError |
+| 导出 | JSON 快照字段/计数、CSV 六表/中文编码、空库、临时文件原子替换 |
+| 取消 | 启动前取消、执行中取消丢弃结果、AIError/未知异常翻译、`stop()` 等待 |
+| 生词本 | 四种排序、批量删除、脏检查保存/丢弃/取消、300 条列表刷新 |
+| 设置页导出 | 按钮可用性、真实写文件、结果/失败/取消状态提示 |
+
+M3 仍未验证 / 需要人工确认：
+
+1. **DPAPI 的跨机器行为**：复制 `config.json` 到另一台电脑/用户后应提示重新配置，
+   需在真实双机环境确认错误文案与恢复流程；
+2. **关闭窗口的等待体验**：网络请求进行中关闭窗口时最长等待一次 HTTP 超时，
+   需要真实弱网环境观察是否可接受；
+3. **深色模式 / 安装器**：未实现（可选 M4）。
+
 ## 6. 关键实现说明（避免下次踩坑）
 
 ### 6.1 为什么连接测试用 chat.completions 而不是 /models
@@ -214,9 +257,11 @@ M2 仍未验证 / 需要人工确认：
 
 - `services/*` 全是同步阻塞代码，**禁止**在 UI 线程调用；
 - 所有调用包进 `gui.workers.TaskWorker`，通过 `succeeded(object)` /
-  `failed(str)` 回主线程；
+  `failed(str)` / `cancelled()` 回主线程；
 - 调用方必须持有 worker 引用（`self._worker`），否则 QThread 被 GC 会丢信号；
-- M0 的请求不可取消，靠 30s 超时兜底；M1 如果需要取消，再在 worker 里加标志位。
+- M3 起 `cancel()` 是协作式取消：任务返回后若已取消就丢弃结果；
+  长循环可调用 `workers.is_cancellation_requested()`；HTTP 请求本身无法中断，
+  靠 30s 超时兜底，关闭窗口时页面 `shutdown()` 先等 3 秒，主窗口再兜底等待。
 
 ### 6.3 配置向导状态机
 
@@ -361,8 +406,34 @@ M2 仍未验证 / 需要人工确认：
   空格/回车翻面，1~4 评分，翻面前评分会被忽略；
 - 生词本页用 `QTableWidget` 全量重建，刷新时按 `word.id` 恢复选中行；
   筛选下拉的 `currentData()` 就是 `words.status`，全部为 `None`；
-- 已知体验债：编辑释义后直接切筛选/页面会丢草稿（没有“未保存”提示），
-  留到 M3 决定是否加脏检查。
+- 编辑释义后的脏检查已在 M3 补齐：切页 / 筛选 / 搜索 / 排序 / 关窗都会提示，
+  实现见 6.15 的 `can_deactivate()` 协议。
+
+### 6.15 M3：加密、导出、取消与脏检查
+
+- **DPAPI 密文格式**：`dpapi:` + base64(CryptProtectData 输出)。读取时只有带前缀的
+  值才会解密，旧版明文原样返回；保存时若发现已经是 `dpapi:` 前缀则不二次加密。
+  加密失败（非 Windows / API 失败）回退明文并写日志 —— 宁可降级也不能让用户
+  存不了配置。跨用户复制配置会在 `ConfigStore.load()` 抛 `ConfigError`，
+  应用走“配置损坏 → 重新配置”的既有路径。
+- **导出格式**：JSON 是 `{app, version, exported_at, counts, profile, articles,
+  words, highlights, review_logs, daily_stats}`；CSV 每表一个文件，编码
+  `utf-8-sig`（Excel 中文），列表字段用 `"; "` 连接。导出服务只读仓库，
+  新增的 `list_all*` 方法不要写业务判断。UI 侧 JSON 选文件、CSV 选目录后
+  自动建 `daily-english-export-<时间戳>/` 子目录，避免覆盖旧导出。
+- **取消的边界**：`cancelled` 信号不是“立刻停止”，只是“结果作废”。
+  页面统一把 `cancelled` 接到自己的 `_on_worker_finished`，清理 busy 状态；
+  不要在 `cancel()` 之后假设线程已经结束。
+- **页面关闭协议**：任何持有 worker 的页面实现
+  `shutdown(timeout_ms=3000) -> TaskWorker | None`；返回仍存活的 worker 表示
+  超时。`MainWindow._stop_worker_threads()` 收集这些返回值并最终 `wait()`，
+  这是消除 QThread 销毁警告的最后一道保险。
+- **脏检查协议**：页面可实现 `can_deactivate() -> bool`；`MainWindow._go()` 在
+  切页前、`closeEvent()` 在关闭前都会调用，返回 False 就取消这次操作并恢复
+  导航按钮状态。生词本用 `_baseline`（进入详情时的原始释义）判断是否有改动。
+- **性能取舍**：生词本仍在 UI 线程全量查询 + 重建表格（几百到几千条），
+  但重建期间 `setUpdatesEnabled(False)`；如果将来上万条，再上分页或模型视图，
+  不要在没有实测的情况下提前引入 `QAbstractTableModel`。
 
 ## 7. M1 详细任务（已全部完成）
 
@@ -735,57 +806,70 @@ def lookup(word: str, sentence: str, article_id: int, level: str) -> WordDefinit
   新增「开始复习」按钮，通过 `review_requested` 信号跳到复习页；
 - 删除 `gui/pages/placeholders.py` 与 `common.PlaceholderPage`（占位页已全部替换）。
 
-## 9. M3 任务预告（下一步做这个）
+## 9. M3 任务（已完成核心项，记录实际交付）
 
-按优先级排列，每完成一块补测试并更新本文档：
+> 状态（2026-11-19）：核心项 1~6 全部完成，验证见 5.4；可选项未做。
 
-1. **数据导出**：生词本 + 复习历史 + 文章导出 JSON / CSV，便于备份与迁移；
-2. **API Key 加密**：Windows DPAPI（`ctypes` 调 CryptProtectData）或 keyring，
-   保持 `config.json` 向后兼容；
-3. **请求可取消**：`TaskWorker` 加取消标志；生成文章 / 查词进行中关闭窗口时
-   等待线程结束，消除 QThread 警告；
-4. **错误兜底与离线提示**：区分网络错误 / 认证错误 / JSON 契约错误，
-   离线时复习页与生词本必须完全可用（现在已满足，补 UI 提示即可）；
-5. **生词本增强**：批量删除、按加入时间排序、未保存释义的脏检查提示；
-6. **性能**：词库上千条时分页或虚拟列表；复习页大队列的加载速度；
-7. **可选**：深色模式、安装器 / 自动更新（打包已在 M1 完成，
-   `DailyEnglish.spec` 可直接复用）。
+1. **数据导出** ✅：`services/export_service.py` + 设置页“数据导出”卡片，
+   JSON 快照 / CSV 六表；JSON 原子写入，CSV 用 `utf-8-sig`；
+   仓库新增 `ArticleRepo.list_all`、`WordRepo.list_all_highlights`、
+   `ReviewRepo.list_all`、`StatsRepo.list_all`；
+2. **API Key 加密** ✅：`services/secret_store.py` 用 ctypes 调 Windows DPAPI，
+   密文前缀 `dpapi:`；旧明文兼容，保存时自动升级；非 Windows / 加密失败回退明文；
+3. **请求可取消** ✅：`TaskWorker` 新增 `cancelled` 信号、`cancel()`、`stop()`，
+   页面统一 `shutdown()`，主窗口关闭时兜底 `wait()`；
+4. **错误兜底与离线提示** ✅：`AIError.kind / retryable / is_offline`，
+   网络/超时/429/5xx 可重试；今日页与复习页文案明确“复习离线可用”；
+5. **生词本增强** ✅：排序（最新/最早/字母/到期日）、批量删除、
+   未保存释义的脏检查（切页 / 筛选 / 搜索 / 排序 / 关闭窗口）；
+6. **性能** ✅：生词本重建表格时暂停重绘，300 条词回归测试；
+   复习队列上限 200 有测试；导出放后台线程；设置页加滚动区；
+7. **未做（可选 M4）**：深色模式、安装器 / 自动更新。
+   打包本身已在 M1 完成，`DailyEnglish.spec` 可直接复用。
 
-## 10. 已知问题 / 技术债
+## 10. M4 可选任务（未排期）
+
+- **深色模式**：把 `gui/theme.py` 的颜色抽成两套 palette，`config.json` 的
+  `ui.theme` 存偏好；QSS 模板用占位符替换颜色，字体链不变；
+- **安装器 / 自动更新**：安装器可用 Inno Setup 包 onefile exe；自动更新需要
+  稳定的发布源（当前网络环境下 GitHub 不通，需先确定分发方式）；
+- **真实环境调优**：根据实际使用调整 `srs.py` 系数、文章校验区间、复习每日上限。
+
+## 11. 已知问题 / 技术债
 
 | 项 | 说明 | 计划 |
 |---|---|---|
-| API Key 明文 | `config.json` 明文保存 | M3 换 Windows DPAPI 或 keyring |
-| 请求不可取消 | worker 只能等 30s 超时；生成/查词进行中直接关主窗口，Qt 可能打印 QThread 警告 | M2 加取消标志与等待 |
+| API Key 加密边界 | Windows 用 DPAPI；非 Windows 或加密失败会回退明文（日志有告警） | 保持；如支持更多平台再引入 keyring |
+| 取消是协作式 | `cancel()` 不会打断底层 HTTP，只让结果作废；关窗最多等一次 30s 超时 | 保持；如体验差再调短 AIClient 超时 |
 | SQLite 跨线程 | 连接 `check_same_thread=False` + 一把 RLock；所有仓库调用都走锁 | 保持；不要绕过 Database 直接执行 SQL |
-| 查词即入词库 | 按 M1 设计，`lookup()` 把结果写入 `words`（兼作缓存）。M2 已确认**不改数据结构**：查过的词也会出现在生词本里，用户可手动删除 | M3 再决定是否加 `in_vocabulary` 标志列 |
+| 查词即入词库 | 按 M1 设计，`lookup()` 把结果写入 `words`（兼作缓存）。M2/M3 已确认**不改数据结构**：查过的词也会出现在生词本里，用户可手动（批量）删除 | M4 再决定是否加 `in_vocabulary` 标志列 |
 | 测评题库固定 B1 | A2/B2 套已写好，UI 暂不提供选择 | 以后做自适应或设置项 |
 | 文章重试成本 | 校验失败会重试一次，失败的那次也计费 | 可接受；如频繁失败再调 prompt / 放宽校验 |
 | `json_mode` 兼容性 | 已实现 `complete_json()` 降级 + 本地三档解析；真实网关报错文案覆盖度待实测 | 实测后补充识别关键字 |
-| PySide6 体积大 | 完整 `PySide6` 会拉 WebEngine/Addons | M3 评估换 `PySide6-Essentials` |
+| PySide6 体积大 | 完整 `PySide6` 会拉 WebEngine/Addons | M4 可选：换 `PySide6-Essentials` 后重打包验证 |
 | 单温度 | 全局一个 temperature，业务层按任务覆盖 | 够用 |
 | 配置校验重复 | `ConfigStore.load()` 调了两次 `validate()` | 顺手清理即可 |
 | 导航索引耦合 | 页面顺序与按钮索引硬绑定（`main_window.py` 的 `PAGE_*` 常量） | 加页面时同步改两处 |
 | 反馈调级成本 | 一次调整 = 两次 AI 调用（定级 + 写文章），文章失败还会再重试一次 | 可接受；如太慢可换小模型或合并为一次调用 |
 | 调级依赖模型判断 | 是否降档取决于模型是否遵守 prompt；极端情况下可能维持原级 | 已验证有兜底；必要时后续加“手动指定等级重写” |
 | 重写清空高亮 | 按设计，新文章无法沿用旧偏移，旧高亮随文章级联删除（生词保留） | 可接受 |
-| 打包状态 | 已有 `DailyEnglish.spec`（onefile），产物 `dist/DailyEnglish.exe` | 安装器 / 自动更新留到 M3 |
-| 释义草稿会丢 | 生词本编辑释义后直接切筛选/页面，未保存的修改被丢弃（无脏检查） | M3 加“未保存”提示 |
-| 复习队列无每日上限 | 一轮最多 200 词，但一天可以开多轮；积压很多时体验偏长 | M3 视实际使用决定是否加每日上限 |
+| 打包状态 | 已有 `DailyEnglish.spec`（onefile），产物 `dist/DailyEnglish.exe` | 安装器 / 自动更新留到 M4（可选） |
+| 复习队列无每日上限 | 一轮最多 200 词，但一天可以开多轮；积压很多时体验偏长 | 视实际使用决定是否加每日上限 |
 | 复习快捷键 | 数字键 1~4 在中文输入法下未实测；必要时改成 Alt+1~4 或可配置 | 真实桌面确认后调整 |
-| 复习落库非原子 | `review()` 依次写词条、`review_logs`、`daily_stats`，未包同一个事务 | 概率极低；M3 视需要把三步包进 `Database.transaction()` |
+| 复习落库非原子 | `review()` 依次写词条、`review_logs`、`daily_stats`，未包同一个事务 | 概率极低；M4 视需要包进 `Database.transaction()` |
+| 生词本全量刷新 | 仍是全量查询 + 重建 QTableWidget；几百到几千条可接受 | 上万条再上分页 / 模型视图 |
+| CSV 无版本字段 | JSON 有 `version`，CSV 没有；跨版本迁移优先用 JSON | 可接受 |
 
-## 11. 下次会话开工指令
+## 12. 下次会话开工指令
 
 把下面这段直接发给 Claude：
 
 ```text
 继续 py-learn 的 english_learner。先读 CLAUDE.md、docs/english_learner/PRODUCT.md
-和 docs/english_learner/PROGRESS.md，确认当前是 M2 完成、准备做 M3。
-按 PROGRESS.md 第 9 节的顺序推进：先做数据导出 + 单测，再做 API Key 加密、
-TaskWorker 取消标志。动手前先跑 pytest/ruff 确认基线。每完成一块补测试并更新
-PROGRESS.md 的状态与验证记录。不要引入 ORM，不要跳过 TaskWorker 直接调 AI，
-services/storage 不得 import PySide6。
+和 docs/english_learner/PROGRESS.md，确认当前 M3 核心项已完成，剩下的是可选 M4
+（深色模式、安装器 / 自动更新）与真实环境调优。先跑 pytest/ruff 确认基线，再按
+PROGRESS.md 第 10、11 节决定做哪一项；每完成一块补测试并更新状态与验证记录。
+不要引入 ORM，不要跳过 TaskWorker 直接调 AI，services/storage 不得 import PySide6。
 ```
 
 开工前先自检：

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from english_learner.gui.pages.reader import ReaderPage  # noqa: E402
 from english_learner.gui.regenerate_dialog import RegenerateDialog  # noqa: E402
 from english_learner.gui.widgets import ArticleView  # noqa: E402
+from english_learner.gui.workers import TaskWorker  # noqa: E402
 from english_learner.models.entities import (  # noqa: E402
     Article,
     Highlight,
@@ -253,6 +255,38 @@ def test_regenerate_dialog_returns_input_or_empty() -> None:
 
     dialog._request_edit.setPlainText("  写一篇关于深海生物的文章  ")
     assert dialog.request_text() == "写一篇关于深海生物的文章"
+
+
+def test_reader_shutdown_returns_worker_that_ignores_cancel(db: Database) -> None:
+    """关闭页面时先等宽限期；任务卡住时把 worker 交回主窗口兜底等待。"""
+    get_app()
+    context = AppContext(
+        AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
+        ConfigStore(Path("unused.json")),
+        db,
+    )
+    page = ReaderPage(context)
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def task() -> str:
+        started.set()
+        release.wait(3)
+        return "done"
+
+    worker = TaskWorker(task)
+    worker.start()
+    assert started.wait(2.0) is True
+
+    page._worker = worker
+    stuck = page.shutdown(timeout_ms=100)
+
+    assert stuck is worker
+    assert worker.isRunning() is True
+
+    release.set()
+    assert worker.wait(3000) is True
 
 
 def test_reader_page_without_profile_does_not_generate(db: Database) -> None:

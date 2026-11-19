@@ -8,7 +8,11 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication,
+    QMessageBox,
+    QTableWidgetSelectionRange,
+)
 
 from english_learner.gui.pages.vocabulary import VocabularyPage  # noqa: E402
 from english_learner.models.entities import Article, Word, now_iso, today_str  # noqa: E402
@@ -181,3 +185,134 @@ def test_empty_database_shows_hint(db: Database, tmp_path: Path) -> None:
     assert page._count_label.text() == "共 0 个词"
     assert page._empty_label.isHidden() is False
     assert page._selected is None
+
+
+def test_sort_options_reorder_rows(db: Database, tmp_path: Path) -> None:
+    get_app()
+    db.words.upsert(make_word("alpha", created_at="2026-11-01T09:00:00", due_date="2026-12-03"))
+    db.words.upsert(make_word("beta", created_at="2026-11-02T09:00:00", due_date="2026-12-01"))
+    db.words.upsert(make_word("gamma", created_at="2026-11-03T09:00:00", due_date=None))
+
+    page = VocabularyPage(make_context(db, tmp_path))
+    page.on_activated()
+
+    def column_words() -> list[str]:
+        return [page._table.item(row, 0).text() for row in range(page._table.rowCount())]
+
+    assert column_words() == ["gamma", "beta", "alpha"]  # 默认最新加入
+
+    page._sort_combo.setCurrentIndex(1)  # 最早加入
+    assert column_words() == ["alpha", "beta", "gamma"]
+
+    page._sort_combo.setCurrentIndex(2)  # 字母顺序
+    assert column_words() == ["alpha", "beta", "gamma"]
+
+    page._sort_combo.setCurrentIndex(3)  # 到期日，无到期排最后
+    assert column_words() == ["beta", "alpha", "gamma"]
+
+
+def test_unsaved_meaning_can_be_cancelled_discarded_or_saved(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    get_app()
+    stored = db.words.upsert(make_word("alpha"))
+    assert stored.id is not None
+
+    page = VocabularyPage(make_context(db, tmp_path))
+    page.on_activated()
+    page._meaning_cn_edit.setPlainText("未保存的修改")
+    assert page._has_unsaved_changes() is True
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Cancel,
+    )
+    assert page.can_deactivate() is False
+    assert page._has_unsaved_changes() is True
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Discard,
+    )
+    assert page.can_deactivate() is True
+    assert page._has_unsaved_changes() is False
+    assert page._meaning_cn_edit.toPlainText() == "alpha 的中文释义"
+
+    page._meaning_cn_edit.setPlainText("保存这个释义")
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Save,
+    )
+    assert page.can_deactivate() is True
+    reloaded = db.words.get_by_id(stored.id)
+    assert reloaded is not None
+    assert reloaded.meaning_cn == "保存这个释义"
+    assert page._has_unsaved_changes() is False
+
+
+def test_cancelled_filter_change_keeps_current_row(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    get_app()
+    db.words.upsert(make_word("alpha"))
+    db.words.upsert(make_word("beta", status="learning"))
+
+    page = VocabularyPage(make_context(db, tmp_path))
+    page.on_activated()
+    assert page._table.rowCount() == 2
+
+    page._meaning_cn_edit.setPlainText("dirty")
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Cancel,
+    )
+
+    page._filter_combo.setCurrentIndex(2)  # 学习中
+
+    assert page._filter_combo.currentIndex() == 0
+    assert page._table.rowCount() == 2
+    assert page._has_unsaved_changes() is True
+
+
+def test_large_word_list_refreshes(db: Database, tmp_path: Path) -> None:
+    """几百条词时列表仍能正常刷新与筛选（M3 性能回归）。"""
+    get_app()
+    for index in range(300):
+        db.words.upsert(make_word(f"word{index:03d}"))
+
+    page = VocabularyPage(make_context(db, tmp_path))
+    page.on_activated()
+
+    assert page._table.rowCount() == 300
+    assert page._count_label.text() == "共 300 个词"
+
+    page._search_edit.setText("word12")
+    assert 0 < page._table.rowCount() < 300
+    assert page._sort_combo.count() == 4
+
+
+def test_batch_delete_selected_words(db: Database, tmp_path: Path) -> None:
+    get_app()
+    for lemma in ("alpha", "beta", "gamma"):
+        db.words.upsert(make_word(lemma))
+
+    page = VocabularyPage(make_context(db, tmp_path))
+    page.on_activated()
+    assert page._batch_delete_button.isEnabled() is True
+    assert "(1)" in page._batch_delete_button.text()
+
+    page._table.clearSelection()
+    page._table.setRangeSelected(QTableWidgetSelectionRange(0, 0, 1, 3), True)
+    assert len(page._selected_word_ids()) == 2
+    assert "(2)" in page._batch_delete_button.text()
+
+    deleted = page._delete_selected_words()
+
+    assert deleted == 2
+    assert db.words.count() == 1
+    assert page._table.rowCount() == 1
+    assert "已删除 2 个词" in page._status.text()

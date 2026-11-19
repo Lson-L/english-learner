@@ -6,7 +6,7 @@
 - GUI：PySide6
 - AI：任何 OpenAI 兼容接口（DeepSeek / Kimi / 通义 / 智谱 / 硅基流动 / OpenRouter / Ollama）
 - 数据：SQLite + 本地 JSON 配置，全部留在本机
-- 当前进度：**M2（在 M1 阅读闭环之上补齐生词本、SM-2 间隔重复复习与首页真实数据）**
+- 当前进度：**M3 核心项（数据导出、Key 加密、可取消请求、生词本增强、性能）**
 
 产品方向见 [`docs/english_learner/PRODUCT.md`](docs/english_learner/PRODUCT.md)，
 开发进度与下一步任务见 [`docs/english_learner/PROGRESS.md`](docs/english_learner/PROGRESS.md)。
@@ -46,10 +46,12 @@ uv run english-learner --reconfigure
 | 每日文章生成（结构化 JSON、当天缓存） | ✅ M1 |
 | 阅读器 + 双击划词 + 语境释义 | ✅ M1 |
 | 阅读反馈调难度（AI 重新定级 + 换一篇） | ✅ M1.5 |
-| 生词本列表、筛选、编辑释义、删除、正文高亮持久化 | ✅ M2 |
+| 生词本列表、筛选、搜索、排序、编辑释义、批量删除、正文高亮持久化 | ✅ M2/M3 |
 | SM-2 间隔重复复习（四档反馈、复习历史落库） | ✅ M2 |
 | 首页待复习按到期日统计、复习入口 | ✅ M2 |
-| 数据导出、安装器 | M3 |
+| 数据导出（JSON 快照 / CSV 分表） | ✅ M3 |
+| API Key 加密（Windows DPAPI）、请求可取消、错误分类 | ✅ M3 |
+| 深色模式、安装器 / 自动更新 | 可选 M4 |
 
 ## 配置与数据位置
 
@@ -65,7 +67,8 @@ uv run english-learner --reconfigure
 - `logs/app.log`：运行日志（轮转，最多 3 份）；
 - `data.db`：学习数据（文章、生词、高亮、统计）。
 
-> 目前 Key 仍以明文 JSON 保存，后续会换成 Windows DPAPI / 系统 keyring。
+> API Key 在 Windows 上使用系统 DPAPI 加密保存（与当前用户绑定）；其他平台
+> 回退明文并收紧文件权限。设置页可导出 JSON / CSV 备份学习数据。
 
 ## 代码结构
 
@@ -85,11 +88,13 @@ src/english_learner/
 │   ├── article_service.py  每日文章生成、校验、缓存与换一篇
 │   ├── dictionary_service.py 划词查词缓存、上下文句子、加入生词本
 │   ├── level_feedback_service.py 阅读反馈重新定级 + 软约束重写文章
-│   └── srs.py              简化 SM-2 调度 + 复习服务（纯本地，不依赖 AI）
+│   ├── srs.py              简化 SM-2 调度 + 复习服务（纯本地，不依赖 AI）
+│   ├── secret_store.py     API Key 的 Windows DPAPI 加解密
+│   └── export_service.py   JSON / CSV 数据导出
 └── gui/                    PySide6 视图层
     ├── fonts.py            内置英文字体注册与字体链
     ├── theme.py            全局 QSS
-    ├── workers.py          TaskWorker(QThread)：AI 调用不得阻塞 UI
+    ├── workers.py          TaskWorker(QThread)：AI 调用不得阻塞 UI，支持协作式取消
     ├── onboarding.py       三步配置向导
     ├── assessment_dialog.py 摸底测评弹窗
     ├── level_feedback_dialog.py 阅读感受/调整难度弹窗
@@ -98,8 +103,8 @@ src/english_learner/
     └── pages/              今日 / 阅读 / 生词本 / 复习 / 设置（后两者 M2 已接真实数据）
 
 run_app.py                  根目录启动入口（PyCharm 右键运行）
-tests/                      存储、JSON、测评、文章、阅读器、复习、生词本与 GUI 冒烟测试
-docs/english_learner/       产品方向、开发进度与 M3 交接清单
+tests/                      存储、JSON、测评、文章、阅读器、复习、生词本、导出与 GUI 冒烟测试
+docs/english_learner/       产品方向、开发进度与后续交接清单
 ```
 
 分层原则：`gui/` 只管界面，`services/` 与 `storage/` 不 import PySide6；

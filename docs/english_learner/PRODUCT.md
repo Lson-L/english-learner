@@ -1,7 +1,7 @@
 # Daily English（每日英语）产品方向
 
 - 最后更新：2026-11-19
-- 状态：方向已确认，M0 / M1 / M1.5 / M2 已交付
+- 状态：方向已确认，M0 / M1 / M1.5 / M2 已交付，M3 核心项已交付
 - 关联文档：[开发进度与 M1 交接](PROGRESS.md)
 
 ---
@@ -95,8 +95,9 @@
   - Windows `%APPDATA%\EnglishLearner\`
   - macOS `~/Library/Application Support/EnglishLearner/`
   - Linux `~/.config/english_learner/`
-- M0 以明文 JSON 保存 Key；M1 之后换 DPAPI / keyring。
-- 学习数据（M1 起）保存为同目录下 SQLite `data.db`。
+- API Key 在 Windows 上用系统 DPAPI 加密后写入 `config.json`（与当前用户绑定）；
+  非 Windows 或加密失败时回退明文并收紧文件权限。
+- 学习数据保存为同目录下 SQLite `data.db`；设置页可导出 JSON / CSV 备份。
 - 只有调用 AI 时，才把当前文章/单词/答题内容发给用户配置的服务商。
 
 ## 9. 路线图
@@ -107,7 +108,8 @@
 | M1 | SQLite、摸底测评、每日文章、阅读器、划词释义 | ✅ 2026-11-18 |
 | M1.5 | 阅读反馈调难度（AI 重新定级 + 按反馈换一篇） | ✅ 2026-11-18 |
 | M2 | 生词本、SM-2 复习、高亮持久化、首页真实数据 | ✅ 2026-11-19 |
-| M3 | 数据导出、Key 加密、错误兜底、性能与安装包 | 下一步 |
+| M3 | 数据导出、Key 加密、请求取消、错误分类、生词本增强、性能 | ✅ 核心完成 2026-11-19 |
+| M4 | 深色模式、安装器 / 自动更新 | 可选，未排期 |
 | V2 | 真实外刊、TTS 朗读、对话陪练 | 未排期 |
 
 ## 10. 主要风险与对策

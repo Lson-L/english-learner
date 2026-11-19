@@ -10,12 +10,14 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication  # noqa: E402
+import pytest  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from english_learner.gui.assessment_dialog import AssessmentDialog  # noqa: E402
 from english_learner.gui.level_feedback_dialog import LevelFeedbackDialog  # noqa: E402
 from english_learner.gui.main_window import (  # noqa: E402
     PAGE_REVIEW,
+    PAGE_TODAY,
     PAGE_VOCABULARY,
     MainWindow,
 )
@@ -137,6 +139,47 @@ def test_navigate_to_review_and_vocabulary(tmp_path: Path) -> None:
     window._go(PAGE_VOCABULARY)
     assert window._stack.currentIndex() == PAGE_VOCABULARY
     assert window._vocabulary_page._table.rowCount() == 1
+    window.close()
+
+
+def test_navigation_blocked_by_unsaved_meaning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    get_app()
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(make_config())
+    db = Database(tmp_path / "data.db")
+    db.words.upsert(
+        Word(
+            lemma="resilient",
+            meaning_cn="有韧性的",
+            due_date=today_str(),
+            created_at=now_iso(),
+            updated_at=now_iso(),
+        )
+    )
+
+    window = MainWindow(make_config(), store, db)
+    window._go(PAGE_VOCABULARY)
+    page = window._vocabulary_page
+    page._meaning_cn_edit.setPlainText("未保存的修改")
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Cancel,
+    )
+    window._go(PAGE_TODAY)
+
+    assert window._stack.currentIndex() == PAGE_VOCABULARY
+    assert window._nav_group.button(PAGE_VOCABULARY).isChecked() is True
+
+    # 允许丢弃后能正常关闭窗口
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Discard,
+    )
     window.close()
 
 
