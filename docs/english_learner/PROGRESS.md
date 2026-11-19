@@ -1,7 +1,7 @@
 # Daily English 开发进度与交接
 
-- 最后更新：2026-11-18
-- 当前阶段：**M0 已完成**
+- 最后更新：2026-11-19
+- 当前阶段：**M2 已完成（生词本、SM-2 复习、首页真实数据）**
 - 产品方向：[PRODUCT.md](PRODUCT.md)
 
 > 本文档是跨会话交接的唯一事实来源。每完成一个里程碑，更新「当前状态」「验证记录」
@@ -14,12 +14,29 @@
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | M0 | 工程骨架、依赖分组、配置向导、真实连接测试、主窗口导航 | ✅ 完成 |
-| M1 | SQLite、摸底测评、每日文章、阅读器、划词释义 | ⬜ 待开始 |
-| M2 | 生词本、SM-2 复习、高亮持久化、首页真实数据 | ⬜ 未开始 |
-| M3 | 打包、数据导出、主题、错误兜底 | ⬜ 未开始 |
+| M1 | SQLite、摸底测评、每日文章、阅读器、划词释义 | ✅ 完成 |
+| M1.5 | 阅读反馈调难度：AI 重新定级 + 按反馈重写今日文章 | ✅ 2026-11-18 |
+| M2 | 生词本、SM-2 复习、高亮持久化、首页真实数据 | ✅ 2026-11-19 |
+| M3 | 数据导出、Key 加密、请求取消、性能与安装包 | ⬜ 未开始 |
 
 M0 结束时，应用可以：启动 → 强制配置 AI → 真实请求测试 → 保存配置 →
-进入带 5 个页面的主窗口。文章、测评、生词、复习都还是占位页。
+进入带 5 个页面的主窗口。
+
+M1 结束时，应用可以走完**首次使用与每日阅读闭环**：
+启动 → 配置 AI → 摸底测评（或手动选级）→ 首页显示等级/词汇量/连续天数 →
+阅读页生成今日文章（落库缓存）→ 双击单词看语境释义（查词缓存）→
+加入生词本并永久高亮 → 重启后文章与高亮仍在。生词本列表与 SM-2 复习留到 M2。
+
+M1.5 追加：阅读页「调整难度」按钮。用户写一句阅读感受（或点快捷选项），
+AI 结合当前等级、今日文章和今日生词重新定级，并按新等级 + 反馈重写今日文章；
+今日生词会尽量复用，但流畅优先、不强制。旧文章的高亮会被清除，生词本保留。
+
+M2 结束时，产品闭环第一次完整可走：
+今日页显示「到期 N 词」→ 点「开始复习」进入卡片复习（空格翻面、1~4 评分）→
+复习记录落 `review_logs`、`daily_stats.reviews_done` +1、打卡更新；
+生词本页支持全部/未复习/学习中/已掌握筛选、关键词搜索、修改中英文释义、删除；
+复习完全本地化，断网 / AI 不可用也能正常进行。首页「今日待复习」改为按
+`due_date <= 今天` 统计。
 
 ## 2. 环境（实测）
 
@@ -50,54 +67,82 @@ uv run english-learner --reconfigure
 uv run pytest -q
 uv run ruff check src/english_learner tests
 uv run ruff format src/english_learner tests
+
+# 打包成单文件 exe → dist/DailyEnglish.exe（约 61MB，双击即用）
+uv run pyinstaller --noconfirm --clean DailyEnglish.spec
 ```
 
 配置文件位置（Windows）：`%APPDATA%\EnglishLearner\config.json`
 日志：`%APPDATA%\EnglishLearner\logs\app.log`
 想重演首次启动：删除上面的 `config.json`，或加 `--reconfigure`。
 
-## 4. M0 文件地图
+## 4. 文件地图（M2 完成后的现状）
 
 ```
 src/english_learner/
 ├── __init__.py                 版本号、产品说明、分层约定
 ├── __main__.py                 支持 python -m english_learner
-├── app.py                      入口：日志、QApplication、首次配置判断、--reconfigure
+├── app.py                      入口：日志、配置、Database、主窗口、首次测评
+├── assets/
+│   └── fonts/                  内置开源字体 Inter + Literata（OFL 1.1，见 OFL-*.txt）
+├── models/
+│   └── entities.py             Profile / Article / Word / Highlight / DailyStats 等
+│                               frozen dataclass + from_row / to_params + 时间与 JSON 辅助
+├── storage/
+│   ├── db.py                   SQLite 连接、PRAGMA、建表迁移、事务、仓库入口
+│   └── repositories.py         ProfileRepo / ArticleRepo / WordRepo / StatsRepo（纯 SQL）
 ├── services/
-│   ├── ai_client.py            OpenAI 兼容客户端；连接测试；complete()；错误中文化
+│   ├── ai_client.py            OpenAI 兼容客户端；test_connection / complete / complete_json
+│   ├── ai_protocol.py          TextCompleter 协议（业务层只依赖一个方法）
+│   ├── app_context.py          AppContext：配置 + DB + 各 Service 的组装点
 │   ├── config_store.py         AIConfig、JSON 配置读写、URL 规范化、Key 脱敏
-│   └── provider_presets.py     DeepSeek/Kimi/通义/智谱/硅基流动/OpenRouter/Ollama 预设
+│   ├── provider_presets.py     服务商预设
+│   ├── json_utils.py           parse_json_object 三档兜底 + 字段类型转换
+│   ├── prompts.py              全部提示词 + PROMPT_VERSION = "m1-2"
+│   ├── assessment_bank.py      3 套固定题（A2/B1/B2），默认 B1
+│   ├── assessment_service.py   本地计分、AI 评分、CEFR 回退、手动选级、落库
+│   ├── article_service.py      文章生成、JSON 校验、重试一次、当天缓存、换一篇
+│   ├── dictionary_service.py   lemma 规范化、句子提取、查词缓存、加入生词本
+│   ├── level_feedback_service.py 阅读反馈调级：AI 重新定级 + 软约束重写今日文章
+│   └── srs.py                  简化 SM-2 调度 + ReviewService（纯本地，不依赖 AI）
 └── gui/
-    ├── theme.py                全局 QSS（浅色 + 深色侧边栏）
+    ├── fonts.py                内置字体注册 + 全局英文字体（默认 Lexend，可选 Literata/Georgia/Inter）
+    ├── theme.py                全局 QSS（含阅读器/释义卡/测评短文样式）
     ├── workers.py              TaskWorker(QThread)：AI 调用必须走这里
-    ├── onboarding.py           3 步向导：欢迎 → 配置/测试 → 完成
-    ├── main_window.py          侧边导航 + QStackedWidget（页面顺序与导航索引绑定）
+    ├── onboarding.py           3 步配置向导
+    ├── assessment_dialog.py     摸底测评弹窗（答题 → 评分 → 结果/手动选级）
+    ├── level_feedback_dialog.py 阅读感受弹窗（快捷选项 + 文本 → 调级并换文章）
+    ├── main_window.py          导航 + 页面栈 + AppContext + 首次测评触发
+    ├── widgets/
+    │   ├── article_view.py     只读 QTextEdit：双击取词、高亮、17px/1.8 行距
+    │   └── word_panel.py       右侧释义卡 + 加入生词本按钮
     └── pages/
-        ├── common.py           Card / PageHeader / StatCard / PlaceholderPage / set_status
-        ├── today.py            今日页（M0 静态数字 + 说明）
-        ├── placeholders.py     阅读 / 生词本 / 复习占位页
+        ├── common.py           Card / PageHeader / StatCard(可刷新) / set_status
+        ├── today.py            今日页：连续天数/到期复习/累计生词/文章状态/测评入口
+        ├── reader.py           阅读页：生成文章、查词、加生词、换一篇、调整难度
+        ├── vocabulary.py       生词本页：筛选、搜索、编辑释义、删除（M2）
+        ├── review.py           复习页：卡片翻面、1~4 评分、会话统计（M2）
         └── settings.py         配置展示、测试连接、打开配置目录、重新配置入口
 
-tests/
-├── test_english_learner_config.py     配置读写/校验/脱敏 9 个用例
-├── test_english_learner_ai_client.py  连接测试与错误翻译 7 个用例（全部 mock，无网络）
-└── test_english_learner_gui_smoke.py  offscreen GUI 冒烟 2 个用例
+tests/（共 122 个用例，全部 mock AI、无网络）
+├── test_english_learner_config.py        配置读写/校验/脱敏
+├── test_english_learner_ai_client.py     连接测试与错误翻译
+├── test_english_learner_storage.py       建表幂等/CRUD/唯一约束/级联/统计/文章替换
+├── test_english_learner_json_utils.py    围栏 JSON/噪声/类型转换
+├── test_english_learner_assessment.py    计分/评分/容错/手动选级/落库
+├── test_english_learner_article.py       生成校验/软约束/重试/缓存/换一篇
+├── test_english_learner_feedback.py      反馈调级/软约束重写/失败不改旧数据
+├── test_english_learner_reader.py        lemma/句子提取/查词缓存/高亮/阅读页
+├── test_english_learner_srs.py           SM-2 四档调度/易度边界/间隔上限/复习服务落库
+├── test_english_learner_review_page.py   复习页状态机/翻面/评分/会话统计/快捷键
+├── test_english_learner_vocabulary_page.py 生词本筛选/搜索/编辑释义/删除
+├── test_english_learner_fonts.py         字体文件/字体链/Qt 注册/偏好读写/设置页切换
+└── test_english_learner_gui_smoke.py     offscreen 冒烟（主窗口/今日页/测评/反馈弹窗）
 ```
 
-工程配置改动：
+## 5. 验证记录
 
-- `pyproject.toml`
-  - PySide6 / openai 写入默认 `dependencies`（项目只剩 GUI 应用，不再需要可选分组）
-  - 新增入口 `english-learner = "english_learner.app:main"`
-  - wheel 打包包含 `src/english_learner`
-  - coverage 同时统计两个包
-- `uv.lock` 已更新
-- `README.md` 增加英语学习应用章节
-- `docs/english_learner/`：本文件 + 产品方向
-
-## 5. M0 验证记录
-
-已执行（2026-11-18）：
+### 5.1 M0（2026-11-18）
 
 | 检查 | 结果 |
 |---|---|
@@ -106,17 +151,58 @@ tests/
 | `ruff format` | 已格式化 |
 | offscreen 渲染 4 个界面（欢迎、配置、今日、设置） | 布局正常 |
 
-未验证 / 需要人工确认：
+### 5.2 M1（2026-11-18）
 
-1. **真实模型连接**：需要你填自己的 Key 跑一次 `uv run english-learner`。
-   代码路径已用 fake client 覆盖，但服务商真实响应未测。
-2. **真实窗口字体**：offscreen 模式下 Qt 字体库为空（`QFontDatabase.families()` 返回 0），
-   截图里中文全是方框，这是**离屏环境限制**，不是应用 bug；真实 Windows 桌面会正常加载
-   微软雅黑。若真实窗口也出现方框，再检查 `theme.py` 的 font-family。
-3. `response_format={"type": "json_object"}` 在各家兼容网关的支持情况（M1 用）。
-   M1 必须实现“服务端不支持/返回带 ```json 围栏”时的本地兜底解析。
+| 检查 | 结果 |
+|---|---|
+| `.venv/Scripts/python.exe -m pytest -q` | **91 passed**（M1 主体 62 + 字体 11 + 反馈调级及配套 18） |
+| `ruff check src/english_learner tests` | All checks passed |
+| `ruff format --check` | 已格式化 |
+| 临时 DB 连续初始化两次 | 通过（`user_version = 1`，表齐全） |
+| offscreen GUI（主窗口 5 页、今日页读库、测评弹窗、反馈弹窗） | 通过 |
+| 反馈调级：AI 改级 → 文章原子替换 → 高亮清除、生词保留 | 通过（mock） |
+| 反馈调级：AI 失败时旧文章与旧画像不变 | 通过（mock） |
 
-## 6. M0 关键实现说明（避免下次踩坑）
+M1 仍未验证 / 需要人工确认：
+
+1. **真实模型端到端**：需要真实 Key 跑完整闭环（测评 → 生成文章 → 查词 → 高亮
+   → 阅读反馈调级 → 新文章）。
+   代码路径已用 fake completer 覆盖，但真实网关的 JSON 稳定性、文章质量未测。
+2. **`response_format` 兼容性**：`AIClient.complete_json` 在识别到
+   “不支持 response_format” 时会自动去掉该参数重试一次；真实网关的报错文案
+   是否都能被识别，需要实测（识别规则见 `ai_client._json_mode_unsupported`）。
+3. **真实窗口排版 / 字体**：offscreen 没有字体库，字号/行距/高亮颜色与内置字体
+   实际效果需在真实 Windows 桌面确认。
+4. **文章词数**：本地校验放宽到 200~400，prompt 要求 250~350；不同模型可能
+   频繁卡在边缘，需要看实际重试率。
+5. **反馈调级效果**：AI 是否真的按“至少降一档”执行、新文章生词密度是否明显下降，
+   需要真实模型实测；prompt 已把反馈传给写文章的模型，但仍依赖模型遵守。
+
+> offscreen 模式下 Qt 字体库为空，截图里中文是方框，这是**离屏环境限制**，
+> 不是应用 bug；真实 Windows 桌面会正常加载微软雅黑。
+
+### 5.3 M2（2026-11-19）
+
+| 检查 | 结果 |
+|---|---|
+| `.venv/Scripts/python.exe -m pytest` | **122 passed** |
+| `ruff check src/english_learner tests` | All checks passed |
+| `ruff format --check` | 54 files already formatted |
+| SRS 纯函数 | 忘记重置、1/6 天起步、易度下限 1.3、间隔上限 365、掌握阈值 30 天 |
+| 复习服务 | 到期过滤、调度落库、`review_logs`、`daily_stats.reviews_done` |
+| 复习页 offscreen | 概览 / 翻面 / 评分 / 会话统计 / 无到期禁用开始 |
+| 生词本页 offscreen | 筛选 / 搜索 / 编辑释义 / 删除 / 空状态 |
+
+M2 仍未验证 / 需要人工确认：
+
+1. **真实窗口排版与快捷键**：复习卡片的字号、按钮配色，数字键 1~4 在中文输入法
+   或按钮焦点下是否稳定触发；
+2. **调度节奏体感**：1 / 6 / 15 天……的间隔是否符合真实记忆曲线，是否需要
+   调 `services/srs.py` 里的系数；
+3. **生词本规模**：几百条词时 `QTableWidget` 的滚动与全量刷新性能；
+4. **积压复习**：一轮上限 200 词，积压更多时「再检查一次到期词」的体验。
+
+## 6. 关键实现说明（避免下次踩坑）
 
 ### 6.1 为什么连接测试用 chat.completions 而不是 /models
 
@@ -149,12 +235,154 @@ tests/
 ### 6.5 页面导航索引
 
 `main_window.py` 里页面栈顺序与侧边栏按钮索引**硬绑定**：
-今日 0、阅读 1、生词本 2、复习 3、设置 4。加页面时必须两处一起改。
+今日 0、阅读 1、生词本 2、复习 3、设置 4，代码里用 `PAGE_*` 常量表达。
+加页面时必须同步改常量、`_pages`、侧边栏按钮三处。
 
-## 7. M1 详细任务（按顺序做）
+### 6.6 SQLite 连接的线程模型（M1）
+
+- AI 调用在 `TaskWorker` 子线程里，会写文章 / 生词，所以连接必须
+  `check_same_thread=False`；
+- `Database` 内部用一把 `RLock` 包住所有执行，**业务代码不要拿连接自己跑 SQL**；
+- 连接是自动提交模式（`isolation_level=None`），需要原子性时用
+  `Database.transaction()`（内部 `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`），
+  且**不要嵌套**；
+- `PRAGMA foreign_keys=ON` 已开启：删文章会级联删 highlights，
+  words.article_id 置 NULL 但词条保留。
+
+### 6.7 密度最高的三个坑（M1 实测）
+
+1. `sqlite3.Row` 支持 `row["列名"]` 和 `row[0]`，但**不支持 `.get()`**；
+   模型层的 `from_row` 统一处理，别在业务里直接碰 Row。
+2. `words.lemma` 是 `COLLATE NOCASE UNIQUE`，`WHERE lemma = ?` 自动大小写不敏感；
+   `INSERT ... ON CONFLICT(lemma)` 也靠这个索引生效，不要改成普通 TEXT。
+3. `INSERT OR IGNORE` 的 `cursor.rowcount` 为 0 表示被 UNIQUE 忽略——
+   “加入生词本是否新增”就靠它判断，别再写一次 SELECT。
+
+### 6.8 JSON 契约与兜底（M1）
+
+- 所有业务 prompt 都在 `services/prompts.py`，版本号 `PROMPT_VERSION`；
+- `AIClient.complete_json()` 先带 `response_format={"type":"json_object"}`，
+  识别到“不支持 response_format”时去掉参数重试一次；
+- 无论哪种模式，业务层都必须走 `json_utils.parse_json_object()`：
+  原样 → 去 ```json 围栏 → 截取首个 `{` 到末尾 `}`；
+- 字段缺失一律回退默认值；CEFR 不在 A2/B1/B2/C1 时回退题库的 `level_hint`。
+
+### 6.9 阅读器字符偏移
+
+- 高亮存的是 `QTextEdit` 纯文本的**字符偏移**（`selectionStart/End`），
+  不是字节偏移，也不是段落行号；
+- 重绘时把偏移 clamp 到 `[0, len(content)]`，避免旧数据越界；
+- 句子提取 `extract_sentence()` 以 `.!?\n` 为界，超长时以单词为中心截断到 300 字符；
+- 双击取词走 `cursorForPosition(pos)` + `WordUnderCursor`，不要自己写正则分词。
+
+### 6.10 每日文章缓存与“换一篇”
+
+- `articles.article_date` 唯一，`get_or_create_today()` 命中即返回，不花 token；
+- 校验失败重试一次；仍失败抛 `AIError`，界面显示重试按钮；
+- “换一篇”= 删当天文章（级联删高亮）再生成，UI 必须二次确认；
+- 并发写入同一天时 `ArticleRepo.insert` 抛 `DuplicateError`，
+  `ArticleService` 捕获后回读已有文章，不会把错误抛给界面。
+
+### 6.11 字体：全应用只有一处决定英文外观
+
+- 原来全局 QSS 用 `Microsoft YaHei UI`，英文只能落到雅黑自带的拉丁字形上，
+  小写偏挤、x-height 偏高，长文阅读很累；
+- 现在内置三款 OFL 字体（`assets/fonts/`），英文外观由 `gui/fonts.py` 的字体链
+  统一决定，通过全局 QSS 的 `*` 规则下发 —— **所有页面、所有控件自动生效，
+  新加功能不需要单独设 font-family**（这是硬性约定，见 CLAUDE.md）；
+- 可在设置页「外观 → 英语字体」切换：**Lexend（默认）** / Literata（衬线）/
+  Georgia（系统自带、不打包）/ Inter（界面风）；字体来自 npm 包
+  `@expo-google-fonts/*`（本机 Google Fonts / GitHub 都不通，只能走 npmmirror 取 TTF）；
+- 注册必须发生在 `app.main()` 里、`setStyleSheet` **之前**
+  （`QFontDatabase.addApplicationFont`），否则 QSS 里的族名解析不到会静默回退；
+- 字体都不含 CJK，字体链末尾必须保留 `Microsoft YaHei UI`，Qt 逐字回退，
+  中英混排才不会出现方块；
+- 静态字重文件（400/500/600/700）在 Qt 里都归入同一个族，
+  `font-weight: 600` 能匹配到 SemiBold，不要自己拼 “Lexend SemiBold” 这种族名；
+- **唯一例外**：文章正文是 QTextDocument 的默认字体，QSS 管不到，
+  必须调 `ArticleView.set_english_font(key)`；切换字体时主窗口同时做两件事 ——
+  `QApplication.setStyleSheet(build_stylesheet(key))` + 通知阅读页同步正文；
+- QSS 不支持 `line-height`：测评短文改用富文本 `<p style="line-height:180%">`
+  （Qt 富文本引擎支持该属性），正文 QTextEdit 仍用 `QTextBlockFormat` 设 180%；
+- 偏好存在 `config.json` 的 `ui.english_font`（旧字段 `reading_font` 仍可读），
+  `ConfigStore.save_ui()` 只改 `ui` 段，`save()` 也会保留 `ui` 段，
+  重配 AI 不会把字体选择冲掉；未知 key 一律回退默认。
+
+### 6.12 打包成 exe（PyInstaller）
+
+- 配置在项目根 `DailyEnglish.spec`，命令：`uv run pyinstaller --noconfirm --clean DailyEnglish.spec`，
+  产物 `dist/DailyEnglish.exe`（单文件约 61MB，onedir 可另改 spec）；
+- 三个必须踩对的点：
+  1. `SPECPATH` 是 **spec 文件所在目录**（不是它的父目录），算路径时别多套一层 `.parent`；
+  2. `pathex=[src]`：项目是 src 布局 + editable 安装，让 PyInstaller 直接从源码找包；
+  3. `datas` 把 `src/english_learner/assets` 原样放到包内 `english_learner/assets`，
+     这样 `gui/fonts.py` 里 `Path(__file__).parent.parent / "assets"` 在 `_MEIPASS`
+     下也能算对 —— 否则内置字体会静默回退成系统字体，界面看不出报错；
+- `console=False`：不留黑窗；未捕获异常走 `app.py` 的 excepthook 弹窗 + 写
+  `%APPDATA%/EnglishLearner/logs/app.log`，所以打包版排查问题先看日志；
+- `dist/`、`build/` 已在 `.gitignore` 里，不要入库；
+- 首次启动 onefile 会把内容解压到临时目录，比直接跑源码慢几秒，属正常现象。
+
+### 6.13 阅读反馈调难度（M1.5）
+
+入口：阅读页标题栏「调整难度」（在「换一篇」右边）。
+
+- **数据来源**：`WordRepo.list_highlighted_words(article_id)`（本篇标过的词，优先）
+  + `WordRepo.list_created_on(today)`（今天查过的词，补充），去重后最多 8 个；
+- **重新定级**：`build_level_feedback_messages()` 把当前等级/词汇量、今日文章、
+  今日生词、用户反馈交给 AI，只返回评级 JSON；prompt 明确“反馈说太难就至少降一档”；
+  解析复用 `assessment_service.assessment_result_from_data()`，非法等级回退当前等级；
+- **重写文章**：`ArticleService.generate_article(..., strict_targets=False,
+  learner_feedback=用户反馈)`：
+  - `soft_targets` 只要求“尽量自然复用”今日生词，不做“必须出现”的本地校验；
+  - 用户反馈也传给写作模型，要求优先高频词、缩短句子、控制生词密度；
+- **顺序很重要**：先定级 → 再生成新文章 → 最后原子替换 + 保存 profile。
+  任何一步失败，旧文章、旧高亮、旧画像都不动（`ArticleRepo.replace_by_date()`
+  用同一事务删除旧文并插入新文）；
+- **副作用**：旧文章高亮随级联删除消失，`words` 保留；`article_read` 可能 +1；
+  新文章保留原 `topic`，主题不跳；
+- **失败兜底**：解析失败/生成失败都抛 `AIError`，弹窗内显示错误并允许重试；
+  用户也可直接关闭弹窗，原文章继续可读。
+
+### 6.14 复习调度与两个新页面（M2）
+
+- `services/srs.py` 分成两层：`schedule()` 是纯函数（只算新 Word，不落库），
+  `ReviewService` 负责「算法 → 写回 → 记日志 → 打卡」的组合；想换 FSRS 只改这一层；
+- 四档规则写在文件头表格里，关键常量：`MIN_EASE=1.3`、`MASTERED_INTERVAL_DAYS=30`、
+  `MAX_INTERVAL_DAYS=365`；前两次成功复习固定 1 / 6 天，之后才乘易度；
+- `due_date` 统一 `YYYY-MM-DD` 字符串，SQL 直接 `due_date <= today` 比较，
+  不需要转日期；跨时区/换系统日期只影响“今天”的取值，数据本身不受影响；
+- `WordRepo.save_schedule()` **只写调度字段**，不碰释义，避免复习把用户手改的
+  释义覆盖掉；`WordRepo.update_meaning()` 反过来只改释义；
+- `review_logs` 只追加、不修改；外键 `ON DELETE CASCADE`，删词自动清理历史；
+- 复习页**不用 TaskWorker**（纯本地 SQLite，毫秒级）；会话状态在页面实例里，
+  切到别的页面再回来不会重置当前卡片；
+- 快捷键用 `QShortcut` + `WidgetWithChildrenShortcut`，只在复习页内生效；
+  空格/回车翻面，1~4 评分，翻面前评分会被忽略；
+- 生词本页用 `QTableWidget` 全量重建，刷新时按 `word.id` 恢复选中行；
+  筛选下拉的 `currentData()` 就是 `words.status`，全部为 `None`；
+- 已知体验债：编辑释义后直接切筛选/页面会丢草稿（没有“未保存”提示），
+  留到 M3 决定是否加脏检查。
+
+## 7. M1 详细任务（已全部完成）
 
 > M1 目标：跑通「测评定级 → 生成今日文章 → 阅读划词 → 生词入本」，
 > 复习留到 M2。每个任务完成即补测试，不要攒到最后。
+>
+> **状态（2026-11-18）：M1-1 ~ M1-7 全部完成**，验证见 5.2。
+> 实际实现与原计划的差异（以实际代码为准）：
+>
+> 1. 新增 `services/app_context.py`（AppContext 门面）与 `services/ai_protocol.py`
+>    （`TextCompleter` 协议），页面/服务只依赖这两个抽象；
+> 2. `AnswerSheet` 用选项下标元组（`comprehension` / `vocabulary`），未引入题目 id；
+> 3. 查词返回 `LookupResult(word, cached)` 而不是裸 `WordDefinition`，
+>    因为加入高亮需要 `word.id`；`WordDefinition.from_word()` 仍保留；
+> 4. `AIClient.complete_json()` 在服务端疑似不支持 `response_format` 时
+>    自动去掉该参数重试一次，业务层再叠加本地三档 JSON 解析；
+> 5. 测评默认固定 B1 套（`DEFAULT_SET_KEY = "b"`），A2/B2 套已写好但 UI 暂不选择；
+> 6. “今日待复习”按 M1 约定显示未掌握词数（`WordRepo.count_unmastered`），
+>    `StatsRepo.count_due` 已实现并测试，M2 首页直接切；
+> 7. 阅读页把“生成/重试”做成标题栏按钮；进入页面且当天无文章时自动生成。
 
 ### M1-1 存储层（建议先做）
 
@@ -473,39 +701,91 @@ def lookup(word: str, sentence: str, article_id: int, level: str) -> WordDefinit
 4. 关闭应用重开 → 文章仍在、高亮仍在、生词本有 3 个词、没有重复调用生成；
 5. 断网后打开应用 → 能看缓存文章与生词本，不崩溃。
 
-## 8. M2 预告（先别做）
+### M1-8 阅读反馈调难度（M1.5 追加需求，已完成）
+
+用户反馈“第一篇文章生词太多，打击积极性”，因此增加：
+
+- 阅读页「换一篇」右侧新增「调整难度」；
+- 弹窗展示当前等级、今日文章、今日生词；提供 4 个快捷选项 + 自由文本；
+- 提交后在 TaskWorker 里执行 `LevelFeedbackService.adjust()`：
+  1. AI 结合反馈与今日生词重新定级（太难至少降一档）；
+  2. 按新等级 + 用户反馈重写文章，今日生词软约束复用；
+  3. 原子替换当天文章（旧高亮清除、生词保留），保存新 profile；
+- 失败时旧文章与旧画像保持不变，弹窗内显示原因，可重试或取消。
+
+对应测试：`tests/test_english_learner_feedback.py`（12 个用例）+
+存储层 `replace_by_date / list_highlighted_words / list_created_on`
++ 文章软约束与“换一篇失败保留旧文”+ GUI 冒烟。
+
+## 8. M2 任务（已完成，记录实际交付）
+
+> 状态（2026-11-19）：全部完成，验证见 5.3。实际实现与原始预告的差异如下。
 
 - `services/srs.py`：简化 SM-2；四档 rating 1=忘记 / 2=模糊 / 3=认识 / 4=太简单；
   忘记时 `repetitions=0, interval=1, ease=max(1.3, ease-0.2)`；
-  其余按 SM-2 更新 interval，`due_date = today + interval`；
-- `gui/pages/review.py`：卡片翻面、键盘 1~4、会话结束统计；
-- `review_logs` 落库，`daily_stats.reviews_done` 累加；
-- 生词本页面接真实数据 + 编辑释义；
-- 首页待复习改为按 `due_date` 统计。
+  其余前两次固定 1 / 6 天，之后按易度增长；`interval >= 30` 标记 `mastered`；
+  另加 `MAX_INTERVAL_DAYS=365` 上限，避免长期不复习后算出十年间隔；
+- `storage/repositories.py`：新增 `ReviewRepo`（log / list_for_word / list_recent /
+  count_for_date），`WordRepo` 新增 `save_schedule / update_meaning / delete`；
+- `gui/pages/review.py`：概览 → 卡片 → 会话统计三态；空格/回车翻面、1~4 评分；
+  一轮最多 200 词，复习记录与 `daily_stats.reviews_done` 同步落库；
+- `gui/pages/vocabulary.py`：表格 + 筛选（全部/未复习/学习中/已掌握）+ 搜索 +
+  右侧详情编辑中英文释义 + 删除（二次确认，级联清理高亮与复习历史）；
+- `gui/pages/today.py`：「今日待复习」改用 `StatsRepo.count_due`；
+  新增「开始复习」按钮，通过 `review_requested` 信号跳到复习页；
+- 删除 `gui/pages/placeholders.py` 与 `common.PlaceholderPage`（占位页已全部替换）。
 
-## 9. 已知问题 / 技术债
+## 9. M3 任务预告（下一步做这个）
+
+按优先级排列，每完成一块补测试并更新本文档：
+
+1. **数据导出**：生词本 + 复习历史 + 文章导出 JSON / CSV，便于备份与迁移；
+2. **API Key 加密**：Windows DPAPI（`ctypes` 调 CryptProtectData）或 keyring，
+   保持 `config.json` 向后兼容；
+3. **请求可取消**：`TaskWorker` 加取消标志；生成文章 / 查词进行中关闭窗口时
+   等待线程结束，消除 QThread 警告；
+4. **错误兜底与离线提示**：区分网络错误 / 认证错误 / JSON 契约错误，
+   离线时复习页与生词本必须完全可用（现在已满足，补 UI 提示即可）；
+5. **生词本增强**：批量删除、按加入时间排序、未保存释义的脏检查提示；
+6. **性能**：词库上千条时分页或虚拟列表；复习页大队列的加载速度；
+7. **可选**：深色模式、安装器 / 自动更新（打包已在 M1 完成，
+   `DailyEnglish.spec` 可直接复用）。
+
+## 10. 已知问题 / 技术债
 
 | 项 | 说明 | 计划 |
 |---|---|---|
-| API Key 明文 | `config.json` 明文保存 | M1 后换 Windows DPAPI 或 keyring |
-| 请求不可取消 | worker 只能等 30s 超时；设置页测试中直接关主窗口，Qt 可能打印 QThread 警告 | M1 统一处理（等待 / 取消标志） |
+| API Key 明文 | `config.json` 明文保存 | M3 换 Windows DPAPI 或 keyring |
+| 请求不可取消 | worker 只能等 30s 超时；生成/查词进行中直接关主窗口，Qt 可能打印 QThread 警告 | M2 加取消标志与等待 |
+| SQLite 跨线程 | 连接 `check_same_thread=False` + 一把 RLock；所有仓库调用都走锁 | 保持；不要绕过 Database 直接执行 SQL |
+| 查词即入词库 | 按 M1 设计，`lookup()` 把结果写入 `words`（兼作缓存）。M2 已确认**不改数据结构**：查过的词也会出现在生词本里，用户可手动删除 | M3 再决定是否加 `in_vocabulary` 标志列 |
+| 测评题库固定 B1 | A2/B2 套已写好，UI 暂不提供选择 | 以后做自适应或设置项 |
+| 文章重试成本 | 校验失败会重试一次，失败的那次也计费 | 可接受；如频繁失败再调 prompt / 放宽校验 |
+| `json_mode` 兼容性 | 已实现 `complete_json()` 降级 + 本地三档解析；真实网关报错文案覆盖度待实测 | 实测后补充识别关键字 |
 | PySide6 体积大 | 完整 `PySide6` 会拉 WebEngine/Addons | M3 评估换 `PySide6-Essentials` |
-| 无重试 | `AIClient` 故意 `max_retries=0` | 业务层按任务重试（文章 1 次） |
-| `json_mode` 兼容性 | 部分网关不支持 `response_format` | 必须有本地兜底解析 |
-| 单温度 | 全局一个 temperature | 需要时 `complete(temperature=...)` 覆盖 |
+| 单温度 | 全局一个 temperature，业务层按任务覆盖 | 够用 |
 | 配置校验重复 | `ConfigStore.load()` 调了两次 `validate()` | 顺手清理即可 |
-| 导航索引耦合 | 页面顺序与按钮索引硬绑定 | 加页面时同步改两处 |
-| 未打包 | 只能 `uv run` | M3 用 PyInstaller / Nuitka |
+| 导航索引耦合 | 页面顺序与按钮索引硬绑定（`main_window.py` 的 `PAGE_*` 常量） | 加页面时同步改两处 |
+| 反馈调级成本 | 一次调整 = 两次 AI 调用（定级 + 写文章），文章失败还会再重试一次 | 可接受；如太慢可换小模型或合并为一次调用 |
+| 调级依赖模型判断 | 是否降档取决于模型是否遵守 prompt；极端情况下可能维持原级 | 已验证有兜底；必要时后续加“手动指定等级重写” |
+| 重写清空高亮 | 按设计，新文章无法沿用旧偏移，旧高亮随文章级联删除（生词保留） | 可接受 |
+| 打包状态 | 已有 `DailyEnglish.spec`（onefile），产物 `dist/DailyEnglish.exe` | 安装器 / 自动更新留到 M3 |
+| 释义草稿会丢 | 生词本编辑释义后直接切筛选/页面，未保存的修改被丢弃（无脏检查） | M3 加“未保存”提示 |
+| 复习队列无每日上限 | 一轮最多 200 词，但一天可以开多轮；积压很多时体验偏长 | M3 视实际使用决定是否加每日上限 |
+| 复习快捷键 | 数字键 1~4 在中文输入法下未实测；必要时改成 Alt+1~4 或可配置 | 真实桌面确认后调整 |
+| 复习落库非原子 | `review()` 依次写词条、`review_logs`、`daily_stats`，未包同一个事务 | 概率极低；M3 视需要把三步包进 `Database.transaction()` |
 
-## 10. 下次会话开工指令
+## 11. 下次会话开工指令
 
 把下面这段直接发给 Claude：
 
 ```text
 继续 py-learn 的 english_learner。先读 CLAUDE.md、docs/english_learner/PRODUCT.md
-和 docs/english_learner/PROGRESS.md，确认当前是 M0 完成、准备做 M1。
-从 M1-1 存储层开始，按 PROGRESS.md 第 7 节的顺序推进；每完成一个任务补测试并更新
-PROGRESS.md 的状态与验证记录。不要引入 ORM，不要跳过 TaskWorker 直接调 AI。
+和 docs/english_learner/PROGRESS.md，确认当前是 M2 完成、准备做 M3。
+按 PROGRESS.md 第 9 节的顺序推进：先做数据导出 + 单测，再做 API Key 加密、
+TaskWorker 取消标志。动手前先跑 pytest/ruff 确认基线。每完成一块补测试并更新
+PROGRESS.md 的状态与验证记录。不要引入 ORM，不要跳过 TaskWorker 直接调 AI，
+services/storage 不得 import PySide6。
 ```
 
 开工前先自检：

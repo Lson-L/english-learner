@@ -34,6 +34,7 @@ english-learner = "english_learner.app:main"
 # 这是 PEP 735 的依赖组，uv sync 默认会安装 dev 组。
 [dependency-groups]
 dev = [
+    "pyinstaller>=6.22.3",
     "pytest>=8.3",
     "pytest-cov>=6.0",
     "ruff>=0.8",

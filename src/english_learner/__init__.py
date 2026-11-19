@@ -6,7 +6,7 @@
 分层约定：
 - gui/       只放 PySide6 视图与交互，不写业务逻辑；
 - services/  业务逻辑，纯 Python，不 import PySide6，方便单测；
-- storage/   SQLite 读写（M1 加入）；
+- storage/   SQLite 连接、迁移与纯 SQL 仓库，不 import PySide6；
 - models/    领域对象（dataclass）。
 
 作者：lson

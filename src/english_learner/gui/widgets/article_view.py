@@ -1,0 +1,117 @@
+"""只读正文视图：双击取词、生词高亮、固定字号与行距。
+
+实现要点：
+- 用 QTextEdit（只读）而不是 QLabel，才有光标定位与 ExtraSelection；
+- 双击时用 `cursorForPosition` + `WordUnderCursor` 拿到单词的字符区间，
+  再把 (单词, 起点, 终点, 所在句子) 通过信号发给页面；
+- 高亮按数据库里的字符偏移重绘，重开应用后位置不变；
+- 句子提取是纯函数（services.dictionary_service.extract_sentence），可单测。
+"""
+
+from __future__ import annotations
+
+from PySide6.QtCore import QPoint, Signal
+from PySide6.QtGui import QColor, QMouseEvent, QTextBlockFormat, QTextCharFormat, QTextCursor
+from PySide6.QtWidgets import QFrame, QTextEdit, QWidget
+
+from ...models.entities import Article, Highlight
+from ...services.dictionary_service import extract_sentence
+from ..fonts import english_font_families
+
+HIGHLIGHT_COLOR = "#FDE68A"
+
+
+class ArticleView(QTextEdit):
+    """正文区域。`word_selected` 的参数：单词、起始偏移、结束偏移、所在句子。"""
+
+    word_selected = Signal(str, int, int, str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("articleView")
+        self.setReadOnly(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.document().setDocumentMargin(24)
+
+        # 正文用全局英文字体 + 13pt ≈ 17px；走文档默认字体，避免 QSS 的全局 14px
+        # 覆盖正文。中文字符由字体链回退到雅黑。具体字体由 set_english_font 决定。
+        font = self.document().defaultFont()
+        font.setFamilies(english_font_families())
+        font.setPointSizeF(13.0)
+        self.document().setDefaultFont(font)
+
+        self._plain_text = ""
+        self._highlights: tuple[Highlight, ...] = ()
+
+    # ------------------------------------------------------------------ 内容
+    def set_article(self, article: Article | None) -> None:
+        self._plain_text = article.content if article is not None else ""
+        self.setPlainText(self._plain_text)
+        self._apply_line_height()
+        self._apply_highlights()
+        self.moveCursor(QTextCursor.MoveOperation.Start)
+
+    def set_english_font(self, key: str | None = None) -> None:
+        """切换正文字体（key 见 gui.fonts.ENGLISH_FONT_CHOICES）。
+
+        只换族名，字号与行距保持原样；QSS 管不到 QTextDocument 的默认字体，
+        所以设置页切换字体后要显式调这里。
+        """
+        font = self.document().defaultFont()
+        font.setFamilies(english_font_families(key))
+        self.document().setDefaultFont(font)
+
+    def set_highlights(self, highlights: list[Highlight] | tuple[Highlight, ...]) -> None:
+        self._highlights = tuple(highlights)
+        self._apply_highlights()
+
+    def highlight_count(self) -> int:
+        """给测试用：当前实际绘制的高亮数量。"""
+        return len(self.extraSelections())
+
+    # ------------------------------------------------------------------ 交互
+    def word_at_position(self, position: QPoint) -> tuple[str, int, int, str] | None:
+        """把屏幕坐标解析成 (单词, 起点, 终点, 句子)；没有单词则返回 None。"""
+        cursor = self.cursorForPosition(position)
+        cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+        text = cursor.selectedText().strip()
+        if not text:
+            return None
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        sentence = extract_sentence(self._plain_text, start, end)
+        return text, start, end, sentence
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt 约定
+        found = self.word_at_position(event.position().toPoint())
+        if found is not None:
+            self.word_selected.emit(*found)
+        super().mouseDoubleClickEvent(event)
+
+    # ------------------------------------------------------------------ 绘制
+    def _apply_line_height(self) -> None:
+        cursor = QTextCursor(self.document())
+        cursor.select(QTextCursor.SelectionType.Document)
+        block_format = QTextBlockFormat()
+        block_format.setLineHeight(180, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
+        cursor.mergeBlockFormat(block_format)
+
+    def _apply_highlights(self) -> None:
+        selections: list[QTextEdit.ExtraSelection] = []
+        doc_length = len(self._plain_text)
+        for highlight in self._highlights:
+            start = max(0, min(highlight.start_offset, doc_length))
+            end = max(start, min(highlight.end_offset, doc_length))
+            if end <= start:
+                continue
+            cursor = QTextCursor(self.document())
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            char_format = QTextCharFormat()
+            char_format.setBackground(QColor(HIGHLIGHT_COLOR))
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = cursor
+            selection.format = char_format
+            selections.append(selection)
+        self.setExtraSelections(selections)

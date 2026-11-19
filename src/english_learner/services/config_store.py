@@ -133,6 +133,29 @@ class AIConfig:
             raise ConfigError(f"配置内容格式不正确：{exc}") from exc
 
 
+@dataclass(frozen=True)
+class UiConfig:
+    """界面偏好，和 AI 连接配置一起放在 config.json 的 `ui` 段里。
+
+    `english_font` 是英文字体 key，留空表示“用户没选过”，默认值由界面层
+    （`gui.fonts.DEFAULT_ENGLISH_FONT`）决定 —— services 层不依赖 PySide6，
+    也不该知道有哪些可选字体。
+    """
+
+    english_font: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> UiConfig:
+        if not isinstance(data, dict):
+            return cls()
+        # 兼容旧字段 reading_font：早期版本只把字体作用在正文上。
+        raw = data.get("english_font") or data.get("reading_font") or ""
+        return cls(english_font=str(raw).strip().lower())
+
+
 class ConfigStore:
     """JSON 配置文件仓库。"""
 
@@ -172,8 +195,42 @@ class ConfigStore:
         if errors:
             raise ConfigError("；".join(errors))
 
+        # 保留 ui 段：重新配置 AI 不应该把用户选的字体冲掉。
+        ui_data = self._read_payload().get("ui")
+        payload: dict[str, Any] = {"version": CONFIG_VERSION, "ai": normalized.to_dict()}
+        if isinstance(ui_data, dict):
+            payload["ui"] = ui_data
+        self._write_payload(payload)
+        return normalized
+
+    def load_ui(self) -> UiConfig:
+        """读取界面偏好；文件缺失或损坏一律回退默认值，不能因为偏好把启动搞挂。"""
+        return UiConfig.from_dict(self._read_payload().get("ui", {}))
+
+    def save_ui(self, ui: UiConfig) -> UiConfig:
+        """只更新 `ui` 段，`ai` 段原样保留。"""
+        payload = self._read_payload()
+        payload.setdefault("version", CONFIG_VERSION)
+        payload["ui"] = ui.to_dict()
+        self._write_payload(payload)
+        return ui
+
+    # ------------------------------------------------------------------ 内部
+    def _read_payload(self) -> dict[str, Any]:
+        """读取原始 JSON（不做校验）：文件缺失、编码异常、内容损坏都返回空 dict。"""
+        try:
+            text = self.path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return {}
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _write_payload(self, payload: dict[str, Any]) -> None:
+        """原子写入：先写 .tmp 再替换，避免写到一半留下半个 JSON。"""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"version": CONFIG_VERSION, "ai": normalized.to_dict()}
         temp_path = self.path.with_suffix(".tmp")
         temp_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
@@ -186,7 +243,6 @@ class ConfigStore:
                 self.path.chmod(0o600)
             except OSError:
                 pass
-        return normalized
 
     def clear(self) -> None:
         """删除配置文件（用于“恢复初始配置”）。"""

@@ -21,10 +21,12 @@ from logging.handlers import RotatingFileHandler
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from . import __version__
+from .gui.fonts import load_application_fonts
 from .gui.main_window import MainWindow
 from .gui.onboarding import OnboardingDialog
-from .gui.theme import STYLESHEET
+from .gui.theme import build_stylesheet
 from .services.config_store import AIConfig, ConfigError, ConfigStore, config_dir
+from .storage.db import Database
 
 logger = logging.getLogger(__name__)
 
@@ -105,10 +107,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     app.setOrganizationName("lson")
     app.setApplicationVersion(__version__)
     app.setStyle("Fusion")
-    app.setStyleSheet(STYLESHEET)
-    _install_excepthook()
+    # 字体必须在应用样式表之前注册，否则 QSS 里的族名会被解析成“不存在的字体”而回退。
+    load_application_fonts()
 
     store = ConfigStore()
+    # 英文字体是纯界面偏好：文件缺失或字段异常都回退默认值，不能阻塞启动。
+    app.setStyleSheet(build_stylesheet(store.load_ui().english_font))
+    _install_excepthook()
+
     existing: AIConfig | None = None
     try:
         existing = store.load()
@@ -128,6 +134,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         config = dialog.saved_config
 
-    window = MainWindow(config, store)
+    db = Database()
+    window = MainWindow(config, store, db)
     window.show()
+    # 首次使用（profile 为空）时弹测评；用户取消也不影响进入主界面。
+    window.maybe_show_assessment()
     return app.exec()

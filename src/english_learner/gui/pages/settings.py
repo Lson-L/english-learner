@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QComboBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -14,7 +15,8 @@ from PySide6.QtWidgets import (
 )
 
 from ...services.ai_client import AIClient, ConnectionResult
-from ...services.config_store import AIConfig, ConfigStore
+from ...services.config_store import AIConfig, ConfigError, ConfigStore, UiConfig
+from ..fonts import ENGLISH_FONT_CHOICES, get_english_font
 from ..workers import TaskWorker
 from .common import Card, PageHeader, set_status
 
@@ -26,19 +28,23 @@ class SettingsPage(QWidget):
     """
 
     reconfigure_requested = Signal()
+    # 英文字体切换：由主窗口负责重建全局 QSS 并同步阅读页。
+    english_font_changed = Signal(str)
 
     def __init__(self, config: AIConfig, store: ConfigStore, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._config = config
         self._store = store
+        self._ui = store.load_ui()
         self._worker: TaskWorker | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(32, 28, 32, 28)
         layout.setSpacing(16)
 
-        layout.addWidget(PageHeader("设置", "AI 服务配置、数据位置与版本信息。"))
+        layout.addWidget(PageHeader("设置", "AI 服务配置、阅读外观与数据位置。"))
         layout.addWidget(self._build_ai_card())
+        layout.addWidget(self._build_appearance_card())
         layout.addWidget(self._build_data_card())
         layout.addStretch(1)
 
@@ -90,6 +96,56 @@ class SettingsPage(QWidget):
 
         self.apply_config(self._config)
         return card
+
+    def _build_appearance_card(self) -> Card:
+        card = Card()
+        title = QLabel("外观")
+        title.setObjectName("cardTitle")
+        card.body.addWidget(title)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 4, 0, 0)
+        form.setHorizontalSpacing(24)
+        form.setVerticalSpacing(10)
+
+        self._font_combo = QComboBox()
+        for choice in ENGLISH_FONT_CHOICES:
+            self._font_combo.addItem(choice.label, choice.key)
+        current_index = self._font_combo.findData(get_english_font(self._ui.english_font).key)
+        # 先设好选中项再连信号，避免构造期间误触发一次保存。
+        self._font_combo.setCurrentIndex(max(current_index, 0))
+        self._font_combo.currentIndexChanged.connect(self._on_english_font_changed)
+        form.addRow(self._form_label("英语字体"), self._font_combo)
+        card.body.addLayout(form)
+
+        preview = QLabel(
+            "The quick brown fox jumps over the lazy dog. "
+            "Small habits, repeated every day, slowly reshape who we become."
+        )
+        preview.setObjectName("passageText")
+        preview.setWordWrap(True)
+        card.body.addWidget(preview)
+
+        self._font_status = QLabel("")
+        card.body.addWidget(self._font_status)
+
+        note = QLabel("作用于整个应用里所有英文：界面、文章、测评、释义卡；中文统一使用系统雅黑。")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        card.body.addWidget(note)
+        return card
+
+    def _on_english_font_changed(self, index: int) -> None:
+        key = str(self._font_combo.itemData(index) or "")
+        self._ui = UiConfig(english_font=key)
+        try:
+            self._store.save_ui(self._ui)
+        except (ConfigError, OSError) as exc:
+            # 保存失败不影响这次切换，只提示一下，下次启动会回到旧偏好。
+            set_status(self._font_status, f"字体已切换，但偏好保存失败：{exc}", "error")
+        else:
+            set_status(self._font_status, "已保存，立即生效。", "hint")
+        self.english_font_changed.emit(key)
 
     def _build_data_card(self) -> Card:
         card = Card()

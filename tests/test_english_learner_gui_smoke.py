@@ -12,9 +12,24 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from english_learner.gui.main_window import MainWindow  # noqa: E402
+from english_learner.gui.assessment_dialog import AssessmentDialog  # noqa: E402
+from english_learner.gui.level_feedback_dialog import LevelFeedbackDialog  # noqa: E402
+from english_learner.gui.main_window import (  # noqa: E402
+    PAGE_REVIEW,
+    PAGE_VOCABULARY,
+    MainWindow,
+)
 from english_learner.gui.onboarding import OnboardingDialog  # noqa: E402
+from english_learner.models.entities import (  # noqa: E402
+    Article,
+    Profile,
+    Word,
+    now_iso,
+    today_str,
+)
+from english_learner.services.app_context import AppContext  # noqa: E402
 from english_learner.services.config_store import AIConfig, ConfigStore  # noqa: E402
+from english_learner.storage.db import Database  # noqa: E402
 
 _APP: QApplication | None = None
 
@@ -53,9 +68,116 @@ def test_main_window_builds_all_pages(tmp_path: Path) -> None:
     get_app()
     store = ConfigStore(tmp_path / "config.json")
     store.save(make_config())
+    db = Database(tmp_path / "data.db")
 
-    window = MainWindow(make_config(), store)
+    window = MainWindow(make_config(), store, db)
 
     assert window._stack.count() == 5
+    assert window._today_page is not None
+    assert window._reader_page is not None
+    assert window._vocabulary_page is not None
+    assert window._review_page is not None
     assert window._settings_page is not None
     assert window._nav_group.buttons()[0].isChecked()
+    window.close()
+
+
+def test_today_page_reflects_database(tmp_path: Path) -> None:
+    get_app()
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(make_config())
+    db = Database(tmp_path / "data.db")
+    db.profiles.save(Profile(cefr_level="B2", vocab_estimate=5200))
+    db.stats.bump(today_str(), words_added=2)
+    for lemma in ("resilient", "consistent"):
+        db.words.upsert(
+            Word(
+                lemma=lemma,
+                due_date=today_str(),
+                created_at=now_iso(),
+                updated_at=now_iso(),
+            )
+        )
+
+    window = MainWindow(make_config(), store, db)
+
+    assert "B2" in window._today_page._level_label.text()
+    assert "5,200" in window._today_page._level_label.text()
+    assert window._today_page._words_card._value_label.text() == "2 词"
+    assert window._today_page._due_card._value_label.text() == "2 词"
+    assert window._today_page._streak_card._value_label.text() == "1 天"
+    assert window._today_page._review_button.text() == "开始复习"
+    window.close()
+
+
+def test_navigate_to_review_and_vocabulary(tmp_path: Path) -> None:
+    get_app()
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(make_config())
+    db = Database(tmp_path / "data.db")
+    db.words.upsert(
+        Word(
+            lemma="resilient",
+            meaning_cn="有韧性的",
+            due_date=today_str(),
+            created_at=now_iso(),
+            updated_at=now_iso(),
+        )
+    )
+
+    window = MainWindow(make_config(), store, db)
+
+    # 首页「开始复习」→ 复习页
+    assert window._today_page._review_button.text() == "开始复习"
+    window._today_page._review_button.click()
+    assert window._stack.currentIndex() == PAGE_REVIEW
+    assert "今天到期 1 词" in window._review_page._due_label.text()
+
+    # 侧边栏 → 生词本页
+    window._go(PAGE_VOCABULARY)
+    assert window._stack.currentIndex() == PAGE_VOCABULARY
+    assert window._vocabulary_page._table.rowCount() == 1
+    window.close()
+
+
+def test_level_feedback_dialog_validation_and_quick_fill(tmp_path: Path) -> None:
+    get_app()
+    store = ConfigStore(tmp_path / "config.json")
+    db = Database(tmp_path / "data.db")
+    db.profiles.save(Profile(cefr_level="B1", vocab_estimate=3800))
+    article = db.articles.insert(
+        Article(
+            article_date=today_str(),
+            title="Too Hard",
+            content="Small habits are powerful.",
+            level="B1",
+            word_count=4,
+            created_at=now_iso(),
+        )
+    )
+    context = AppContext(make_config(), store, db)
+
+    dialog = LevelFeedbackDialog(context, article)
+    dialog._submit()
+    assert dialog._worker is None
+    assert "先写一句" in dialog._status.text()
+
+    dialog._quick_buttons[0].click()
+    assert "太难" in dialog._feedback_edit.toPlainText()
+    dialog.close()
+    db.close()
+
+
+def test_assessment_dialog_builds_questionnaire(tmp_path: Path) -> None:
+    get_app()
+    db = Database(tmp_path / "data.db")
+    context = AppContext(make_config(), ConfigStore(tmp_path / "config.json"), db)
+
+    dialog = AssessmentDialog(context)
+
+    assert len(dialog._comp_groups) == 5
+    assert len(dialog._vocab_groups) == 5
+    assert dialog._stack.currentIndex() == 0
+    assert dialog._primary_button.text() == "提交并评分"
+    dialog.close()
+    db.close()

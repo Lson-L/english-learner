@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import (
     QFrame,
-    QHBoxLayout,
     QLabel,
     QSizePolicy,
     QVBoxLayout,
@@ -51,7 +50,10 @@ class PageHeader(QWidget):
 
 
 class StatCard(Card):
-    """首页的小指标卡：说明 + 大数字 + 补充文字。"""
+    """首页的小指标卡：说明 + 大数字 + 补充文字。
+
+    数字和补充文字支持后续刷新（M1 起首页接真实数据）。
+    """
 
     def __init__(self, caption: str, value: str, hint: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -61,59 +63,20 @@ class StatCard(Card):
         caption_label.setObjectName("muted")
         self.body.addWidget(caption_label)
 
-        value_label = QLabel(value)
-        value_label.setObjectName("bigNumber")
-        self.body.addWidget(value_label)
+        self._value_label = QLabel(value)
+        self._value_label.setObjectName("bigNumber")
+        self.body.addWidget(self._value_label)
 
-        hint_label = QLabel(hint)
-        hint_label.setObjectName("muted")
-        hint_label.setWordWrap(True)
-        self.body.addWidget(hint_label)
+        self._hint_label = QLabel(hint)
+        self._hint_label.setObjectName("muted")
+        self._hint_label.setWordWrap(True)
+        self.body.addWidget(self._hint_label)
 
+    def set_value(self, value: str) -> None:
+        self._value_label.setText(value)
 
-class PlaceholderPage(QWidget):
-    """M1/M2 才实现的页面占位。
-
-    占位页也把产品意图写清楚，避免下个会话只看到一句“待实现”。
-    """
-
-    def __init__(
-        self,
-        title: str,
-        subtitle: str,
-        items: list[tuple[str, str]],
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 28, 32, 28)
-        layout.setSpacing(16)
-
-        layout.addWidget(PageHeader(title, subtitle))
-
-        for item_title, item_desc in items:
-            card = Card()
-            row = QHBoxLayout()
-            row.setSpacing(10)
-
-            title_label = QLabel(item_title)
-            title_label.setObjectName("cardTitle")
-            row.addWidget(title_label)
-
-            badge = QLabel("M1")
-            badge.setObjectName("stepBadge")
-            row.addWidget(badge)
-            row.addStretch(1)
-            card.body.addLayout(row)
-
-            desc_label = QLabel(item_desc)
-            desc_label.setObjectName("muted")
-            desc_label.setWordWrap(True)
-            card.body.addWidget(desc_label)
-
-            layout.addWidget(card)
-
-        layout.addStretch(1)
+    def set_hint(self, hint: str) -> None:
+        self._hint_label.setText(hint)
 
 
 def set_status(label: QLabel, text: str, kind: str = "hint") -> None:

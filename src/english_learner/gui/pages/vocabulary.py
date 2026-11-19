@@ -1,0 +1,392 @@
+"""生词本页：列表 + 筛选 + 搜索 + 手动编辑释义 + 删除。
+
+数据口径：
+- 列表来自 `words` 表（查词即入库，所以可能包含查过但没点「加入」的词，
+  这是 M1 已确认的行为，M2 不改数据结构）；
+- 筛选按 SM-2 状态：未复习（new）/ 学习中（learning）/ 已掌握（mastered）；
+- 编辑只改释义（中英文），不碰调度字段；删除会级联清理高亮与复习历史。
+
+全部是本地 SQLite 操作，毫秒级，直接在 UI 线程执行。
+"""
+
+from __future__ import annotations
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QComboBox,
+    QFrame,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ...models.entities import Word
+from ...services.app_context import AppContext
+from .common import PageHeader, set_status
+
+STATUS_LABELS: dict[str, str] = {
+    "new": "未复习",
+    "learning": "学习中",
+    "mastered": "已掌握",
+}
+
+# 筛选下拉：显示文字 → words.status（None 表示全部）。
+_STATUS_OPTIONS: tuple[tuple[str, str | None], ...] = (
+    ("全部", None),
+    ("未复习", "new"),
+    ("学习中", "learning"),
+    ("已掌握", "mastered"),
+)
+
+_COLUMNS = ("单词", "释义", "状态", "下次复习")
+
+
+class VocabularyPage(QWidget):
+    def __init__(self, context: AppContext, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._context = context
+        self._rows: list[Word] = []
+        self._selected: Word | None = None
+
+        self._build_ui()
+
+    # ------------------------------------------------------------------ UI
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(32, 28, 32, 24)
+        layout.setSpacing(14)
+
+        layout.addWidget(
+            PageHeader(
+                "生词本",
+                "阅读时标注过的词都在这里；可以筛选、搜索、修改释义或删除。",
+            )
+        )
+        layout.addLayout(self._build_toolbar())
+
+        self._empty_label = QLabel("还没有生词。去「阅读」页双击一个单词，加入生词本吧。")
+        self._empty_label.setObjectName("muted")
+        self._empty_label.setWordWrap(True)
+        layout.addWidget(self._empty_label)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self._build_table())
+        splitter.addWidget(self._build_detail_panel())
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(12)
+        layout.addWidget(splitter, 1)
+
+        self._status = QLabel("")
+        layout.addWidget(self._status)
+
+    def _build_toolbar(self) -> QHBoxLayout:
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(10)
+
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("搜索单词或释义…")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setMaximumWidth(280)
+        self._search_edit.textChanged.connect(self.refresh)
+        toolbar.addWidget(self._search_edit)
+
+        self._filter_combo = QComboBox()
+        for text, status in _STATUS_OPTIONS:
+            self._filter_combo.addItem(text, status)
+        self._filter_combo.currentIndexChanged.connect(self.refresh)
+        toolbar.addWidget(self._filter_combo)
+
+        toolbar.addStretch(1)
+
+        self._count_label = QLabel("")
+        self._count_label.setObjectName("muted")
+        toolbar.addWidget(self._count_label)
+        return toolbar
+
+    def _build_table(self) -> QTableWidget:
+        self._table = QTableWidget(0, len(_COLUMNS))
+        self._table.setObjectName("wordTable")
+        self._table.setHorizontalHeaderLabels(list(_COLUMNS))
+        self._table.verticalHeader().setVisible(False)
+        self._table.setShowGrid(False)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setAlternatingRowColors(False)
+        self._table.setWordWrap(False)
+
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.itemSelectionChanged.connect(self._on_selection_changed)
+        return self._table
+
+    def _build_detail_panel(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("wordPanel")
+        panel.setFixedWidth(360)
+
+        root = QVBoxLayout(panel)
+        root.setContentsMargins(20, 20, 20, 18)
+        root.setSpacing(10)
+
+        self._detail_placeholder = QLabel("从左侧选择一个词\n查看并编辑释义")
+        self._detail_placeholder.setObjectName("muted")
+        self._detail_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._detail_placeholder.setWordWrap(True)
+        root.addWidget(self._detail_placeholder, 1)
+
+        self._detail_body = QWidget()
+        body = QVBoxLayout(self._detail_body)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(8)
+
+        self._title_label = QLabel("")
+        self._title_label.setObjectName("wordTitle")
+        self._title_label.setWordWrap(True)
+        body.addWidget(self._title_label)
+
+        phonetic_row = QHBoxLayout()
+        phonetic_row.setSpacing(8)
+        self._phonetic_label = QLabel("")
+        self._phonetic_label.setObjectName("wordPhonetic")
+        self._pos_label = QLabel("")
+        self._pos_label.setObjectName("wordPos")
+        phonetic_row.addWidget(self._phonetic_label)
+        phonetic_row.addWidget(self._pos_label)
+        phonetic_row.addStretch(1)
+        body.addLayout(phonetic_row)
+
+        body.addWidget(self._field_label("中文释义"))
+        self._meaning_cn_edit = QPlainTextEdit()
+        self._meaning_cn_edit.setObjectName("meaningEdit")
+        self._meaning_cn_edit.setFixedHeight(64)
+        body.addWidget(self._meaning_cn_edit)
+
+        body.addWidget(self._field_label("英文释义"))
+        self._meaning_en_edit = QPlainTextEdit()
+        self._meaning_en_edit.setObjectName("meaningEdit")
+        self._meaning_en_edit.setFixedHeight(64)
+        body.addWidget(self._meaning_en_edit)
+
+        self._srs_label = QLabel("")
+        self._srs_label.setObjectName("muted")
+        self._srs_label.setWordWrap(True)
+        body.addWidget(self._srs_label)
+
+        self._context_label = QLabel("")
+        self._context_label.setObjectName("wordContext")
+        self._context_label.setWordWrap(True)
+        body.addWidget(self._context_label)
+
+        self._source_label = QLabel("")
+        self._source_label.setObjectName("muted")
+        self._source_label.setWordWrap(True)
+        body.addWidget(self._source_label)
+
+        body.addStretch(1)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        self._save_button = QPushButton("保存释义")
+        self._save_button.setObjectName("primaryButton")
+        self._save_button.clicked.connect(self._save_meaning)
+        buttons.addWidget(self._save_button)
+
+        self._delete_button = QPushButton("删除")
+        self._delete_button.setObjectName("secondaryButton")
+        self._delete_button.clicked.connect(self._on_delete_clicked)
+        buttons.addWidget(self._delete_button)
+        buttons.addStretch(1)
+        body.addLayout(buttons)
+
+        root.addWidget(self._detail_body, 1)
+        self._detail_body.setVisible(False)
+        return panel
+
+    @staticmethod
+    def _field_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("fieldLabel")
+        return label
+
+    # -------------------------------------------------------------- 生命周期
+    def on_activated(self) -> None:
+        self.refresh()
+
+    def refresh(self) -> None:
+        selected_id = self._selected.id if self._selected is not None else None
+
+        status = self._filter_combo.currentData()
+        words = self._context.word_repo.list_all(status=status)
+        keyword = self._search_edit.text().strip().lower()
+        if keyword:
+            words = [word for word in words if self._matches(word, keyword)]
+
+        self._rows = words
+        self._count_label.setText(f"共 {len(words)} 个词")
+        self._empty_label.setVisible(not words)
+        self._rebuild_table(selected_id)
+
+    @staticmethod
+    def _matches(word: Word, keyword: str) -> bool:
+        haystack = f"{word.lemma}\n{word.meaning_cn}\n{word.meaning_en}".lower()
+        return keyword in haystack
+
+    # ------------------------------------------------------------------ 表格
+    def _rebuild_table(self, selected_id: int | None) -> None:
+        self._table.blockSignals(True)
+        self._table.setRowCount(0)
+        for row, word in enumerate(self._rows):
+            self._table.insertRow(row)
+            self._set_row(row, word)
+        self._table.blockSignals(False)
+
+        target_row = self._row_of(selected_id)
+        if target_row is not None:
+            self._table.selectRow(target_row)
+        elif self._rows:
+            self._table.selectRow(0)
+        else:
+            self._table.clearSelection()
+            self._clear_detail()
+
+    def _set_row(self, row: int, word: Word) -> None:
+        cells = (
+            word.display_form or word.lemma,
+            word.meaning_cn or word.meaning_en or "—",
+            STATUS_LABELS.get(word.status, word.status),
+            word.due_date or "—",
+        )
+        for column, text in enumerate(cells):
+            item = QTableWidgetItem(text)
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            if column == 0:
+                item.setData(Qt.ItemDataRole.UserRole, word.id)
+            self._table.setItem(row, column, item)
+
+    def _row_of(self, word_id: int | None) -> int | None:
+        if word_id is None:
+            return None
+        for row, word in enumerate(self._rows):
+            if word.id == word_id:
+                return row
+        return None
+
+    def _on_selection_changed(self) -> None:
+        row = self._table.currentRow()
+        if row < 0 or row >= len(self._rows):
+            self._clear_detail()
+            return
+        self._show_detail(self._rows[row])
+
+    # ------------------------------------------------------------------ 详情
+    def _show_detail(self, word: Word) -> None:
+        self._selected = word
+        self._detail_placeholder.setVisible(False)
+        self._detail_body.setVisible(True)
+
+        self._title_label.setText(word.display_form or word.lemma)
+        self._phonetic_label.setText(word.phonetic)
+        self._phonetic_label.setVisible(bool(word.phonetic))
+        self._pos_label.setText(word.pos)
+        self._pos_label.setVisible(bool(word.pos))
+
+        self._meaning_cn_edit.setPlainText(word.meaning_cn)
+        self._meaning_en_edit.setPlainText(word.meaning_en)
+
+        status_text = STATUS_LABELS.get(word.status, word.status)
+        parts = [f"状态：{status_text}", f"易度 {word.ease:.2f}", f"间隔 {word.interval_days} 天"]
+        if word.due_date:
+            parts.append(f"下次复习 {word.due_date}")
+        self._srs_label.setText(" · ".join(parts))
+
+        self._context_label.setText(
+            f"原文：{word.context_sentence}" if word.context_sentence else ""
+        )
+        self._context_label.setVisible(bool(word.context_sentence))
+
+        self._source_label.setText(self._source_text(word))
+        self._source_label.setVisible(bool(self._source_label.text()))
+
+    def _clear_detail(self) -> None:
+        self._selected = None
+        self._detail_body.setVisible(False)
+        self._detail_placeholder.setVisible(True)
+
+    def _source_text(self, word: Word) -> str:
+        if word.article_id is None:
+            return ""
+        article = self._context.article_repo.get_by_id(word.article_id)
+        if article is None:
+            return ""
+        return f"出处：{article.title}（{article.article_date}）"
+
+    # ------------------------------------------------------------------ 操作
+    def _save_meaning(self) -> None:
+        word = self._selected
+        if word is None or word.id is None:
+            return
+        meaning_cn = self._meaning_cn_edit.toPlainText().strip()
+        meaning_en = self._meaning_en_edit.toPlainText().strip()
+        if not meaning_cn and not meaning_en:
+            set_status(self._status, "中文释义和英文释义至少填一个。", "error")
+            return
+
+        updated = self._context.word_repo.update_meaning(
+            word.id,
+            meaning_cn=meaning_cn,
+            meaning_en=meaning_en,
+        )
+        if updated is None:
+            set_status(self._status, "词条已不存在，列表已刷新。", "error")
+            self.refresh()
+            return
+
+        self.refresh()
+        name = updated.display_form or updated.lemma
+        set_status(self._status, f"「{name}」的释义已保存。", "success")
+
+    def _on_delete_clicked(self) -> None:
+        word = self._selected
+        if word is None or word.id is None:
+            return
+        name = word.display_form or word.lemma
+        answer = QMessageBox.question(
+            self,
+            "删除生词",
+            f"确定从生词本删除「{name}」吗？\n相关正文高亮和复习记录也会一起删除。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._delete_selected()
+
+    def _delete_selected(self) -> None:
+        """真正的删除动作（弹窗确认后的那一步，单测直接调用它）。"""
+        word = self._selected
+        if word is None or word.id is None:
+            return
+        name = word.display_form or word.lemma
+        if not self._context.word_repo.delete(word.id):
+            set_status(self._status, "删除失败：词条已不存在。", "error")
+            self.refresh()
+            return
+
+        self._selected = None
+        self.refresh()
+        set_status(self._status, f"「{name}」已从生词本删除。", "success")

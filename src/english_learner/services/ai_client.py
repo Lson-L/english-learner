@@ -146,6 +146,37 @@ class AIClient:
             raise translate_error(exc) from exc
         return _extract_content(response)
 
+    def complete_json(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        """要求服务端返回 JSON；不支持 response_format 时降级重试一次。
+
+        部分兼容网关（尤其自建代理）会对 response_format 返回 400。
+        降级后仍依赖业务层的 `json_utils.parse_json_object` 做本地兜底解析。
+        """
+        try:
+            return self.complete(
+                messages,
+                temperature=temperature,
+                json_mode=True,
+                max_tokens=max_tokens,
+            )
+        except AIError as exc:
+            if not _json_mode_unsupported(exc):
+                raise
+            logger.info("服务端疑似不支持 response_format，改用普通模式重试")
+            return self.complete(messages, temperature=temperature, max_tokens=max_tokens)
+
+
+def _json_mode_unsupported(exc: AIError) -> bool:
+    """根据错误文案粗略判断“只是不支持 JSON 模式”，而不是鉴权/网络问题。"""
+    text = f"{exc.message} {exc.hint}".lower()
+    return any(hint in text for hint in ("response_format", "response format", "json_object"))
+
 
 def _extract_content(response: Any) -> str:
     """兼容不同 SDK 返回结构，取出第一条回复的文本。"""

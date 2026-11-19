@@ -27,7 +27,7 @@ uv run ruff format src/english_learner tests
 ## 文档索引（改代码前先读）
 
 - `docs/english_learner/PRODUCT.md`：产品定位、MVP 范围、已确认决策；
-- `docs/english_learner/PROGRESS.md`：**当前进度、M0 实现细节、M1 详细任务清单、
+- `docs/english_learner/PROGRESS.md`：**当前进度、各里程碑实现细节、M3 任务清单、
   已知问题、下次开工指令**。每完成一个里程碑必须更新它。
 
 ## 硬性约定
@@ -45,6 +45,10 @@ uv run ruff format src/english_learner tests
    `@dataclass`；行宽 100，ruff 必须通过。
 8. **页面导航**：`main_window.py` 中页面栈顺序与侧边栏按钮索引硬绑定
    （今日 0 / 阅读 1 / 生词本 2 / 复习 3 / 设置 4），加页面两处一起改。
+9. **字体**：所有英文（界面、正文、测评、释义卡）的外观只由 `gui/fonts.py` 的
+   字体链 + 全局 QSS 的 `*` 规则决定，新控件**不要**单独设 `font-family`
+   （中文靠字体链回退到雅黑）。唯一例外是 QTextDocument 类控件（文章正文），
+   必须调 `ArticleView.set_english_font(key)`。可选字体见 `ENGLISH_FONT_CHOICES`。
 
 ## 环境注意
 
@@ -57,6 +61,7 @@ uv run ruff format src/english_learner tests
 
 ## 当前状态
 
-- **M0 完成**（2026-11-18）：配置向导、真实连接测试、主窗口 5 页面骨架。
-- **下一步：M1**，从存储层开始。任务顺序、schema、AI JSON 契约、验收标准见
-  `docs/english_learner/PROGRESS.md` 第 7 节。
+- **M0 / M1 / M1.5 / M2 完成**（M2 于 2026-11-19）：配置、测评、每日文章、阅读划词、
+  生词本、SM-2 复习、首页真实数据全部可用；复习完全本地化，不依赖 AI。
+- **下一步：M3**（数据导出、Key 加密、请求取消、错误兜底、性能）。任务顺序与
+  已知技术债见 `docs/english_learner/PROGRESS.md` 第 9、10 节。

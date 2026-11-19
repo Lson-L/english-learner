@@ -6,9 +6,13 @@ M0 先用一份集中管理的 QSS（≈ Web 的全局 CSS），后续要做深�
 
 from __future__ import annotations
 
-STYLESHEET = """
+from .fonts import DEFAULT_ENGLISH_FONT, english_font_stack
+
+# QSS 里满是大括号，用不了 f-string；先用占位符写，最后统一替换成字体链。
+# 全应用只有这一处决定英文外观：所有控件都继承 `*` 的字体链，新页面自动生效。
+_STYLESHEET_TEMPLATE = """
 * {
-    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-family: __ENGLISH_FONT__;
     font-size: 14px;
     color: #1F2937;
 }
@@ -217,6 +221,188 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
     background: transparent;
 }
 
+/* ---------- 测评 ---------- */
+/* 字体沿用全局英文链；行距在 assessment_dialog 里用富文本设置。 */
+QLabel#passageText {
+    font-size: 15px;
+    color: #1F2937;
+    padding: 4px 0;
+}
+QLabel#questionPrompt {
+    font-size: 14px;
+    color: #111827;
+    font-weight: 600;
+}
+QRadioButton {
+    color: #374151;
+    font-size: 14px;
+    spacing: 8px;
+    padding: 2px 0;
+}
+
+/* ---------- 阅读器与释义卡 ---------- */
+QTextEdit#articleView {
+    background: #FFFFFF;
+    border: 1px solid #E4E8F0;
+    border-radius: 12px;
+    selection-background-color: #BFD6FF;
+}
+QFrame#wordPanel {
+    background: #FFFFFF;
+    border: 1px solid #E4E8F0;
+    border-radius: 12px;
+}
+QLabel#wordTitle {
+    font-size: 26px;
+    font-weight: 600;
+    color: #111827;
+}
+QLabel#wordPhonetic {
+    color: #6B7280;
+    font-size: 14px;
+}
+QLabel#wordPos {
+    background: #EAF1FF;
+    color: #2563EB;
+    border-radius: 8px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLabel#wordMeaningCn {
+    font-size: 16px;
+    color: #111827;
+}
+QLabel#wordMeaningEn {
+    color: #4B5563;
+    font-size: 13px;
+    font-style: italic;
+}
+QLabel#wordExampleEn {
+    color: #1F2937;
+    font-size: 13px;
+}
+QLabel#wordExampleCn {
+    color: #6B7280;
+    font-size: 13px;
+}
+QLabel#wordContext {
+    color: #6B7280;
+    font-size: 12px;
+    background: #F7F8FA;
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+
+/* ---------- 生词本 ---------- */
+QTableWidget#wordTable {
+    background: #FFFFFF;
+    border: 1px solid #E4E8F0;
+    border-radius: 12px;
+    selection-background-color: #EAF1FF;
+    selection-color: #1F2937;
+    outline: none;
+}
+QTableWidget#wordTable::item {
+    padding: 8px 10px;
+    border-bottom: 1px solid #F1F4F9;
+}
+QTableWidget#wordTable::item:selected {
+    background: #EAF1FF;
+    color: #1F2937;
+}
+QHeaderView::section {
+    background: #F7F8FA;
+    color: #4B5563;
+    border: none;
+    border-bottom: 1px solid #E4E8F0;
+    padding: 8px 10px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QPlainTextEdit {
+    background: #FFFFFF;
+    border: 1px solid #D7DCE6;
+    border-radius: 8px;
+    padding: 6px 8px;
+    selection-background-color: #BFD6FF;
+}
+QPlainTextEdit:focus {
+    border-color: #3B82F6;
+}
+
+/* ---------- 复习 ---------- */
+QFrame#reviewCard {
+    background: #FFFFFF;
+    border: 1px solid #E4E8F0;
+    border-radius: 12px;
+}
+QLabel#reviewIdleTitle {
+    font-size: 22px;
+    font-weight: 600;
+    color: #111827;
+}
+QLabel#reviewWord {
+    font-size: 40px;
+    font-weight: 600;
+    color: #111827;
+}
+QLabel#reviewMeaning {
+    font-size: 18px;
+    color: #111827;
+}
+QLabel#reviewContext {
+    color: #4B5563;
+    font-size: 14px;
+    background: #F7F8FA;
+    border-radius: 8px;
+    padding: 10px 12px;
+}
+QPushButton#ratingForgot {
+    background: #FEE2E2;
+    color: #B91C1C;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-weight: 600;
+}
+QPushButton#ratingForgot:hover {
+    background: #FECACA;
+}
+QPushButton#ratingVague {
+    background: #FEF3C7;
+    color: #B45309;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-weight: 600;
+}
+QPushButton#ratingVague:hover {
+    background: #FDE68A;
+}
+QPushButton#ratingKnown {
+    background: #DBEAFE;
+    color: #1D4ED8;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-weight: 600;
+}
+QPushButton#ratingKnown:hover {
+    background: #BFDBFE;
+}
+QPushButton#ratingEasy {
+    background: #D1FAE5;
+    color: #047857;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-weight: 600;
+}
+QPushButton#ratingEasy:hover {
+    background: #A7F3D0;
+}
+
 /* ---------- 消息框 ---------- */
 QMessageBox {
     background: #FFFFFF;
@@ -225,3 +411,16 @@ QMessageBox QLabel {
     color: #1F2937;
 }
 """
+
+
+def build_stylesheet(english_font: str | None = None) -> str:
+    """生成全局 QSS。`english_font` 是用户选的英文字体 key（见 gui.fonts）。
+
+    设置页切换字体时会重新生成并 `QApplication.setStyleSheet(...)`，
+    Qt 会自动重刷所有控件，不需要逐个页面改样式。
+    """
+    return _STYLESHEET_TEMPLATE.replace("__ENGLISH_FONT__", english_font_stack(english_font))
+
+
+# 默认样式表：没读到用户偏好时用它兜底。
+STYLESHEET = build_stylesheet(DEFAULT_ENGLISH_FONT)
