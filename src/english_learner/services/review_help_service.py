@@ -53,7 +53,9 @@ class ReviewHelpService:
 
         messages = build_review_help_messages(word, rating, reason, level)
         logger.info("复习求助 prompt=%s word=%s rating=%s", PROMPT_VERSION, word.lemma, rating)
-        text = self._client.complete_json(messages, temperature=0.5)
+        text = self._client.complete_json(
+            messages, temperature=0.5, max_tokens=1200, task="复习求助"
+        )
         try:
             data = parse_json_object(text)
         except JsonParseError as exc:

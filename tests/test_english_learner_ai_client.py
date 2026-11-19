@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from types import SimpleNamespace
 
 import httpx2
@@ -21,8 +22,21 @@ def make_config() -> AIConfig:
     )
 
 
-def fake_response(content: str | None) -> SimpleNamespace:
-    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+def fake_response(
+    content: str | None,
+    *,
+    finish_reason: str | None = "stop",
+) -> SimpleNamespace:
+    usage = SimpleNamespace(prompt_tokens=3, completion_tokens=2, total_tokens=5)
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=content),
+                finish_reason=finish_reason,
+            )
+        ],
+        usage=usage,
+    )
 
 
 class FakeCompletions:
@@ -181,3 +195,125 @@ def test_complete_uses_configured_temperature(monkeypatch: pytest.MonkeyPatch) -
 
     assert text == "hello"
     assert completions.last_kwargs["temperature"] == 0.7
+
+
+def test_truncated_output_has_a_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    completions = FakeCompletions(response=fake_response('{"title": "cut', finish_reason="length"))
+    monkeypatch.setattr(ai_module, "OpenAI", FakeClient.factory(completions))
+
+    with pytest.raises(AIError, match="截断"):
+        AIClient(make_config()).complete([{"role": "user", "content": "hi"}])
+
+
+class SequenceCompletions:
+    """按顺序返回响应或异常，用于验证客户端层重试。"""
+
+    def __init__(self, *results) -> None:
+        self.results = list(results)
+        self.calls = 0
+        self.kwargs_list: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls += 1
+        self.kwargs_list.append(kwargs)
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+def test_transient_errors_are_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    request = httpx2.Request("POST", "https://api.example.com/v1/chat/completions")
+    completions = SequenceCompletions(
+        openai.APITimeoutError(request=request),
+        fake_response("ok"),
+    )
+    monkeypatch.setattr(ai_module, "OpenAI", FakeClient.factory(completions))
+    monkeypatch.setattr(ai_module.time, "sleep", lambda _seconds: None)
+
+    text = AIClient(make_config()).complete([{"role": "user", "content": "hi"}])
+
+    assert text == "ok"
+    assert completions.calls == 2
+
+
+def _capture_built_clients(monkeypatch: pytest.MonkeyPatch, completions) -> list[FakeClient]:
+    """把每次构造的假客户端收集起来，方便断言构造参数。"""
+    built: list[FakeClient] = []
+
+    def build(**kwargs):
+        client = FakeClient(completions)
+        client.init_kwargs = kwargs
+        built.append(client)
+        return client
+
+    monkeypatch.setattr(ai_module, "OpenAI", build)
+    return built
+
+
+def test_opencode_base_url_adds_session_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = AIConfig(
+        base_url="https://opencode.ai/inference/go/openai/v1",
+        api_key="oc_sk-test",
+        model="deepseek-v4.1-flash",
+    )
+    completions = FakeCompletions(response=fake_response("OK"))
+    built = _capture_built_clients(monkeypatch, completions)
+
+    client = AIClient(config)
+    client.test_connection()
+
+    headers = built[0].init_kwargs["default_headers"]
+    assert headers["x-opencode-session"] == client._session_id
+    # 会话 id 必须是合法 UUID；不同客户端实例互相独立。
+    assert uuid.UUID(headers["x-opencode-session"])
+
+    AIClient(config).test_connection()
+    assert built[1].init_kwargs["default_headers"]["x-opencode-session"] != client._session_id
+
+
+def test_other_provider_has_no_session_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    completions = FakeCompletions(response=fake_response("OK"))
+    built = _capture_built_clients(monkeypatch, completions)
+
+    AIClient(make_config()).test_connection()
+
+    assert built[0].init_kwargs["default_headers"] is None
+
+
+def test_opencode_detection_matches_only_its_own_domain() -> None:
+    assert ai_module._needs_opencode_session("https://opencode.ai/inference/go/openai/v1")
+    assert ai_module._needs_opencode_session("https://api.opencode.ai/v1")
+    assert not ai_module._needs_opencode_session("https://not-opencode.ai/v1")
+    assert not ai_module._needs_opencode_session("https://api.deepseek.com/v1")
+
+
+def test_json_mode_unsupported_is_remembered(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = AIConfig(
+        base_url="https://api.example.com/v1",
+        api_key="sk-test",
+        model="no-json-model",
+    )
+    request = httpx2.Request("POST", "https://api.example.com/v1/chat/completions")
+    response = httpx2.Response(
+        400,
+        request=request,
+        json={"error": {"message": "response_format is not supported"}},
+    )
+    error = openai.BadRequestError(
+        "response_format is not supported",
+        response=response,
+        body={"error": {"message": "response_format is not supported"}},
+    )
+    completions = SequenceCompletions(error, fake_response("{}"), fake_response("{}"))
+    monkeypatch.setattr(ai_module, "OpenAI", FakeClient.factory(completions))
+
+    first = AIClient(config).complete_json([{"role": "user", "content": "hi"}])
+    second = AIClient(config).complete_json([{"role": "user", "content": "hi"}])
+
+    assert first == "{}"
+    assert second == "{}"
+    assert completions.calls == 3
+    assert "response_format" in completions.kwargs_list[0]
+    assert "response_format" not in completions.kwargs_list[1]
+    assert "response_format" not in completions.kwargs_list[2]

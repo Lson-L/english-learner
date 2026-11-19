@@ -24,11 +24,19 @@ uv run ruff format src/english_learner tests
 - 配置 / 日志 /（M1 起）数据库都在 `%APPDATA%\EnglishLearner\`，**不在仓库内**。
 - 想重演首次启动：删除 `%APPDATA%\EnglishLearner\config.json`，或加 `--reconfigure`。
 
-## 文档索引（改代码前先读）
+## 文档索引（按需阅读，避免污染上下文）
 
-- `docs/english_learner/PRODUCT.md`：产品定位、MVP 范围、已确认决策；
-- `docs/english_learner/PROGRESS.md`：**当前进度、各里程碑实现细节、M4 可选任务、
-  已知问题、下次开工指令**。每完成一个里程碑必须更新它。
+- `docs/english_learner/PROGRESS.md`：**每个会话唯一必读**，当前看板（约 150 行：
+  里程碑状态、环境、快速开始、M4、下次开工指令）；
+- `docs/english_learner/ARCHITECTURE.md`：**按需**。文件地图 + 关键实现与踩坑说明；
+  改 AI 客户端、存储、阅读检测、导出等模块前定向读对应小节；
+- `docs/english_learner/TECH_DEBT.md`：**按需**。已知问题与技术债完整表格；
+- `docs/english_learner/HISTORY.md`：**默认不读**。已完成里程碑的交付记录、
+  旧任务书与验证记录，只在排查历史决策时检索；
+- `docs/english_learner/PRODUCT.md`：产品定位、MVP 范围、已确认决策。
+
+里程碑收尾规则：更新 `PROGRESS.md` 看板（只放当前状态），细节与验证记录追加到
+`HISTORY.md`；不要把长篇实现说明堆回 PROGRESS。
 
 ## 硬性约定
 
@@ -49,6 +57,9 @@ uv run ruff format src/english_learner tests
    字体链 + 全局 QSS 的 `*` 规则决定，新控件**不要**单独设 `font-family`
    （中文靠字体链回退到雅黑）。唯一例外是 QTextDocument 类控件（文章正文），
    必须调 `ArticleView.set_english_font(key)`。可选字体见 `ENGLISH_FONT_CHOICES`。
+10. **AI 调用记录**：每次 AI 调用都要带 `task` 标签（`complete/complete_json(..., task="查词")`）；
+    记录统一在 `AIClient` 内写 `ai_calls`，业务层不要自己插表。表里只存
+    token/耗时/错误等元数据，**禁止**写入 prompt 或模型回复全文。
 
 ## 环境注意
 
@@ -61,11 +72,14 @@ uv run ruff format src/english_learner tests
 
 ## 当前状态
 
-- **M0 / M1 / M1.5 / M2 / M3 核心项 / M3.5 ~ M3.11 完成**（2026-11-19）：
+- **M0 / M1 / M1.5 / M2 / M3 核心项 / M3.5 ~ M3.15 完成**（2026-11-19）：
   配置、测评、每日文章、阅读划词（正文全宽 + 双击悬浮释义卡）、阅读完成检测
   （混合难度选择题 + 英文短答、本地判分、逐题讲评、错因归因、连续证据调级）、
   生词本（双击只查词、手动加入才入本）、SM-2 复习、数据导出、DPAPI Key 加密、
   可取消请求、生词原形与 AI 记忆方法、复习求助与生词本求助记录回显全部可用；
-  复习与生词本主体本地化；阅读检测已升级为两轮自适应 + 盲评 + 本地后验/置信度 + 双产出题，并新增每周复盘（用户确认后才改级）。
-- **剩余为可选 M4**（深色模式、安装器 / 自动更新）与真实环境调优。任务说明与
-  已知技术债见 `docs/english_learner/PROGRESS.md` 第 10、11 节。
+  复习与生词本主体本地化；阅读检测已升级为两轮自适应 + 盲评 + 本地后验/置信度 +
+  双产出题，并新增每周复盘（用户确认后才改级）；M3.15 起每次 AI 请求的
+  token/耗时/错误写入 `ai_calls`，设置页可查看今日/累计用量与调用明细，
+  并内置日志查看器（只记元数据，不保存提示词与模型回复）。
+- **剩余为可选 M4**（深色模式、安装器 / 自动更新）与真实环境调优。当前看板见
+  `docs/english_learner/PROGRESS.md`，已知技术债见 `TECH_DEBT.md`。

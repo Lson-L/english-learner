@@ -52,7 +52,7 @@ class FakeCompleter:
         self.replies = list(replies)
         self.calls = 0
 
-    def complete_json(self, messages, *, temperature=None, max_tokens=None) -> str:
+    def complete_json(self, messages, *, temperature=None, max_tokens=None, task="") -> str:
         self.calls += 1
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
@@ -222,6 +222,51 @@ def test_lookup_uses_base_form_and_caches_inflection(db: Database) -> None:
     assert db.words.count() == 0
     assert db.words.count(include_cache=True) == 1
     assert {form.form for form in db.words.list_all_forms()} == {"went", "go"}
+
+
+def test_lookup_flags_context_mismatch_and_can_refresh(db: Database) -> None:
+    """缓存释义来自另一句时应提示，并可跳过缓存按本句重查。"""
+    first_payload = json.dumps(
+        {
+            "lemma": "bank",
+            "meaning_cn": "河岸",
+            "meaning_en": "the land beside a river",
+        },
+        ensure_ascii=False,
+    )
+    second_payload = json.dumps(
+        {
+            "lemma": "bank",
+            "meaning_cn": "银行",
+            "meaning_en": "a financial institution",
+        },
+        ensure_ascii=False,
+    )
+    fake = FakeCompleter(first_payload, second_payload)
+    service = DictionaryService(fake, db.words, db.stats)
+
+    first = service.lookup("bank", "We sat on the river bank.", None, "B1")
+    assert first.cached is False
+    assert first.context_mismatch is False
+
+    cached = service.lookup("bank", "She works at a bank downtown.", None, "B1")
+    assert cached.cached is True
+    assert cached.word.meaning_cn == "河岸"
+    assert cached.context_mismatch is True
+    assert fake.calls == 1
+
+    refreshed = service.lookup(
+        "bank",
+        "She works at a bank downtown.",
+        None,
+        "B1",
+        refresh=True,
+    )
+    assert fake.calls == 2
+    assert refreshed.cached is False
+    assert refreshed.word.meaning_cn == "银行"
+    assert refreshed.word.context_sentence == "She works at a bank downtown."
+    assert refreshed.context_mismatch is False
 
 
 def test_generate_mnemonic_for_existing_word(db: Database) -> None:

@@ -1,9 +1,9 @@
 """学习数据导出：JSON 全量备份 / CSV 分表。
 
-导出的数据来自 SQLite 的十张表：
+导出的数据来自 SQLite 的十一张表：
 `profile` / `articles` / `words` / `word_forms` / `highlights` /
 `review_logs` / `daily_stats` / `reading_quizzes` / `level_evidence` /
-`weekly_reviews`。
+`weekly_reviews` / `ai_calls`。
 
 设计：
 - 纯 Python，不依赖 PySide6；界面只负责选路径，导出本身可以放进 TaskWorker；
@@ -27,6 +27,7 @@ from pathlib import Path
 from .. import __version__
 from ..models.entities import now_iso
 from ..storage.repositories import (
+    AICallRepo,
     ArticleRepo,
     LevelEvidenceRepo,
     ProfileRepo,
@@ -51,6 +52,7 @@ TABLE_LABELS: dict[str, str] = {
     "reading_quizzes": "阅读检测",
     "level_evidence": "等级证据",
     "weekly_reviews": "每周复盘",
+    "ai_calls": "AI 调用记录",
 }
 
 # 摘要展示顺序：先看学习内容，再看历史。
@@ -64,6 +66,7 @@ SUMMARY_ORDER: tuple[str, ...] = (
     "review_logs",
     "daily_stats",
     "weekly_reviews",
+    "ai_calls",
     "profile",
 )
 
@@ -206,6 +209,22 @@ CSV_COLUMNS: dict[str, tuple[str, ...]] = {
         "created_at",
         "applied_at",
     ),
+    "ai_calls": (
+        "id",
+        "called_at",
+        "task",
+        "model",
+        "base_url",
+        "json_mode",
+        "attempt",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "latency_ms",
+        "ok",
+        "error_kind",
+        "error_message",
+    ),
 }
 
 
@@ -234,6 +253,7 @@ class ExportService:
         quizzes: QuizRepo,
         evidence: LevelEvidenceRepo | None = None,
         weekly_reviews: WeeklyReviewRepo | None = None,
+        ai_calls: AICallRepo | None = None,
     ) -> None:
         self._profiles = profiles
         self._articles = articles
@@ -243,6 +263,7 @@ class ExportService:
         self._quizzes = quizzes
         self._evidence = evidence
         self._weekly_reviews = weekly_reviews
+        self._ai_calls = ai_calls
 
     # ------------------------------------------------------------------ 快照
     def snapshot(self) -> dict[str, object]:
@@ -267,6 +288,11 @@ class ExportService:
             "weekly_reviews": (
                 [asdict(item) for item in self._weekly_reviews.list_all()]
                 if self._weekly_reviews is not None
+                else []
+            ),
+            "ai_calls": (
+                [asdict(item) for item in self._ai_calls.list_all()]
+                if self._ai_calls is not None
                 else []
             ),
         }

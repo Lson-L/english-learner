@@ -34,6 +34,7 @@ from english_learner.models.entities import (  # noqa: E402
     today_str,
 )
 from english_learner.services.app_context import AppContext  # noqa: E402
+from english_learner.services.assessment_bank import UNKNOWN_ANSWER  # noqa: E402
 from english_learner.services.config_store import AIConfig, ConfigStore  # noqa: E402
 from english_learner.storage.db import Database  # noqa: E402
 
@@ -301,7 +302,26 @@ def test_assessment_dialog_builds_questionnaire(tmp_path: Path) -> None:
 
     assert len(dialog._comp_groups) == 5
     assert len(dialog._vocab_groups) == 5
+    assert len(dialog._comp_notes) == 5
+    assert len(dialog._vocab_notes) == 5
+    # 每组是 4 个选项 + 1 个“不知道”
+    assert all(len(group.buttons()) == 5 for group in dialog._comp_groups)
+    assert dialog._unanswered_questions() == 10
     assert dialog._stack.currentIndex() == 0
     assert dialog._primary_button.text() == "提交并评分"
+
+    # 未作答时提交会被拦下，不会启动评分线程
+    dialog._submit()
+    assert dialog._worker is None
+    assert "没有作答" in dialog._test_status.text()
+
+    # 主动选“不知道”算有效作答，补充说明随答题卡一起收集
+    dialog._comp_groups[0].buttons()[-1].setChecked(True)
+    dialog._comp_notes[0].setText("这题问的是什么？")
+    sheet = dialog._collect_sheet()
+    assert sheet.comprehension[0] == UNKNOWN_ANSWER
+    assert sheet.comprehension_notes[0] == "这题问的是什么？"
+    assert dialog._unanswered_questions() == 9
+
     dialog.close()
     db.close()

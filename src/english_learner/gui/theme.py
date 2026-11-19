@@ -104,6 +104,12 @@ QLabel#bigNumber {
     font-weight: 600;
     color: #111827;
 }
+/* 用量汇总：6 个指标排一行，字号比首页大数字小一档。 */
+QLabel#usageValue {
+    font-size: 22px;
+    font-weight: 600;
+    color: #111827;
+}
 QFrame#card {
     background: #FFFFFF;
     border: 1px solid #E4E8F0;
@@ -331,7 +337,7 @@ QLabel#reviewHelpLog {
 }
 
 /* ---------- 生词本 ---------- */
-QTableWidget#wordTable {
+QTableWidget#wordTable, QTableWidget#dataTable {
     background: #FFFFFF;
     border: 1px solid #E4E8F0;
     border-radius: 12px;
@@ -339,11 +345,11 @@ QTableWidget#wordTable {
     selection-color: #1F2937;
     outline: none;
 }
-QTableWidget#wordTable::item {
+QTableWidget#wordTable::item, QTableWidget#dataTable::item {
     padding: 8px 10px;
     border-bottom: 1px solid #F1F4F9;
 }
-QTableWidget#wordTable::item:selected {
+QTableWidget#wordTable::item:selected, QTableWidget#dataTable::item:selected {
     background: #EAF1FF;
     color: #1F2937;
 }

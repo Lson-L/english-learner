@@ -496,6 +496,8 @@ class QuizProduction:
     text: str = ""
     score: int = 0
     feedback: str = ""
+    # False = AI 没有给出有效分数（格式问题），不应计入等级证据。
+    scored: bool = True
 
     @classmethod
     def from_dict(cls, data: Any) -> QuizProduction | None:
@@ -509,10 +511,16 @@ class QuizProduction:
             text=str(data.get("text") or "").strip(),
             score=1 if score >= 1 else 0,
             feedback=str(data.get("feedback") or "").strip(),
+            scored=bool(data.get("scored", True)),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {"text": self.text, "score": int(self.score), "feedback": self.feedback}
+        return {
+            "text": self.text,
+            "score": int(self.score),
+            "feedback": self.feedback,
+            "scored": bool(self.scored),
+        }
 
 
 @dataclass(frozen=True)
@@ -629,6 +637,16 @@ class ReadingQuiz:
     @property
     def production_score(self) -> int:
         return sum(item.score for item in self.production_answers)
+
+    @property
+    def scored_production_total(self) -> int:
+        """真正参与判分的产出题数量（排除 AI 漏评分的题）。"""
+        return sum(1 for item in self.production_answers if item.scored)
+
+    @property
+    def unscored_production_count(self) -> int:
+        """AI 没有给出有效分数的产出题数量。"""
+        return sum(1 for item in self.production_answers if not item.scored)
 
     @property
     def posterior_map(self) -> dict[str, float]:
@@ -948,6 +966,121 @@ class WeeklyReview:
 
 
 # --------------------------------------------------------------- 每日统计
+# --------------------------------------------------------------- AI 调用记录
+@dataclass(frozen=True)
+class AICall:
+    """一次 AI HTTP 请求的用量记录（只追加，不保存提示词与回复正文）。
+
+    一次业务操作可能对应多行：请求被重试、或 JSON 模式先失败后降级，
+    每一行代表一次真实的 HTTP 尝试，`attempt` 从 1 开始编号。
+    `prompt_tokens` 等字段允许为空：部分兼容网关不返回 usage，
+    统计时按 NULL 处理（SUM 会忽略），界面上显示为 “—”。
+    """
+
+    called_at: str
+    task: str = ""
+    model: str = ""
+    base_url: str = ""
+    json_mode: bool = False
+    attempt: int = 1
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    latency_ms: int = 0
+    ok: bool = True
+    error_kind: str = ""
+    error_message: str = ""
+    id: int | None = None
+
+    @classmethod
+    def from_row(cls, row: Any) -> AICall:
+        def _optional_int(value: Any) -> int | None:
+            return None if value is None else int(value)
+
+        return cls(
+            id=int(row["id"]),
+            called_at=str(row["called_at"] or ""),
+            task=str(row["task"] or ""),
+            model=str(row["model"] or ""),
+            base_url=str(row["base_url"] or ""),
+            json_mode=bool(row["json_mode"]),
+            attempt=int(row["attempt"] or 1),
+            prompt_tokens=_optional_int(row["prompt_tokens"]),
+            completion_tokens=_optional_int(row["completion_tokens"]),
+            total_tokens=_optional_int(row["total_tokens"]),
+            latency_ms=int(row["latency_ms"] or 0),
+            ok=bool(row["ok"]),
+            error_kind=str(row["error_kind"] or ""),
+            error_message=str(row["error_message"] or ""),
+        )
+
+    def to_params(self) -> dict[str, Any]:
+        """不含 id：id 由 SQLite 自增生成。"""
+        return {
+            "called_at": self.called_at,
+            "task": self.task,
+            "model": self.model,
+            "base_url": self.base_url,
+            "json_mode": 1 if self.json_mode else 0,
+            "attempt": int(self.attempt),
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "latency_ms": int(self.latency_ms),
+            "ok": 1 if self.ok else 0,
+            "error_kind": self.error_kind,
+            "error_message": self.error_message,
+        }
+
+
+@dataclass(frozen=True)
+class AIUsageSummary:
+    """一段时间内的 AI 调用汇总。tokens 只统计服务端回报了 usage 的调用。"""
+
+    calls: int = 0
+    failed_calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    avg_latency_ms: int = 0
+
+    @property
+    def ok_calls(self) -> int:
+        return max(0, int(self.calls) - int(self.failed_calls))
+
+    @classmethod
+    def from_row(cls, row: Any) -> AIUsageSummary:
+        return cls(
+            calls=int(row["calls"] or 0),
+            failed_calls=int(row["failed_calls"] or 0),
+            prompt_tokens=int(row["prompt_tokens"] or 0),
+            completion_tokens=int(row["completion_tokens"] or 0),
+            total_tokens=int(row["total_tokens"] or 0),
+            avg_latency_ms=int(row["avg_latency_ms"] or 0),
+        )
+
+
+@dataclass(frozen=True)
+class AIUsageByTask:
+    """按任务聚合的调用量（界面上看“哪类操作最费 token”）。"""
+
+    task: str
+    calls: int = 0
+    failed_calls: int = 0
+    total_tokens: int = 0
+    avg_latency_ms: int = 0
+
+    @classmethod
+    def from_row(cls, row: Any) -> AIUsageByTask:
+        return cls(
+            task=str(row["task"] or ""),
+            calls=int(row["calls"] or 0),
+            failed_calls=int(row["failed_calls"] or 0),
+            total_tokens=int(row["total_tokens"] or 0),
+            avg_latency_ms=int(row["avg_latency_ms"] or 0),
+        )
+
+
 @dataclass(frozen=True)
 class DailyStats:
     """某一天的学习统计，用于首页连续天数等指标。"""

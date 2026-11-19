@@ -53,6 +53,14 @@ def config_dir() -> Path:
     return base_dir / "english_learner"
 
 
+def log_dir() -> Path:
+    """日志目录（数据目录下的 logs/，不自动创建）。
+
+    运行日志与数据库、配置文件放在一起，设置页和日志查看器共用这个入口。
+    """
+    return config_dir() / "logs"
+
+
 def config_path() -> Path:
     """返回配置文件完整路径。"""
     return config_dir() / CONFIG_FILE_NAME
@@ -78,7 +86,11 @@ def normalize_base_url(url: str) -> str:
 
 @dataclass(frozen=True)
 class AIConfig:
-    """一个 OpenAI 兼容服务的连接配置。"""
+    """一个 OpenAI 兼容服务的连接配置。
+
+    `temperature` 只是“调用方没有显式指定时的默认值”；业务层每个任务
+    （出题、讲评、文章等）都会传自己的温度，因此界面不再暴露该字段。
+    """
 
     base_url: str
     api_key: str

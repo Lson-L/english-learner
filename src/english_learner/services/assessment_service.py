@@ -1,6 +1,6 @@
 """摸底测评的评分与落库。
 
-流程（对应 PROGRESS.md M1-3）：
+流程（对应 HISTORY.md M1-3）：
 1. 本地先算客观题得分（选择题不需要 AI）；
 2. 把题目、标准答案、用户答案、翻译一起交给 AI，要求只返回评分 JSON；
 3. 解析并容错，CEFR 不合法时回退到这套题的 level_hint；
@@ -33,11 +33,20 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class AnswerSheet:
-    """用户的作答：每道题选中的选项下标，-1 表示未作答。"""
+    """用户的作答。
+
+    - `comprehension` / `vocabulary`：每道题选中的选项下标，-1 表示未作答，
+      `assessment_bank.UNKNOWN_ANSWER`（-2）表示用户主动选了“不知道”；
+    - `*_notes`：与题目一一对应的补充说明（用户写的“这题哪里看不懂”），
+      空串表示没写。它们只作为 AI 评分的参考，不参与本地计分；
+    - `translation`：翻译题译文，空串表示未作答。
+    """
 
     comprehension: tuple[int, ...] = ()
     vocabulary: tuple[int, ...] = ()
     translation: str = ""
+    comprehension_notes: tuple[str, ...] = ()
+    vocabulary_notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -130,7 +139,9 @@ class AssessmentService:
             assessment_set.key,
             score.summary(),
         )
-        text = self._client.complete_json(messages, temperature=0.2)
+        text = self._client.complete_json(
+            messages, temperature=0.2, max_tokens=1200, task="水平测评"
+        )
         try:
             data = parse_json_object(text)
         except JsonParseError as exc:

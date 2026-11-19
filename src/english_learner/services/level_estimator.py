@@ -170,8 +170,14 @@ def observations_from_quiz(
     quiz: ReadingQuiz,
     answers: Sequence[int],
     production_scores: Sequence[int] = (),
+    *,
+    production_scored: Sequence[bool] = (),
 ) -> tuple[EvidenceObservation, ...]:
-    """把一次检测的作答折算成题目级观测（选择题 + 主动产出题）。"""
+    """把一次检测的作答折算成题目级观测（选择题 + 主动产出题）。
+
+    `production_scored` 里为 False 的产出题（AI 漏评分）不产生观测，
+    避免把格式问题当成学生答错，污染等级后验。
+    """
     default_level = normalize_cefr_level(quiz.level, "B1")
     observations: list[EvidenceObservation] = []
 
@@ -187,6 +193,8 @@ def observations_from_quiz(
         )
 
     for position, question in enumerate(quiz.production_questions):
+        if position < len(production_scored) and not production_scored[position]:
+            continue
         score = production_scores[position] if position < len(production_scores) else 0
         observations.append(
             EvidenceObservation(

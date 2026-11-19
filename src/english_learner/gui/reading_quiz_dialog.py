@@ -591,6 +591,8 @@ class ReadingQuizDialog(QDialog):
             parts.append(f"选择题 {quiz.choice_correct}/{quiz.choice_total}")
         if quiz.short_total:
             parts.append(f"产出题 {quiz.production_score}/{quiz.short_total}")
+            if quiz.unscored_production_count:
+                parts.append(f"{quiz.unscored_production_count} 道 AI 未评分（不计入等级）")
         parts.append(f"正确率 {quiz.percent}%")
         parts.append(f"文章等级 {quiz.level}")
         meta = QLabel(" · ".join(parts))
@@ -763,7 +765,12 @@ class ReadingQuizDialog(QDialog):
         is_rewrite = (question.skill or "").lower() in {"rewrite", "translation"}
         label = "句子改写 / 翻译" if is_rewrite else "短答"
         score = production.score if production is not None else 0
-        heading = QLabel(f"第 {index} 题 · {label} · 得分 {score}/1")
+        scored = production.scored if production is not None else True
+        if scored:
+            heading_text = f"第 {index} 题 · {label} · 得分 {score}/1"
+        else:
+            heading_text = f"第 {index} 题 · {label} · AI 未评分（不计入等级）"
+        heading = QLabel(heading_text)
         heading.setObjectName("cardTitle")
         card.body.addWidget(heading)
 

@@ -69,7 +69,7 @@ class RoutingCompleter:
         self.calls: list[str] = []
         self.messages: list[list[dict[str, str]]] = []
 
-    def complete_json(self, messages, *, temperature=None, max_tokens=None) -> str:
+    def complete_json(self, messages, *, temperature=None, max_tokens=None, task="") -> str:
         content = messages[-1]["content"]
         self.messages.append(messages)
         if "审核下面这组阅读题" in content:
@@ -320,6 +320,39 @@ def test_parse_question_review_filters_bad_indices() -> None:
     assert parse_question_review('{"invalid": []}', 4) == ()
     with pytest.raises(InvalidQuizError):
         parse_question_review("不是 JSON", 4)
+
+
+def test_parse_question_review_detects_answer_key_mismatch() -> None:
+    """审核模型独立作答与标注答案不一致时，该题也应判为不合格。"""
+    payload = json.dumps(
+        {"answers": [0, 2, None, None], "invalid_indices": []},
+        ensure_ascii=False,
+    )
+    assert parse_question_review(payload, 4, (1, 2, None, None)) == (0,)
+
+    combined = json.dumps(
+        {"answers": [1, 2, None, None], "invalid_indices": [3]},
+        ensure_ascii=False,
+    )
+    assert parse_question_review(combined, 4, (1, 2, None, None)) == (3,)
+
+
+def test_stage_difficulty_labels_are_forced_locally() -> None:
+    """模型自报难度不能直接进 Rasch：第一轮强制当前等级，第二轮强制边界等级。"""
+    first_round = parse_stage_one_questions(stage_one_payload(difficulty="C1"), "B1")
+    assert all(question.difficulty == "B1" for question in first_round)
+
+    second_round = parse_stage_two_questions(
+        stage_two_payload("A2", difficulty="C1"),
+        "B1",
+        "A2",
+    )
+    choices = [question for question in second_round if not question.is_short]
+    productions = [question for question in second_round if question.is_short]
+    assert all(question.difficulty == "A2" for question in choices)
+    # 产出题保留模型难度，但收敛到 A2~B1；C1 会被压到 B1。
+    assert all(question.difficulty in {"A2", "B1"} for question in productions)
+    assert productions[0].difficulty == "B1"
 
 
 def test_parse_legacy_quiz_still_works() -> None:
@@ -742,6 +775,68 @@ def test_empty_production_forces_zero(db: Database, profile: Profile) -> None:
     assert outcome.score == 6
 
 
+def test_missing_production_scores_are_retried_then_marked_unscored(
+    db: Database, profile: Profile
+) -> None:
+    """AI 漏给产出题分数时先按原因重试；仍缺失则不当作答错。"""
+    payload = json.loads(grading_payload())
+    payload.pop("production_scores")
+    payload.pop("production_feedbacks", None)
+    payload.pop("comment", None)
+    missing = json.dumps(payload, ensure_ascii=False)
+    fake = RoutingCompleter(grading=[missing, missing])
+    service = make_service(db, fake)
+    article = make_article(db)
+    quiz = service.get_or_create(article, "B1")
+    quiz = service.advance_stage(article, quiz, (1, 1, 1))
+
+    outcome = service.submit(
+        article,
+        quiz,
+        (1, 1, 1, 1, 1),
+        profile,
+        production_texts=("Habits add up.", "Small habits change lives."),
+    )
+
+    assert fake.calls.count("grading") == 2  # 第一次缺失，按原因重试一次
+    assert outcome.quiz.unscored_production_count == 2
+    assert all(not item.scored for item in outcome.quiz.productions)
+    assert outcome.quiz.production_score == 0
+    assert outcome.score == 5  # 只算 5 道选择题
+
+    evidence = db.evidence.list_recent(1)[0]
+    assert len(evidence.observations) == 5
+    assert all(item.source != "production" for item in evidence.observations)
+    assert "未给分" in outcome.result.comment
+
+
+def test_weak_skills_are_computed_from_recent_quizzes(db: Database) -> None:
+    article = make_article(db)
+    questions = tuple(
+        QuizQuestion(
+            prompt=f"Inference {index}?",
+            options=("A", "B", "C", "D"),
+            answer_index=1,
+            skill="inference",
+            difficulty="B1",
+        )
+        for index in range(2)
+    )
+    db.quizzes.insert(
+        ReadingQuiz(
+            article_id=article.id,
+            article_date=TODAY,
+            level="B1",
+            questions=questions,
+            answers=(0, 0),
+            completed_at=now_iso(),
+        )
+    )
+    service = make_service(db, RoutingCompleter())
+
+    assert service._weak_skills() == ("inference",)
+
+
 def test_error_types_are_aligned_and_correct_is_none(db: Database, profile: Profile) -> None:
     article = make_article(db)
     fake = RoutingCompleter(
@@ -778,7 +873,8 @@ def test_error_types_are_aligned_and_correct_is_none(db: Database, profile: Prof
 
 def test_bad_grading_json_keeps_profile_and_allows_retry(db: Database, profile: Profile) -> None:
     article = make_article(db)
-    fake = RoutingCompleter(grading=["不是 JSON", grading_payload()])
+    # 第一次提交会先自动按原因重试一次；两次都坏才失败，第三次（用户手动重试）成功。
+    fake = RoutingCompleter(grading=["不是 JSON", "还是 JSON", grading_payload()])
     service = make_service(db, fake)
     quiz = service.get_or_create(article, "B1")
     quiz = service.advance_stage(article, quiz, (1, 1, 1))

@@ -27,7 +27,7 @@ class FakeCompleter:
         self.calls = 0
         self.messages: list[list[dict[str, str]]] = []
 
-    def complete_json(self, messages, *, temperature=None, max_tokens=None) -> str:
+    def complete_json(self, messages, *, temperature=None, max_tokens=None, task="") -> str:
         self.calls += 1
         self.messages.append(messages)
         reply = self.replies.pop(0)
@@ -107,6 +107,20 @@ def test_missing_target_word_rejected() -> None:
     text = json.dumps(make_payload(target_words=["resilient"]), ensure_ascii=False)
     with pytest.raises(InvalidArticleError, match="目标词"):
         parse_article_draft(text, "B1")
+
+
+def test_target_word_accepts_common_inflections() -> None:
+    """目标词用了派生/屈折形式时不应误判为“没写目标词”。"""
+    payload = make_payload(target_words=["resilient", "study", "make"])
+    sentence = (
+        "Resilience helps people recover, and students who studied hard "
+        "keep making progress every day."
+    )
+    payload["paragraphs"] = [" ".join([sentence] * 6) for _ in range(3)]
+
+    draft = parse_article_draft(json.dumps(payload, ensure_ascii=False), "B1")
+
+    assert draft.target_words == ("resilient", "study", "make")
 
 
 def test_missing_target_word_allowed_in_soft_mode() -> None:

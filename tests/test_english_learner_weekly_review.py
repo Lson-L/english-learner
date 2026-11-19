@@ -29,7 +29,7 @@ class FakeCompleter:
         self.calls = 0
         self.messages: list[list[dict[str, str]]] = []
 
-    def complete_json(self, messages, *, temperature=None, max_tokens=None) -> str:
+    def complete_json(self, messages, *, temperature=None, max_tokens=None, task="") -> str:
         self.calls += 1
         self.messages.append(messages)
         reply = self.replies.pop(0)

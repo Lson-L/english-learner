@@ -33,6 +33,8 @@ from __future__ import annotations
 import logging
 import random
 import re
+from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 
 from ..models.entities import (
@@ -100,6 +102,19 @@ EVIDENCE_STRONG_THRESHOLD = 0.6
 
 # 盲评建议只作为一条弱观测进入后验。
 BLIND_OBSERVATION_WEIGHT = 0.5
+
+# 各任务的输出额度：宁可给宽一点，避免 JSON 被截断。
+# 对带 thinking 的模型，推理也会消耗额度，所以这里比“正文长度”宽不少。
+STAGE_ONE_MAX_TOKENS = 4000
+STAGE_TWO_MAX_TOKENS = 5000
+QUESTION_REVIEW_MAX_TOKENS = 1500
+GRADING_MAX_TOKENS = 6000
+BLIND_MAX_TOKENS = 1000
+
+# 薄弱技能进入出题 prompt 的最低样本数，避免一次失误就被当成长期弱点。
+WEAK_SKILL_MIN_SAMPLES = 2
+WEAK_SKILL_MAX_ACCURACY = 0.6
+WEAK_SKILL_LIMIT = 3
 
 LEVEL_ORDER = CEFR_LEVELS
 
@@ -266,7 +281,11 @@ def parse_quiz_questions(
 
 
 def parse_stage_one_questions(text: str, level: str = "B1") -> tuple[QuizQuestion, ...]:
-    """第一轮：恰好 3 道当前等级选择题；多余的题忽略。"""
+    """第一轮：恰好 3 道当前等级选择题；多余的题忽略。
+
+    难度标签一律由本地回写为当前等级：这些标签后续会直接进入 Rasch 后验，
+    不能完全相信模型自报的 difficulty（模型经常复制成上一轮的等级）。
+    """
     try:
         data = parse_json_object(text)
     except JsonParseError as exc:
@@ -285,7 +304,7 @@ def parse_stage_one_questions(text: str, level: str = "B1") -> tuple[QuizQuestio
         if question is None or question.is_short:
             continue
         if MIN_QUIZ_OPTIONS <= len(question.options) <= MAX_QUIZ_OPTIONS:
-            choices.append(question)
+            choices.append(replace(question, difficulty=default_level))
         if len(choices) >= STAGE_ONE_CHOICE_COUNT:
             break
 
@@ -301,7 +320,12 @@ def parse_stage_two_questions(
     level: str = "B1",
     target_level: str = "B1",
 ) -> tuple[QuizQuestion, ...]:
-    """第二轮：2 道边界选择题 + 2 道产出题（短答 + 改写/翻译）。"""
+    """第二轮：2 道边界选择题 + 2 道产出题（短答 + 改写/翻译）。
+
+    选择题一律回写为边界等级 `target`；产出题保留模型给出的难度，但收敛到
+    “当前等级 ~ 边界等级”区间内；模型漏标时用 target 兜底。
+    这样既不让自报标签乱跳，也避免模型把上一轮的等级复制过来污染证据。
+    """
     try:
         data = parse_json_object(text)
     except JsonParseError as exc:
@@ -313,20 +337,31 @@ def parse_stage_two_questions(
 
     default_level = normalize_cefr_level(level, "B1")
     target = normalize_cefr_level(target_level, default_level)
+    current_index = CEFR_LEVELS.index(default_level)
+    target_index = CEFR_LEVELS.index(target)
+    production_low, production_high = sorted((current_index, target_index))
+
     choices: list[QuizQuestion] = []
     productions: list[QuizQuestion] = []
     for entry in raw:
         if not isinstance(entry, dict):
             continue
+        explicit = normalize_cefr_level(entry.get("difficulty"))
         # 第二轮题目缺少 difficulty 时回退到边界等级 target，而不是本卷等级；
         # 否则边界探测题会被错误地当成当前难度计入证据。
         question = _normalize_entry(entry, target)
         if question is None:
             continue
         if question.is_short:
-            productions.append(question)
+            if explicit:
+                index = CEFR_LEVELS.index(explicit)
+                index = min(max(index, production_low), production_high)
+                difficulty = CEFR_LEVELS[index]
+            else:
+                difficulty = target
+            productions.append(replace(question, difficulty=difficulty))
         elif MIN_QUIZ_OPTIONS <= len(question.options) <= MAX_QUIZ_OPTIONS:
-            choices.append(question)
+            choices.append(replace(question, difficulty=target))
 
     if len(choices) < STAGE_TWO_CHOICE_COUNT:
         raise InvalidQuizError(
@@ -339,8 +374,18 @@ def parse_stage_two_questions(
     return tuple(choices[:STAGE_TWO_CHOICE_COUNT] + productions[:STAGE_TWO_PRODUCTION_COUNT])
 
 
-def parse_question_review(text: str, count: int) -> tuple[int, ...]:
-    """解析题目审核结果，返回需要丢弃的下标（0 开始，越界忽略）。"""
+def parse_question_review(
+    text: str,
+    count: int,
+    expected_answers: Sequence[int | None] | None = None,
+) -> tuple[int, ...]:
+    """解析题目审核结果，返回需要丢弃的下标（0 开始，越界忽略）。
+
+    `expected_answers` 是出题人标注的答案键（产出题填 None）。审核模型会
+    独立作答并返回 `answers`；如果它的答案与标注不一致，这道题也判为不合格。
+    这能发现“题目本身没错、但答案键标错”的情况，而只问“答案是否唯一”
+    很难发现这种错误。
+    """
     try:
         data = parse_json_object(text)
     except JsonParseError as exc:
@@ -349,16 +394,26 @@ def parse_question_review(text: str, count: int) -> tuple[int, ...]:
     raw = data.get("invalid_indices")
     if raw is None:
         raw = data.get("invalid")
-    if not isinstance(raw, list):
-        return ()
     indices: list[int] = []
-    for item in raw:
-        try:
-            index = int(item)
-        except (TypeError, ValueError):
-            continue
-        if 0 <= index < count and index not in indices:
-            indices.append(index)
+    if isinstance(raw, list):
+        for item in raw:
+            try:
+                index = int(item)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= index < count and index not in indices:
+                indices.append(index)
+
+    raw_answers = data.get("answers")
+    if expected_answers is not None and isinstance(raw_answers, list):
+        for index, expected in enumerate(expected_answers[:count]):
+            if expected is None or index >= len(raw_answers):
+                continue
+            answer = _parse_answer_index(raw_answers[index])
+            if answer is None or answer == expected:
+                continue
+            if index not in indices:
+                indices.append(index)
     return tuple(indices)
 
 
@@ -439,6 +494,7 @@ def score_quiz_evidence(
     *,
     short_answer_score: int = 0,
     production_scores: tuple[int, ...] | None = None,
+    production_scored: Sequence[bool] | None = None,
     self_report: str = "",
 ) -> EvidenceSummary:
     """把“答对/答错 + 题目难度 + 产出题 + 自评”折算成本地证据。
@@ -453,6 +509,9 @@ def score_quiz_evidence(
     if current_index is None:
         current_index = 1
     scores = list(production_scores) if production_scores is not None else [short_answer_score]
+    scored_flags = (
+        list(production_scored) if production_scored is not None else [True] * len(scores)
+    )
     points = 0.0
     details: list[float] = []
 
@@ -466,6 +525,9 @@ def score_quiz_evidence(
 
     items = len(quiz.choice_questions)
     for position, question in enumerate(quiz.production_questions):
+        if position < len(scored_flags) and not scored_flags[position]:
+            # AI 漏评的产出题不计入证据，避免把格式问题算成答错。
+            continue
         score = scores[position] if position < len(scores) else 0
         delta = _difficulty_delta(question.difficulty, current_index)
         correct = int(score) >= 1
@@ -655,18 +717,31 @@ class ReadingQuizService:
         return stored
 
     def generate_stage_one(self, article: Article, level: str) -> tuple[QuizQuestion, ...]:
-        """生成第一轮 3 道当前等级题；校验/审核失败重试一次。"""
+        """生成第一轮 3 道当前等级题；校验/审核失败时带原因重试一次。"""
+        weak_skills = self._weak_skills()
         last_reason = ""
         for attempt in range(2):
-            messages = build_quiz_stage_one_messages(article, level, STAGE_ONE_CHOICE_COUNT)
+            messages = build_quiz_stage_one_messages(
+                article,
+                level,
+                STAGE_ONE_CHOICE_COUNT,
+                weak_skills=weak_skills,
+                repair_note=last_reason if attempt else "",
+            )
             logger.info(
-                "阅读检测第一轮 prompt=%s level=%s attempt=%s article=%s",
+                "阅读检测第一轮 prompt=%s level=%s attempt=%s weak=%s article=%s",
                 PROMPT_VERSION,
                 level,
                 attempt + 1,
+                weak_skills,
                 article.title,
             )
-            text = self._client.complete_json(messages, temperature=0.6 if attempt == 0 else 0.85)
+            text = self._client.complete_json(
+                messages,
+                temperature=0.6 if attempt == 0 else 0.85,
+                max_tokens=STAGE_ONE_MAX_TOKENS,
+                task="阅读检测·第一轮出题",
+            )
             try:
                 questions = parse_stage_one_questions(text, level)
             except InvalidQuizError as exc:
@@ -676,7 +751,10 @@ class ReadingQuizService:
             reviewed = self._review_questions(article, questions)
             if len(reviewed) >= STAGE_ONE_CHOICE_COUNT:
                 return self._shuffle_batch(reviewed[:STAGE_ONE_CHOICE_COUNT])
-            last_reason = f"审核后只剩 {len(reviewed)} 道题"
+            last_reason = (
+                f"上一次审核后只剩 {len(reviewed)} 道有效题；"
+                "请避免答案不唯一、答案与文章矛盾或超出文章的题目"
+            )
             logger.warning("第一轮题目审核后不足（第 %s 次）：%s", attempt + 1, last_reason)
         raise AIError(
             "AI 出的题目没有通过校验",
@@ -691,19 +769,32 @@ class ReadingQuizService:
         level: str,
         target_level: str,
     ) -> tuple[QuizQuestion, ...]:
-        """生成第二轮 2 道边界题 + 2 道产出题；校验/审核失败重试一次。"""
+        """生成第二轮 2 道边界题 + 2 道产出题；校验/审核失败时带原因重试一次。"""
+        weak_skills = self._weak_skills()
         last_reason = ""
         for attempt in range(2):
-            messages = build_quiz_stage_two_messages(article, level, target_level)
+            messages = build_quiz_stage_two_messages(
+                article,
+                level,
+                target_level,
+                weak_skills=weak_skills,
+                repair_note=last_reason if attempt else "",
+            )
             logger.info(
-                "阅读检测第二轮 prompt=%s level=%s target=%s attempt=%s article=%s",
+                "阅读检测第二轮 prompt=%s level=%s target=%s attempt=%s weak=%s article=%s",
                 PROMPT_VERSION,
                 level,
                 target_level,
                 attempt + 1,
+                weak_skills,
                 article.title,
             )
-            text = self._client.complete_json(messages, temperature=0.6 if attempt == 0 else 0.85)
+            text = self._client.complete_json(
+                messages,
+                temperature=0.6 if attempt == 0 else 0.85,
+                max_tokens=STAGE_TWO_MAX_TOKENS,
+                task="阅读检测·第二轮出题",
+            )
             try:
                 questions = parse_stage_two_questions(text, level, target_level)
             except InvalidQuizError as exc:
@@ -719,7 +810,10 @@ class ReadingQuizService:
             ):
                 batch = choices[:STAGE_TWO_CHOICE_COUNT] + productions[:STAGE_TWO_PRODUCTION_COUNT]
                 return self._shuffle_batch(tuple(batch))
-            last_reason = f"审核后选择题 {len(choices)} 道、产出题 {len(productions)} 道，数量不足"
+            last_reason = (
+                f"上一次审核后选择题 {len(choices)} 道、产出题 {len(productions)} 道，数量不足；"
+                "请确保选择题答案唯一、产出题可作答"
+            )
             logger.warning("第二轮题目审核后不足（第 %s 次）：%s", attempt + 1, last_reason)
         raise AIError(
             "AI 出的第二轮题目没有通过校验",
@@ -736,6 +830,26 @@ class ReadingQuizService:
             return questions
         return tuple(shuffle_question_options(question, self._rng) for question in questions)
 
+    def _weak_skills(self) -> tuple[str, ...]:
+        """从最近几次正式检测里挑正确率最低的技能，喂给出题 prompt。
+
+        样本太少（少于 WEAK_SKILL_MIN_SAMPLES）不参与，避免一次失误被当成长期弱点。
+        """
+        recent = self._quizzes.list_recent_completed_with_titles(limit=8)
+        quizzes = [quiz for quiz, _ in recent if not quiz.practice_mode]
+        if not quizzes:
+            return ()
+        stats = skill_stats(quizzes)
+        weak = [
+            stat.skill
+            for stat in stats
+            if stat.skill
+            and stat.skill != "unknown"
+            and stat.total >= WEAK_SKILL_MIN_SAMPLES
+            and stat.accuracy < WEAK_SKILL_MAX_ACCURACY
+        ]
+        return tuple(weak[:WEAK_SKILL_LIMIT])
+
     def _review_questions(
         self,
         article: Article,
@@ -748,9 +862,17 @@ class ReadingQuizService:
         if not questions:
             return questions
         messages = build_question_review_messages(article, questions)
+        expected = tuple(
+            None if question.is_short else question.answer_index for question in questions
+        )
         try:
-            text = self._client.complete_json(messages, temperature=0.1)
-            invalid = parse_question_review(text, len(questions))
+            text = self._client.complete_json(
+                messages,
+                temperature=0.1,
+                max_tokens=QUESTION_REVIEW_MAX_TOKENS,
+                task="阅读检测·题目审核",
+            )
+            invalid = parse_question_review(text, len(questions), expected)
         except (AIError, JsonParseError, InvalidQuizError) as exc:
             logger.warning("题目审核失败，保留原题：%s", exc)
             return questions
@@ -839,43 +961,53 @@ class ReadingQuizService:
         ]
         history = history_entries(recent)
         completed = [item[0] for item in recent]
+        practice_mode = self.is_practice_day(article, quiz.id)
 
-        blind_level = self._blind_level(article, quiz, normalized, choice_correct, texts)
-
-        messages = build_quiz_grading_messages(
-            profile,
-            article,
-            quiz,
-            normalized,
-            choice_correct,
-            self_report=self_report,
-            production_texts=texts,
-            history=history,
-            difficulty_stats=difficulty_stats(completed),
-            skill_stats=skill_stats(completed),
-        )
-        logger.info(
-            "阅读检测讲评 prompt=%s article=%s choice=%s/%s level=%s",
-            PROMPT_VERSION,
-            article.title,
-            choice_correct,
-            quiz.choice_total,
-            profile.cefr_level,
-        )
-        text = self._client.complete_json(messages, temperature=0.2)
-        try:
-            data = parse_json_object(text)
-        except JsonParseError as exc:
-            logger.warning("阅读检测讲评 JSON 解析失败：%s", exc)
-            raise AIError(
-                "AI 讲评结果无法解析",
-                "模型没有按 JSON 格式返回，可以重试一次，题目会保留。",
-                retryable=True,
-                kind="format",
-            ) from exc
+        # 盲评和讲评互不依赖：正式检测时并行调用，练习模式直接跳过盲评
+        # （练习结果不写等级证据，盲评没有任何消费者）。
+        blind_level = ""
+        if practice_mode:
+            data = self._grade_with_repair(
+                profile,
+                article,
+                quiz,
+                normalized,
+                choice_correct,
+                self_report=self_report,
+                production_texts=texts,
+                history=history,
+                completed=completed,
+            )
+        else:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                blind_future = pool.submit(
+                    self._blind_level,
+                    article,
+                    quiz,
+                    normalized,
+                    choice_correct,
+                    texts,
+                )
+                data = self._grade_with_repair(
+                    profile,
+                    article,
+                    quiz,
+                    normalized,
+                    choice_correct,
+                    self_report=self_report,
+                    production_texts=texts,
+                    history=history,
+                    completed=completed,
+                )
+                try:
+                    blind_level = blind_future.result()
+                except Exception:  # noqa: BLE001 - 盲评失败不能影响讲评
+                    logger.exception("盲评线程异常，本次不加入盲评信号")
 
         productions = _parse_productions(data, quiz, texts)
         production_scores = tuple(item.score for item in productions)
+        production_scored = tuple(item.scored for item in productions)
+        unscored_count = sum(1 for item in productions if not item.scored)
         short_score = production_scores[0] if production_scores else 0
         explanations = _parse_explanations(data, quiz)
         error_types = _parse_error_types(data, quiz, normalized)
@@ -884,13 +1016,21 @@ class ReadingQuizService:
             quiz,
             normalized,
             production_scores=production_scores,
+            production_scored=production_scored,
             self_report=self_report,
         )
 
         # 只有真实作答（选择题 + 产出题）会落库并参与历史回放；
         # 盲评与自评是“本次检测”的弱信号，只影响当前后验，不能随历史累积
         # （否则一次 0.5 的盲评会通过 0.75^age 回放变成 ~1.5 的权重）。
-        stored_observations = list(observations_from_quiz(quiz, normalized, production_scores))
+        stored_observations = list(
+            observations_from_quiz(
+                quiz,
+                normalized,
+                production_scores,
+                production_scored=production_scored,
+            )
+        )
         current_observations = list(stored_observations)
         current_observations += list(
             observations_from_blind_level(
@@ -907,7 +1047,6 @@ class ReadingQuizService:
             observations += list(review_band_observations(self._reviews.list_band_stats()))
         posterior = estimate_level(profile.cefr_level, observations)
 
-        practice_mode = self.is_practice_day(article, quiz.id)
         if practice_mode:
             recommended = profile.cefr_level
             decision = LevelDecision(
@@ -941,6 +1080,7 @@ class ReadingQuizService:
                     quiz.total,
                     confidence=posterior.confidence,
                     practice_mode=practice_mode,
+                    unscored=unscored_count,
                 ),
             )
 
@@ -1000,7 +1140,7 @@ class ReadingQuizService:
                     choice_correct=choice_correct,
                     choice_total=quiz.choice_total,
                     short_score=sum(production_scores),
-                    short_total=quiz.short_total,
+                    short_total=quiz.scored_production_total,
                     weighted_points=evidence.points,
                     evidence_ratio=evidence.ratio,
                     error_types=error_types,
@@ -1043,6 +1183,89 @@ class ReadingQuizService:
             blind_level=blind_level,
         )
 
+    def _grade_with_repair(
+        self,
+        profile: Profile,
+        article: Article,
+        quiz: ReadingQuiz,
+        answers: tuple[int, ...],
+        choice_correct: int,
+        *,
+        self_report: str,
+        production_texts: list[str],
+        history: tuple[QuizHistoryEntry, ...],
+        completed: list[ReadingQuiz],
+    ) -> dict[str, object]:
+        """讲评调用；JSON 或产出题分数缺失时带原因重试一次。
+
+        第二次仍缺分数时不再阻塞用户：缺失的产出题会标记为“未评分”，
+        不进入等级证据，避免把模型格式问题算成学生答错。
+        """
+        last_note = ""
+        for attempt in range(2):
+            messages = build_quiz_grading_messages(
+                profile,
+                article,
+                quiz,
+                answers,
+                choice_correct,
+                self_report=self_report,
+                production_texts=production_texts,
+                history=history,
+                difficulty_stats=difficulty_stats(completed),
+                skill_stats=skill_stats(completed),
+                repair_note=last_note,
+            )
+            logger.info(
+                "阅读检测讲评 prompt=%s article=%s choice=%s/%s level=%s attempt=%s",
+                PROMPT_VERSION,
+                article.title,
+                choice_correct,
+                quiz.choice_total,
+                profile.cefr_level,
+                attempt + 1,
+            )
+            text = self._client.complete_json(
+                messages,
+                temperature=0.2,
+                max_tokens=GRADING_MAX_TOKENS,
+                task="阅读检测·讲评",
+            )
+            try:
+                data = parse_json_object(text)
+            except JsonParseError as exc:
+                if attempt == 0:
+                    last_note = "输出不是合法 JSON；请只输出一个 JSON 对象，不要解释或代码围栏。"
+                    logger.warning("阅读检测讲评 JSON 解析失败，按原因重试：%s", exc)
+                    continue
+                logger.warning("阅读检测讲评 JSON 解析失败：%s", exc)
+                raise AIError(
+                    "AI 讲评结果无法解析",
+                    "模型没有按 JSON 格式返回，可以重试一次，题目会保留。",
+                    retryable=True,
+                    kind="format",
+                ) from exc
+
+            missing = _missing_production_scores(data, quiz, production_texts)
+            if not missing:
+                return data
+            if attempt == 0:
+                last_note = (
+                    f"上一次输出缺少第 {', '.join(str(index + 1) for index in missing)} 道"
+                    f"产出题的分数；production_scores 必须恰好 {quiz.short_total} 条，"
+                    "每条为 0 或 1。"
+                )
+                logger.warning("讲评缺少产出题分数，按原因重试：%s", missing)
+                continue
+            logger.warning("讲评仍缺少产出题分数，标记为未评分：%s", missing)
+            return data
+        raise AIError(
+            "AI 讲评失败",
+            "请稍后重试，题目和作答都会保留。",
+            retryable=True,
+            kind="format",
+        )
+
     def _blind_level(
         self,
         article: Article,
@@ -1056,7 +1279,12 @@ class ReadingQuizService:
             article, quiz, answers, choice_correct, production_texts
         )
         try:
-            text = self._client.complete_json(messages, temperature=0.2)
+            text = self._client.complete_json(
+                messages,
+                temperature=0.2,
+                max_tokens=BLIND_MAX_TOKENS,
+                task="阅读检测·盲评",
+            )
             data = parse_json_object(text)
         except (AIError, JsonParseError) as exc:
             logger.warning("盲评失败，本次不加入盲评信号：%s", exc)
@@ -1083,17 +1311,20 @@ def history_entries(
 ) -> tuple[QuizHistoryEntry, ...]:
     entries: list[QuizHistoryEntry] = []
     for quiz, title in recent:
+        scored_productions = [item for item in quiz.production_answers if item.scored]
+        production_score = sum(item.score for item in scored_productions)
+        production_total = len(scored_productions)
         entries.append(
             QuizHistoryEntry(
                 date=quiz.article_date,
                 title=title or f"#{quiz.article_id}",
                 level=quiz.level,
-                score=quiz.score,
-                total=quiz.total,
+                score=quiz.choice_correct + production_score,
+                total=quiz.choice_total + production_total,
                 choice_correct=quiz.choice_correct,
                 choice_total=quiz.choice_total,
-                production_score=quiz.production_score,
-                production_total=quiz.short_total,
+                production_score=production_score,
+                production_total=production_total,
                 difficulties=tuple(
                     normalize_cefr_level(question.difficulty, quiz.level)
                     for question in quiz.questions
@@ -1113,27 +1344,33 @@ def _level_comment(
     *,
     confidence: float = 0.0,
     practice_mode: bool = False,
+    unscored: int = 0,
 ) -> str:
     if practice_mode:
-        return (
+        text = (
             f"检测得分 {score}/{total}；今天已经完成过一次正式检测，"
             f"本次只练手，等级保持 {decision.applied_level}。"
         )
-    if decision.waiting:
-        return (
+    elif decision.waiting:
+        text = (
             f"检测得分 {score}/{total}，本地后验建议升到 {recommended}"
             f"（置信度 {confidence:.2f}）；这是第 "
             f"{decision.pending_count}/{UPGRADE_EVIDENCE_REQUIRED} 次向上证据，"
             f"等级暂时保持 {decision.applied_level}。"
         )
-    if decision.changed:
-        return (
+    elif decision.changed:
+        text = (
             f"检测得分 {score}/{total}，等级从 {previous} 调整为 "
             f"{decision.applied_level}（置信度 {confidence:.2f}）。"
         )
-    return (
-        f"检测得分 {score}/{total}，等级保持 {decision.applied_level}（置信度 {confidence:.2f}）。"
-    )
+    else:
+        text = (
+            f"检测得分 {score}/{total}，等级保持 {decision.applied_level}"
+            f"（置信度 {confidence:.2f}）。"
+        )
+    if unscored:
+        text += f" 有 {unscored} 道产出题 AI 未给分，未计入等级证据。"
+    return text
 
 
 def _level_reason(
@@ -1187,19 +1424,33 @@ def _parse_productions(
     quiz: ReadingQuiz,
     texts: list[str],
 ) -> tuple[QuizProduction, ...]:
-    """解析每道产出题的 0/1 分与反馈；空作答强制 0 分。"""
+    """解析每道产出题的 0/1 分与反馈。
+
+    空作答强制 0 分（这是真实结果）；模型漏给分数时标记 `scored=False`，
+    调用方必须把这类题排除在等级证据之外，不能静默当成答错。
+    """
     total = quiz.short_total
     if total <= 0:
         return ()
 
     raw_scores = data.get("production_scores")
-    scores: list[int] = []
+    raw_values: list[object] = []
     if isinstance(raw_scores, list):
-        for item in raw_scores[:total]:
+        raw_values = raw_scores[:total]
+    elif total == 1 and "short_answer_score" in data:
+        raw_values = [data.get("short_answer_score")]
+
+    scores: list[int] = []
+    scored_flags: list[bool] = []
+    for item in raw_values:
+        if _is_valid_production_score(item):
             scores.append(1 if as_int(item, 0) >= 1 else 0)
-    elif total == 1:
-        scores.append(1 if as_int(data.get("short_answer_score"), 0) >= 1 else 0)
+            scored_flags.append(True)
+        else:
+            scores.append(0)
+            scored_flags.append(False)
     scores += [0] * (total - len(scores))
+    scored_flags += [False] * (total - len(scored_flags))
 
     raw_feedbacks = data.get("production_feedbacks")
     feedbacks: list[str] = []
@@ -1211,11 +1462,63 @@ def _parse_productions(
 
     productions: list[QuizProduction] = []
     for index, text in enumerate(texts[:total]):
-        score = scores[index] if index < len(scores) else 0
+        score = scores[index]
+        scored = scored_flags[index]
         if not text.strip():
+            # 未作答是确定的 0 分，不是“模型没评分”。
             score = 0
-        productions.append(QuizProduction(text=text, score=score, feedback=feedbacks[index]))
+            scored = True
+        productions.append(
+            QuizProduction(
+                text=text,
+                score=score,
+                feedback=feedbacks[index],
+                scored=scored,
+            )
+        )
     return tuple(productions)
+
+
+def _is_valid_production_score(value: object) -> bool:
+    """产出题分数必须是 0 或 1；缺字段、"abc"、0.5、2 都算无效。"""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return value in (0, 1)
+    text = str(value or "").strip()
+    if not text:
+        return False
+    try:
+        number = float(text)
+    except ValueError:
+        return False
+    return number in (0.0, 1.0)
+
+
+def _missing_production_scores(
+    data: dict[str, object],
+    quiz: ReadingQuiz,
+    texts: list[str],
+) -> tuple[int, ...]:
+    """找出“有作答但 AI 没给有效分数”的产出题下标。"""
+    total = quiz.short_total
+    if total <= 0:
+        return ()
+    raw = data.get("production_scores")
+    if isinstance(raw, list):
+        values: list[object] = raw[:total]
+    elif total == 1 and "short_answer_score" in data:
+        values = [data.get("short_answer_score")]
+    else:
+        values = []
+
+    missing: list[int] = []
+    for index, text in enumerate(texts[:total]):
+        if not text.strip():
+            continue
+        if index >= len(values) or not _is_valid_production_score(values[index]):
+            missing.append(index)
+    return tuple(missing)
 
 
 def _parse_explanations(data: dict[str, object], quiz: ReadingQuiz) -> tuple[str, ...]:

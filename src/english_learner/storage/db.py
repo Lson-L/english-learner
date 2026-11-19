@@ -24,7 +24,8 @@ Java 对照：
 - v5 → v6：Phase 2 / 3：profile 增加等级置信度与调整原因；words 增加 CEFR 词档；
   reading_quizzes 增加多道产出题、后验、置信度、练习模式与阶段；
   新增 level_evidence（历史证据回放）与 weekly_reviews（每周复盘）两张表。
-  旧检测结果不回填证据、不阻塞启动。
+  旧检测结果不回填证据、不阻塞启动；
+- v6 → v7：新增 ai_calls（AI 调用记录），只记用量元数据，不保存提示词和回复。
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from typing import Any
 # 这里只借用 config_store 的目录解析，不引入任何界面依赖。
 from ..services.config_store import config_dir
 from .repositories import (
+    AICallRepo,
     ArticleRepo,
     LevelEvidenceRepo,
     ProfileRepo,
@@ -50,7 +52,7 @@ from .repositories import (
     WordRepo,
 )
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS profile (
@@ -213,6 +215,25 @@ CREATE TABLE IF NOT EXISTS daily_stats (
     reviews_done INTEGER NOT NULL DEFAULT 0
 );
 
+-- AI 调用记录：每次真实 HTTP 尝试一行（重试/降级会产生多行）。
+-- 只保存用量元数据，不保存提示词与模型回复；tokens 允许为空（网关不返回 usage）。
+CREATE TABLE IF NOT EXISTS ai_calls (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    called_at         TEXT    NOT NULL,
+    task              TEXT    NOT NULL DEFAULT '',
+    model             TEXT    NOT NULL DEFAULT '',
+    base_url          TEXT    NOT NULL DEFAULT '',
+    json_mode         INTEGER NOT NULL DEFAULT 0,
+    attempt           INTEGER NOT NULL DEFAULT 1,
+    prompt_tokens     INTEGER,
+    completion_tokens INTEGER,
+    total_tokens      INTEGER,
+    latency_ms        INTEGER NOT NULL DEFAULT 0,
+    ok                INTEGER NOT NULL DEFAULT 1,
+    error_kind        TEXT    NOT NULL DEFAULT '',
+    error_message     TEXT    NOT NULL DEFAULT ''
+);
+
 CREATE INDEX IF NOT EXISTS idx_words_due ON words(due_date);
 CREATE INDEX IF NOT EXISTS idx_highlights_article ON highlights(article_id);
 CREATE INDEX IF NOT EXISTS idx_review_logs_word ON review_logs(word_id);
@@ -221,6 +242,8 @@ CREATE INDEX IF NOT EXISTS idx_reading_quizzes_date ON reading_quizzes(article_d
 CREATE INDEX IF NOT EXISTS idx_reading_quizzes_completed ON reading_quizzes(completed_at);
 CREATE INDEX IF NOT EXISTS idx_level_evidence_time ON level_evidence(observed_at);
 CREATE INDEX IF NOT EXISTS idx_level_evidence_quiz ON level_evidence(quiz_id);
+CREATE INDEX IF NOT EXISTS idx_ai_calls_time ON ai_calls(called_at);
+CREATE INDEX IF NOT EXISTS idx_ai_calls_task ON ai_calls(task);
 """
 
 
@@ -247,6 +270,7 @@ class Database:
         self._quizzes: QuizRepo | None = None
         self._evidence: LevelEvidenceRepo | None = None
         self._weekly: WeeklyReviewRepo | None = None
+        self._ai_calls: AICallRepo | None = None
         if initialize:
             self.connect()
 
@@ -424,3 +448,9 @@ class Database:
         if self._weekly is None:
             self._weekly = WeeklyReviewRepo(self)
         return self._weekly
+
+    @property
+    def ai_calls(self) -> AICallRepo:
+        if self._ai_calls is None:
+            self._ai_calls = AICallRepo(self)
+        return self._ai_calls

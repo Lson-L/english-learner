@@ -1,6 +1,6 @@
 """划词释义：单词规范化、上下文句子提取、查词缓存与加入生词本。
 
-设计（对应 PROGRESS.md M1-5）：
+设计（对应 HISTORY.md M1-5）：
 - 规范化 lemma 后先查 `words` 表，命中就不再消耗 token；
 - 未命中才调用 AI，要求“结合上下文给语境义”；
 - 查词结果直接写入 `words`（既是生词本，也是查词缓存），`due_date = 今天`，
@@ -79,12 +79,21 @@ def extract_sentence(text: str, start: int, end: int, max_len: int = 300) -> str
     return " ".join(text[left:right].split())
 
 
+def _context_mismatch(cached_sentence: str, current_sentence: str) -> bool:
+    """缓存的释义是否来自另一句上下文（只做归一化后的精确比较）。"""
+    cached = " ".join((cached_sentence or "").split()).lower()
+    current = " ".join((current_sentence or "").split()).lower()
+    return bool(cached and current and cached != current)
+
+
 @dataclass(frozen=True)
 class LookupResult:
     """一次查词的结果：词条本身 + 是否命中缓存。"""
 
     word: Word
     cached: bool
+    # 命中缓存、但缓存释义来自另一句：界面可以提示“按本句重查”。
+    context_mismatch: bool = False
 
     @property
     def definition(self) -> WordDefinition:
@@ -113,6 +122,8 @@ class DictionaryService:
         sentence: str = "",
         article_id: int | None = None,
         level: str = "B1",
+        *,
+        refresh: bool = False,
     ) -> LookupResult:
         """查词；`lemma` 是词典原形，`display_form` 保留文章中的词形。
 
@@ -120,21 +131,30 @@ class DictionaryService:
         1. word_forms 里有这个“文章词形” → 直接命中（went → go）；
         2. words 里正好有同名词条 → 命中；
         3. 都没命中才调用 AI，由 AI 判断原形并生成记忆方法。
+
+        `refresh=True` 跳过缓存，按当前句子重新请求 AI 并更新词条释义。
+        界面在“缓存释义来自另一句”时提供这个入口，避免多义词一直显示旧语境义。
         """
         surface = normalize_lemma(raw_word)
         if not surface:
             raise AIError("请选择一个英文单词", "只能查询由字母组成的单词，双击正文即可选中。")
 
-        cached = self._words.get_by_form(surface)
-        if cached is None:
-            cached = self._words.get_by_lemma(surface)
-        if cached is not None:
-            logger.info("查词命中缓存：%s → %s", surface, cached.lemma)
-            return LookupResult(word=cached, cached=True)
+        cached: Word | None = None
+        if not refresh:
+            cached = self._words.get_by_form(surface)
+            if cached is None:
+                cached = self._words.get_by_lemma(surface)
+            if cached is not None:
+                logger.info("查词命中缓存：%s → %s", surface, cached.lemma)
+                return LookupResult(
+                    word=cached,
+                    cached=True,
+                    context_mismatch=_context_mismatch(cached.context_sentence, sentence),
+                )
 
         messages = build_dictionary_messages(raw_word.strip(), sentence.strip(), level)
         logger.info("查词调用 AI prompt=%s word=%s", PROMPT_VERSION, surface)
-        text = self._client.complete_json(messages, temperature=0.3)
+        text = self._client.complete_json(messages, temperature=0.3, max_tokens=1500, task="查词")
         try:
             data = parse_json_object(text)
         except JsonParseError as exc:
@@ -190,7 +210,9 @@ class DictionaryService:
 
         messages = build_mnemonic_messages(word, level)
         logger.info("生成记忆方法 prompt=%s word=%s", PROMPT_VERSION, word.lemma)
-        text = self._client.complete_json(messages, temperature=0.5)
+        text = self._client.complete_json(
+            messages, temperature=0.5, max_tokens=800, task="记忆方法"
+        )
         try:
             data = parse_json_object(text)
         except JsonParseError as exc:

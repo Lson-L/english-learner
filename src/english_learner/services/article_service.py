@@ -1,6 +1,6 @@
 """每日文章的生成、校验与缓存。
 
-设计要点（对应 PROGRESS.md M1-4）：
+设计要点（对应 HISTORY.md M1-4）：
 - 一天一篇，`articles.article_date` 唯一；当天已有直接返回，不花 token；
 - AI 返回的 JSON 必须通过本地校验，不通过就重试一次，仍失败抛 AIError；
 - “换一篇”= 删除当天记录再生成（会级联删除高亮，但生词本保留）；
@@ -32,6 +32,9 @@ WORD_COUNT_MAX = 400
 MIN_PARAGRAPHS = 3
 MAX_TARGET_WORDS = 6
 DUE_WORDS_PER_ARTICLE = 5
+
+# 文章 JSON 的输出额度：正文 250~350 词 + 字段，给宽一点避免被截断。
+ARTICLE_MAX_TOKENS = 4000
 
 # 每天按日期轮换主题，既稳定又不至于天天同一个话题。
 TOPICS: tuple[str, ...] = (
@@ -126,9 +129,7 @@ def parse_article_draft(
         word.lower() for word in as_str_list(data.get("target_words")) if word.strip()
     )[:MAX_TARGET_WORDS]
     if require_targets:
-        missing = [
-            word for word in target_words if not re.search(rf"\b{re.escape(word)}\b", content, re.I)
-        ]
+        missing = [word for word in target_words if not _contains_word_form(content, word)]
         if missing:
             raise InvalidArticleError("目标词未出现在正文中：" + ", ".join(missing))
 
@@ -140,6 +141,45 @@ def parse_article_draft(
         target_words=target_words,
         glossary=_parse_glossary(data.get("glossary")),
     )
+
+
+def _focus_from_profile(profile: Profile) -> str:
+    """把画像里的薄弱点压成一行软提示（最多 3 条）。"""
+    items = [item.strip() for item in profile.weaknesses if item and item.strip()]
+    return "、".join(items[:3])
+
+
+def _contains_word_form(content: str, word: str) -> bool:
+    """判断正文是否出现了目标词（允许常见词形变化）。
+
+    旧实现只接受完全相同的词，`resilient → resilience` 这种派生词会被误判为
+    “没写目标词”，白白重生成一整篇。这里依次接受：原词、常见屈折后缀、
+    以及长词的词干匹配（覆盖 -ce/-cy/-ness 等派生）。
+    """
+    word = word.strip().lower()
+    if not word:
+        return False
+    if re.search(rf"\b{re.escape(word)}\b", content, re.I):
+        return True
+    if len(word) >= 4 and re.search(
+        rf"\b{re.escape(word)}(?:s|es|ed|d|ing|er|est|ly)\b",
+        content,
+        re.I,
+    ):
+        return True
+    # study → studies / studied；make → making。
+    if len(word) >= 3 and word.endswith("y"):
+        stem = word[:-1]
+        if re.search(rf"\b{re.escape(stem)}(?:ies|ied|ying)\b", content, re.I):
+            return True
+    if len(word) >= 4 and word.endswith("e"):
+        if re.search(rf"\b{re.escape(word[:-1])}ing\b", content, re.I):
+            return True
+    if len(word) >= 6:
+        stem = word[:-2]
+        if re.search(rf"\b{re.escape(stem)}[a-z]{{2,6}}\b", content, re.I):
+            return True
+    return False
 
 
 def _parse_paragraphs(value: object) -> tuple[str, ...]:
@@ -191,7 +231,11 @@ class ArticleService:
         target_words = self._pick_target_words(day)
         topic = self._pick_topic(day)
         draft = self.generate_article(
-            profile.cefr_level, target_words, topic, avoid_titles=self._avoid_titles(day)
+            profile.cefr_level,
+            target_words,
+            topic,
+            avoid_titles=self._avoid_titles(day),
+            learner_focus=_focus_from_profile(profile),
         )
         return self._store(day, draft)
 
@@ -203,15 +247,17 @@ class ArticleService:
         *,
         strict_targets: bool = True,
         learner_feedback: str = "",
+        learner_focus: str = "",
         angle: str | None = None,
         avoid_titles: list[str] | tuple[str, ...] = (),
         user_request: str = "",
         current_article: Article | None = None,
     ) -> ArticleDraft:
-        """调用 AI 生成文章；JSON 不合法或校验不过时重试一次。
+        """调用 AI 生成文章；JSON 不合法或校验不过时带原因重试一次。
 
         strict_targets=False 表示目标词是“尽量带上”的软约束（阅读反馈重写用）。
-        learner_feedback 会一并传给模型，用来控制生词密度与句子长度。
+        learner_feedback 会一并传给模型，用来控制生词密度与句子长度；
+        learner_focus 是画像里的薄弱点，只作为软提示。
         angle=None 时随机选一个切入角度，传空字符串表示不加角度；
         avoid_titles 列出“别再写”的历史标题，保证每次生成（尤其“换一篇”）
         的 prompt 本身就不一样；user_request 是用户在弹窗里写的具体要求。
@@ -230,14 +276,16 @@ class ArticleService:
                 topic,
                 soft_targets=not strict_targets,
                 learner_feedback=learner_feedback,
+                learner_focus=learner_focus,
                 angle=chosen_angle,
                 avoid_titles=avoid_titles,
                 user_request=user_request,
                 current_article=current_article,
+                repair_note=last_reason if attempt else "",
             )
             logger.info(
                 "生成文章 prompt=%s level=%s attempt=%s topic=%s angle=%s "
-                "target_words=%s soft=%s avoid=%s request=%s with_current=%s",
+                "target_words=%s soft=%s avoid=%s request=%s with_current=%s repair=%s",
                 PROMPT_VERSION,
                 level,
                 attempt + 1,
@@ -248,8 +296,14 @@ class ArticleService:
                 len(avoid_titles),
                 user_request.strip() or "-",
                 current_article is not None,
+                bool(last_reason),
             )
-            text = self._client.complete_json(messages, temperature=0.8)
+            text = self._client.complete_json(
+                messages,
+                temperature=0.8,
+                max_tokens=ARTICLE_MAX_TOKENS,
+                task="每日文章",
+            )
             try:
                 return parse_article_draft(text, level, require_targets=strict_targets)
             except InvalidArticleError as exc:
@@ -303,6 +357,7 @@ class ArticleService:
             targets,
             topic,
             strict_targets=strict_targets,
+            learner_focus=_focus_from_profile(profile),
             angle=angle,
             # 用户写明了要求时，不再把当前标题列进“禁止重复”：
             # 他可能就是要一篇同主题/同风格的文章，不能让两条指令互相打架。

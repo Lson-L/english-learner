@@ -34,7 +34,7 @@ class FakeCompleter:
         self.reply = reply
         self.calls = 0
 
-    def complete_json(self, messages, *, temperature=None, max_tokens=None) -> str:
+    def complete_json(self, messages, *, temperature=None, max_tokens=None, task="") -> str:
         self.calls += 1
         if isinstance(self.reply, Exception):
             raise self.reply

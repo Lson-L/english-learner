@@ -30,6 +30,7 @@ def _label(object_name: str, *, wrap: bool = True) -> QLabel:
 
 class WordPanel(QFrame):
     add_requested = Signal()
+    refresh_requested = Signal()
     close_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -117,6 +118,13 @@ class WordPanel(QFrame):
         self._add_button.clicked.connect(self.add_requested.emit)
         root.addWidget(self._add_button)
 
+        self._refresh_button = QPushButton("按本句重查")
+        self._refresh_button.setObjectName("secondaryButton")
+        self._refresh_button.setToolTip("缓存释义来自另一句，点击按当前句子重新查询")
+        self._refresh_button.clicked.connect(self.refresh_requested.emit)
+        self._refresh_button.setVisible(False)
+        root.addWidget(self._refresh_button)
+
         self._status = QLabel("")
         self._status.setObjectName("muted")
         self._status.setWordWrap(True)
@@ -136,6 +144,7 @@ class WordPanel(QFrame):
         self._scroll.setVisible(False)
         self._close_button.setVisible(False)
         self._add_button.setVisible(False)
+        self._refresh_button.setVisible(False)
         self._status.setText("")
 
     def show_loading(self, word: str) -> None:
@@ -158,9 +167,17 @@ class WordPanel(QFrame):
         self._add_button.setVisible(True)
         self._add_button.setEnabled(False)
         self._add_button.setText("查询中…")
+        self._refresh_button.setVisible(False)
         self._status.setText("")
 
-    def show_definition(self, word: Word, sentence: str = "", *, cached: bool = False) -> None:
+    def show_definition(
+        self,
+        word: Word,
+        sentence: str = "",
+        *,
+        cached: bool = False,
+        context_mismatch: bool = False,
+    ) -> None:
         self._current = word
         self._placeholder.setVisible(False)
         self._scroll.setVisible(True)
@@ -194,12 +211,17 @@ class WordPanel(QFrame):
 
         self._add_button.setVisible(True)
         self._add_button.setEnabled(True)
+        self._refresh_button.setVisible(bool(context_mismatch))
         if word.in_vocabulary:
             self._add_button.setText("加入本篇高亮")
             self._status.setText("这个词已在生词本中，加入后会在本篇高亮。")
         else:
             self._add_button.setText("加入生词本")
             self._status.setText("已有释义缓存，点「加入生词本」才会收进生词本。" if cached else "")
+        if context_mismatch:
+            self._status.setText(
+                "这条释义来自之前查过的句子，当前语境可能不同；如含义不符，点「按本句重查」。"
+            )
 
     def show_error(self, message: str) -> None:
         self._current = None
@@ -219,6 +241,7 @@ class WordPanel(QFrame):
         self._mnemonic.setText("")
         self._mnemonic.setVisible(False)
         self._add_button.setVisible(False)
+        self._refresh_button.setVisible(False)
         self._status.setText("")
 
     def mark_added(self, inserted: bool = True) -> None:

@@ -235,6 +235,7 @@ class MainWindow(QMainWindow):
             return
 
         self._stop_worker_threads()
+        self._context.close()
         self._db.close()
         super().closeEvent(event)
 

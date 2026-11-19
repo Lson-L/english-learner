@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from english_learner.models.entities import (
+    AICall,
     Article,
     EvidenceObservation,
     LevelEvidence,
@@ -41,6 +42,7 @@ def make_service(db: Database) -> ExportService:
         db.quizzes,
         db.evidence,
         db.weekly_reviews,
+        db.ai_calls,
     )
 
 
@@ -99,6 +101,18 @@ def seed(db: Database) -> None:
     )
     db.stats.bump("2026-11-18", article_read=1)
     db.stats.bump("2026-11-19", words_added=1, reviews_done=1)
+    db.ai_calls.insert(
+        AICall(
+            called_at="2026-11-19T20:05:00",
+            task="查词",
+            model="test-model",
+            base_url="https://api.example.com/v1",
+            prompt_tokens=120,
+            completion_tokens=80,
+            total_tokens=200,
+            latency_ms=900,
+        )
+    )
     db.evidence.insert(
         LevelEvidence(
             source="quiz",
@@ -209,6 +223,7 @@ def test_export_json_contains_all_tables(db: Database, tmp_path: Path) -> None:
         "reading_quizzes": 1,
         "level_evidence": 1,
         "weekly_reviews": 1,
+        "ai_calls": 1,
     }
     assert data["profile"]["cefr_level"] == "B1"
     assert data["profile"]["strengths"] == ["阅读理解"]
@@ -231,10 +246,13 @@ def test_export_json_contains_all_tables(db: Database, tmp_path: Path) -> None:
     assert data["reading_quizzes"][0]["questions"][0]["prompt"] == "What is the main idea?"
     assert data["level_evidence"][0]["confidence"] == pytest.approx(0.6)
     assert data["weekly_reviews"][0]["suggested_level"] == "B2"
+    assert data["ai_calls"][0]["task"] == "查词"
+    assert data["ai_calls"][0]["total_tokens"] == 200
     assert "生词 1" in result.summary()
     assert "阅读检测 1" in result.summary()
     assert "等级证据 1" in result.summary()
     assert "每周复盘 1" in result.summary()
+    assert "AI 调用记录 1" in result.summary()
 
 
 def test_export_json_adds_suffix_and_overwrites_atomically(db: Database, tmp_path: Path) -> None:
@@ -266,6 +284,7 @@ def test_export_csv_writes_one_file_per_table(db: Database, tmp_path: Path) -> N
         "reading_quizzes.csv",
         "level_evidence.csv",
         "weekly_reviews.csv",
+        "ai_calls.csv",
     }
     assert all(path.is_file() for path in result.files)
 
@@ -293,6 +312,12 @@ def test_export_csv_writes_one_file_per_table(db: Database, tmp_path: Path) -> N
         csv.DictReader(io.StringIO((target / "profile.csv").read_text(encoding="utf-8-sig")))
     )
     assert profile_rows[0]["strengths"] == "阅读理解"
+
+    ai_rows = list(
+        csv.DictReader(io.StringIO((target / "ai_calls.csv").read_text(encoding="utf-8-sig")))
+    )
+    assert ai_rows[0]["task"] == "查词"
+    assert ai_rows[0]["total_tokens"] == "200"
 
     quiz_rows = list(
         csv.DictReader(
@@ -322,7 +347,7 @@ def test_export_empty_database(db: Database, tmp_path: Path) -> None:
     csv_result = service.export_csv(tmp_path / "empty_csv")
     words_text = (tmp_path / "empty_csv" / "words.csv").read_text(encoding="utf-8-sig")
     assert words_text.strip().startswith("id,lemma")
-    assert len(csv_result.files) == 10
+    assert len(csv_result.files) == 11
 
 
 def test_export_csv_directory_is_created(db: Database, tmp_path: Path) -> None:

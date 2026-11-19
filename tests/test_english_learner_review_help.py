@@ -18,7 +18,7 @@ class FakeCompleter:
         self.replies = list(replies)
         self.calls = 0
 
-    def complete_json(self, messages, *, temperature=None, max_tokens=None) -> str:
+    def complete_json(self, messages, *, temperature=None, max_tokens=None, task="") -> str:
         self.calls += 1
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):

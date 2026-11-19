@@ -48,13 +48,18 @@ class SkillStat:
 
 @dataclass(frozen=True)
 class QuestionOutcome:
-    """一道题的实际对错，供历史摘要使用。"""
+    """一道题的实际对错，供历史摘要使用。
+
+    `scored=False` 表示 AI 漏评了这道产出题，统计时应跳过，
+    不能把格式问题算成学生答错。
+    """
 
     index: int
     skill: str
     difficulty: str
     kind: str
     correct: bool
+    scored: bool = True
 
 
 def question_outcomes(quiz: ReadingQuiz) -> tuple[QuestionOutcome, ...]:
@@ -68,12 +73,12 @@ def question_outcomes(quiz: ReadingQuiz) -> tuple[QuestionOutcome, ...]:
     productions = quiz.production_answers
     for index, question in enumerate(quiz.questions, start=1):
         if question.is_short:
-            score = (
-                productions[production_position].score
-                if production_position < len(productions)
-                else 0
+            production = (
+                productions[production_position] if production_position < len(productions) else None
             )
             production_position += 1
+            score = production.score if production is not None else 0
+            scored = production.scored if production is not None else True
             outcomes.append(
                 QuestionOutcome(
                     index=index,
@@ -81,6 +86,7 @@ def question_outcomes(quiz: ReadingQuiz) -> tuple[QuestionOutcome, ...]:
                     difficulty=normalize_cefr_level(question.difficulty, quiz.level),
                     kind="production",
                     correct=score >= 1,
+                    scored=scored,
                 )
             )
             continue
@@ -104,6 +110,8 @@ def difficulty_stats(quizzes: Sequence[ReadingQuiz]) -> tuple[DifficultyStat, ..
     totals: dict[str, list[int]] = {}
     for quiz in quizzes:
         for outcome in question_outcomes(quiz):
+            if not outcome.scored:
+                continue
             bucket = totals.setdefault(outcome.difficulty, [0, 0])
             bucket[1] += 1
             if outcome.correct:
@@ -122,6 +130,8 @@ def skill_stats(quizzes: Sequence[ReadingQuiz]) -> tuple[SkillStat, ...]:
     totals: dict[str, list[int]] = {}
     for quiz in quizzes:
         for outcome in question_outcomes(quiz):
+            if not outcome.scored:
+                continue
             bucket = totals.setdefault(outcome.skill, [0, 0])
             bucket[1] += 1
             if outcome.correct:

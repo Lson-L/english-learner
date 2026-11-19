@@ -25,7 +25,10 @@ from ...services.ai_client import AIClient, ConnectionResult
 from ...services.app_context import AppContext
 from ...services.config_store import AIConfig, ConfigError, ConfigStore, UiConfig
 from ...services.export_service import ExportResult
+from ...services.log_files import log_directory
+from ..ai_usage_dialog import AIUsageDialog
 from ..fonts import ENGLISH_FONT_CHOICES, get_english_font
+from ..log_viewer_dialog import LogViewerDialog
 from ..workers import TaskWorker
 from .common import Card, PageHeader, set_status
 
@@ -65,8 +68,11 @@ class SettingsPage(QWidget):
         layout.setContentsMargins(32, 28, 32, 28)
         layout.setSpacing(16)
 
-        layout.addWidget(PageHeader("设置", "AI 服务配置、阅读外观、数据导出与备份。"))
+        layout.addWidget(
+            PageHeader("设置", "AI 服务配置、调用记录与运行日志、阅读外观、数据导出与备份。")
+        )
         layout.addWidget(self._build_ai_card())
+        layout.addWidget(self._build_ai_usage_card())
         layout.addWidget(self._build_appearance_card())
         layout.addWidget(self._build_data_card())
         layout.addWidget(self._build_export_card())
@@ -91,12 +97,10 @@ class SettingsPage(QWidget):
         self._url_value = self._value_label("")
         self._model_value = self._value_label("")
         self._key_value = self._value_label("")
-        self._temperature_value = self._value_label("")
 
         form.addRow(self._form_label("服务地址"), self._url_value)
         form.addRow(self._form_label("模型 id"), self._model_value)
         form.addRow(self._form_label("API Key"), self._key_value)
-        form.addRow(self._form_label("温度"), self._temperature_value)
         card.body.addLayout(form)
 
         buttons = QHBoxLayout()
@@ -122,6 +126,44 @@ class SettingsPage(QWidget):
         card.body.addWidget(note)
 
         self.apply_config(self._config)
+        return card
+
+    def _build_ai_usage_card(self) -> Card:
+        card = Card()
+        title = QLabel("AI 使用与日志")
+        title.setObjectName("cardTitle")
+        card.body.addWidget(title)
+
+        self._usage_summary = QLabel("")
+        self._usage_summary.setObjectName("muted")
+        self._usage_summary.setWordWrap(True)
+        card.body.addWidget(self._usage_summary)
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        self._usage_button = QPushButton("查看调用记录…")
+        self._usage_button.setObjectName("secondaryButton")
+        self._usage_button.clicked.connect(self._open_usage)
+        row.addWidget(self._usage_button)
+
+        self._logs_button = QPushButton("查看运行日志…")
+        self._logs_button.setObjectName("secondaryButton")
+        self._logs_button.clicked.connect(self._open_logs)
+        row.addWidget(self._logs_button)
+        row.addStretch(1)
+        card.body.addLayout(row)
+
+        note = QLabel(
+            "调用记录只保存任务、模型、token 用量、耗时与错误，不保存提示词和模型回复；"
+            f"日志文件位于 {log_directory()}，按 1 MB 轮转、最多保留 4 个。"
+        )
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        card.body.addWidget(note)
+
+        if self._context is None:
+            self._usage_button.setEnabled(False)
+        self._refresh_usage_summary()
         return card
 
     def _build_appearance_card(self) -> Card:
@@ -263,13 +305,38 @@ class SettingsPage(QWidget):
         return label
 
     # -------------------------------------------------------------- actions
+    def on_activated(self) -> None:
+        """切回设置页时刷新用量摘要（连接测试、其他页面调用 AI 后都会变化）。"""
+        self._refresh_usage_summary()
+
+    def _refresh_usage_summary(self) -> None:
+        if self._context is None:
+            self._usage_summary.setText("（未连接数据库，无法查看调用记录）")
+            return
+        repo = self._context.ai_call_repo
+        today = repo.summary(since=today_str())
+        total = repo.summary()
+        self._usage_summary.setText(
+            f"今日 {today.calls:,} 次调用（失败 {today.failed_calls:,}）· "
+            f"{today.total_tokens:,} tokens；"
+            f"累计 {total.calls:,} 次 · {total.total_tokens:,} tokens。"
+        )
+
+    def _open_usage(self) -> None:
+        if self._context is None:
+            return
+        AIUsageDialog(self._context.ai_call_repo, parent=self).exec()
+        self._refresh_usage_summary()
+
+    def _open_logs(self) -> None:
+        LogViewerDialog(parent=self).exec()
+
     def apply_config(self, config: AIConfig) -> None:
         """配置变更后刷新展示。"""
         self._config = config.normalized()
         self._url_value.setText(self._config.base_url)
         self._model_value.setText(self._config.model)
         self._key_value.setText(self._config.masked_key())
-        self._temperature_value.setText(f"{self._config.temperature:g}")
         set_status(self._status, "修改配置后建议先测试一次连接。", "hint")
 
     def _test_connection(self) -> None:
@@ -281,7 +348,8 @@ class SettingsPage(QWidget):
         set_status(self._status, "正在连接，请稍候…", "loading")
 
         config = self._config
-        worker = TaskWorker(lambda: AIClient(config).test_connection())
+        recorder = self._context.ai_call_repo if self._context is not None else None
+        worker = TaskWorker(lambda: AIClient(config, recorder=recorder).test_connection())
         worker.succeeded.connect(self._on_test_succeeded)
         worker.failed.connect(self._on_test_failed)
         worker.cancelled.connect(self._on_test_finished)
@@ -306,6 +374,8 @@ class SettingsPage(QWidget):
         self._test_button.setEnabled(True)
         self._test_button.setText("测试连接")
         self._worker = None
+        # 连接测试本身也会产生一条调用记录，摘要要跟着变。
+        self._refresh_usage_summary()
 
     # -------------------------------------------------------------- 数据导出
     def _export_json(self) -> None:

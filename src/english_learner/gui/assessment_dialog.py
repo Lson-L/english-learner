@@ -1,6 +1,6 @@
 """首次启动的摸底测评对话框。
 
-流程（对应 PROGRESS.md M1-3）：
+流程（对应 HISTORY.md M1-3）：
 1. 展示固定题库（默认 B1 套）：短文 + 5 道理解题 + 5 道词汇题 + 1 道翻译题；
 2. 用户作答后，后台线程调用 AI 只做评分；
 3. 成功 → 结果页展示 CEFR / 词汇量 / 优势 / 薄弱点，写 profile；
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -32,7 +33,13 @@ from PySide6.QtWidgets import (
 
 from ..models.entities import CEFR_LEVELS, Profile
 from ..services.app_context import AppContext
-from ..services.assessment_bank import AssessmentSet, Question, get_set
+from ..services.assessment_bank import (
+    UNKNOWN_ANSWER,
+    UNKNOWN_LABEL,
+    AssessmentSet,
+    Question,
+    get_set,
+)
 from ..services.assessment_service import AnswerSheet
 from .pages.common import Card, divider, set_status
 from .workers import TaskWorker
@@ -72,6 +79,9 @@ class AssessmentDialog(QDialog):
         self._mode = MODE_TEST
         self._comp_groups: list[QButtonGroup] = []
         self._vocab_groups: list[QButtonGroup] = []
+        # 与题目一一对应的“哪里看不懂”输入框，提交时作为 AI 评分参考。
+        self._comp_notes: list[QLineEdit] = []
+        self._vocab_notes: list[QLineEdit] = []
         self.result_profile: Profile | None = None
 
         self.setWindowTitle("水平测评 · Daily English")
@@ -151,10 +161,20 @@ class AssessmentDialog(QDialog):
         layout.addWidget(passage_card)
 
         layout.addWidget(
-            self._build_question_card("一、阅读理解", self._set.comprehension, self._comp_groups)
+            self._build_question_card(
+                "一、阅读理解",
+                self._set.comprehension,
+                self._comp_groups,
+                self._comp_notes,
+            )
         )
         layout.addWidget(
-            self._build_question_card("二、词汇", self._set.vocabulary, self._vocab_groups)
+            self._build_question_card(
+                "二、词汇",
+                self._set.vocabulary,
+                self._vocab_groups,
+                self._vocab_notes,
+            )
         )
 
         translation_card = Card()
@@ -179,7 +199,11 @@ class AssessmentDialog(QDialog):
         return scroll
 
     def _build_question_card(
-        self, title_text: str, questions: tuple[Question, ...], groups: list[QButtonGroup]
+        self,
+        title_text: str,
+        questions: tuple[Question, ...],
+        groups: list[QButtonGroup],
+        notes: list[QLineEdit],
     ) -> Card:
         card = Card()
         title = QLabel(title_text)
@@ -203,7 +227,22 @@ class AssessmentDialog(QDialog):
                 button = QRadioButton(f"{letter}. {option}")
                 group.addButton(button, option_index)
                 block_layout.addWidget(button)
+            # 主动放弃作答：用户不用靠瞎猜，AI 也能知道“这题是真不会”。
+            unknown_letter = chr(ord("A") + len(question.options))
+            unknown_button = QRadioButton(f"{unknown_letter}. {UNKNOWN_LABEL}")
+            unknown_button.setToolTip("不会就选这个；下面的补充说明会一并交给 AI 参考")
+            group.addButton(unknown_button, UNKNOWN_ANSWER)
+            block_layout.addWidget(unknown_button)
             groups.append(group)
+
+            note = QLineEdit()
+            note.setPlaceholderText(
+                "选填：这题哪里看不懂？可以写给 AI 参考，例如“题目里的单词不认识”"
+            )
+            note.setClearButtonEnabled(True)
+            block_layout.addWidget(note)
+            notes.append(note)
+
             card.body.addWidget(block)
         return card
 
@@ -289,7 +328,9 @@ class AssessmentDialog(QDialog):
             self._title_label.setText("先做一次 5 分钟的摸底测评")
             self._subtitle_label.setText(
                 f"这套题按 {self._set.level_hint} 难度设计；"
-                "选择题本地计分，翻译题交给 AI 评分。没有把握的题可以空着。"
+                "选择题本地计分，翻译题交给 AI 评分。"
+                "每道选择题都要作答，不会就选「不知道」；"
+                "选完可以在题目下写一句哪里看不懂，AI 评分时会参考。"
             )
             self._primary_button.setText("提交并评分")
             self._primary_button.setEnabled(True)
@@ -355,10 +396,30 @@ class AssessmentDialog(QDialog):
             comprehension=tuple(group.checkedId() for group in self._comp_groups),
             vocabulary=tuple(group.checkedId() for group in self._vocab_groups),
             translation=self._translation_edit.toPlainText(),
+            comprehension_notes=tuple(note.text().strip() for note in self._comp_notes),
+            vocabulary_notes=tuple(note.text().strip() for note in self._vocab_notes),
         )
+
+    def _unanswered_questions(self) -> int:
+        """统计完全没选的选择题数量。
+
+        注意 `checkedId() == -1` 才是未作答；`UNKNOWN_ANSWER`（-2）是用户
+        主动选的“不知道”，属于有效作答。
+        """
+        groups = (*self._comp_groups, *self._vocab_groups)
+        return sum(1 for group in groups if group.checkedId() == -1)
 
     def _submit(self) -> None:
         if self._worker is not None and self._worker.isRunning():
+            return
+
+        unanswered = self._unanswered_questions()
+        if unanswered:
+            set_status(
+                self._test_status,
+                f"还有 {unanswered} 道选择题没有作答；不会就选「{UNKNOWN_LABEL}」。",
+                "error",
+            )
             return
 
         sheet = self._collect_sheet()

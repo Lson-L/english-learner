@@ -12,6 +12,7 @@ from english_learner.services.ai_client import AIError
 from english_learner.services.level_feedback_service import (
     LevelAdjustment,
     LevelFeedbackService,
+    clamp_reassessed_level,
 )
 from english_learner.storage.db import Database
 
@@ -25,7 +26,7 @@ class FakeCompleter:
         self.calls = 0
         self.messages: list[list[dict[str, str]]] = []
 
-    def complete_json(self, messages, *, temperature=None, max_tokens=None) -> str:
+    def complete_json(self, messages, *, temperature=None, max_tokens=None, task="") -> str:
         self.calls += 1
         self.messages.append(messages)
         reply = self.replies.pop(0)
@@ -121,6 +122,15 @@ def add_word(db: Database, article: Article, lemma: str, created_at: str) -> Wor
 
 def make_service(db: Database, fake: FakeCompleter) -> LevelFeedbackService:
     return LevelFeedbackService(fake, db.profiles, db.articles, db.words)
+
+
+def test_clamp_reassessed_level_limits_step_and_direction() -> None:
+    assert clamp_reassessed_level("B1", "A2", "太难了") == "A2"
+    assert clamp_reassessed_level("C1", "A2", "太难了") == "B2"
+    assert clamp_reassessed_level("B1", "C1", "太难了") == "A2"
+    assert clamp_reassessed_level("B1", "C1", "太简单了") == "B2"
+    assert clamp_reassessed_level("B1", "A2", "太简单了") == "B2"
+    assert clamp_reassessed_level("B1", "Z9", "太难了") == "B1"
 
 
 def test_collect_today_words_prefers_highlighted(db: Database, article: Article) -> None:

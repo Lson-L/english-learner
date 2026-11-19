@@ -138,7 +138,9 @@ class WeeklyReviewService:
             len(quizzes),
             review_count,
         )
-        text = self._client.complete_json(messages, temperature=0.3)
+        text = self._client.complete_json(
+            messages, temperature=0.3, max_tokens=1500, task="每周复盘"
+        )
         try:
             data = parse_json_object(text)
         except JsonParseError as exc:

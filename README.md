@@ -6,10 +6,12 @@
 - GUI：PySide6
 - AI：任何 OpenAI 兼容接口（DeepSeek / Kimi / 通义 / 智谱 / 硅基流动 / OpenRouter / Ollama）
 - 数据：SQLite + 本地 JSON 配置，全部留在本机
-- 当前进度：**M3.11（本地后验与置信度、自适应出题、盲评、双产出题、每周复盘）**
+- 当前进度：**M3.15（AI 调用记录与日志查看；此前含本地后验、自适应出题、盲评、每周复盘）**
 
 产品方向见 [`docs/english_learner/PRODUCT.md`](docs/english_learner/PRODUCT.md)，
-开发进度与下一步任务见 [`docs/english_learner/PROGRESS.md`](docs/english_learner/PROGRESS.md)。
+当前进度与下一步任务见 [`docs/english_learner/PROGRESS.md`](docs/english_learner/PROGRESS.md)；
+架构与踩坑说明见 [`ARCHITECTURE.md`](docs/english_learner/ARCHITECTURE.md)，
+已知问题见 [`TECH_DEBT.md`](docs/english_learner/TECH_DEBT.md)。
 
 ## 核心闭环
 
@@ -53,6 +55,8 @@ uv run english-learner --reconfigure
 | 首页待复习按到期日统计、复习入口 | ✅ M2 |
 | 数据导出（JSON 快照 / CSV 分表） | ✅ M3 |
 | API Key 加密（Windows DPAPI）、请求可取消、错误分类 | ✅ M3 |
+| AI 调用记录（token / 耗时 / 错误落库，设置页看今日与累计用量、调用明细） | ✅ M3.15 |
+| 应用内日志查看器（轮转文件、关键字筛选、自动刷新） | ✅ M3.15 |
 | 生词按原形入库、记录文章词形、AI 记忆方法 | ✅ M3.5 |
 | 复习「忘记 / 模糊」原因收集 + AI 针对性建议 | ✅ M3.5 |
 | 生词本回显复习求助（用户输入 + AI 帮记，最近 5 条） | ✅ M3.10 |
@@ -70,8 +74,8 @@ uv run english-learner --reconfigure
 | Linux | `~/.config/english_learner/` |
 
 - `config.json`：AI 服务地址、Key、模型 id、温度；
-- `logs/app.log`：运行日志（轮转，最多 3 份）；
-- `data.db`：学习数据（文章、生词、高亮、统计、阅读检测）。
+- `logs/app.log`：运行日志（每份 1 MB 轮转，另保留 3 个备份）；
+- `data.db`：学习数据（文章、生词、高亮、统计、阅读检测、AI 调用记录）。
 
 > API Key 在 Windows 上使用系统 DPAPI 加密保存（与当前用户绑定）；其他平台
 > 回退明文并收紧文件权限。设置页可导出 JSON / CSV 备份学习数据。
@@ -101,7 +105,8 @@ src/english_learner/
 │   ├── srs.py              简化 SM-2 调度 + 复习服务（纯本地，不依赖 AI）
 │   ├── review_help_service.py 复习“忘记/模糊”求助：AI 建议 + 记忆方法
 │   ├── secret_store.py     API Key 的 Windows DPAPI 加解密
-│   └── export_service.py   JSON / CSV 数据导出
+│   ├── log_files.py        日志尾部读取、轮转排序与关键字筛选
+│   └── export_service.py   JSON / CSV 数据导出（含 ai_calls）
 └── gui/                    PySide6 视图层
     ├── fonts.py            内置英文字体注册与字体链
     ├── theme.py            全局 QSS
@@ -112,12 +117,14 @@ src/english_learner/
     ├── reading_quiz_dialog.py 阅读检测弹窗（两轮答题 → 讲评/置信度）
     ├── weekly_review_dialog.py 每周复盘弹窗
     ├── review_help_dialog.py 复习求助弹窗（原因 → AI 建议）
+    ├── ai_usage_dialog.py   AI 调用记录与 token 统计
+    ├── log_viewer_dialog.py 应用内运行日志查看器
     ├── main_window.py      侧边导航 + 页面栈
     ├── widgets/            阅读器正文视图、悬浮释义卡
     └── pages/              今日 / 阅读 / 生词本 / 复习 / 设置（后两者 M2 已接真实数据）
 
 run_app.py                  根目录启动入口（PyCharm 右键运行）
-tests/                      存储、JSON、测评、文章、阅读器、阅读检测、等级估计、每周复盘、复习、生词本、导出与 GUI 冒烟测试
+tests/                      存储、JSON、测评、文章、阅读器、阅读检测、等级估计、每周复盘、AI 调用记录、日志读取、复习、生词本、导出与 GUI 冒烟测试
 docs/english_learner/       产品方向、开发进度与后续交接清单
 ```
 

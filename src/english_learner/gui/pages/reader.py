@@ -113,6 +113,7 @@ class ReaderPage(QWidget):
 
         self._panel = WordPanel(self)
         self._panel.add_requested.connect(self._on_add_requested)
+        self._panel.refresh_requested.connect(self._on_refresh_requested)
         self._panel.close_requested.connect(self._hide_word_card)
         shadow = QGraphicsDropShadowEffect(self._panel)
         shadow.setBlurRadius(28)
@@ -343,20 +344,40 @@ class ReaderPage(QWidget):
 
         self._pending = (lemma, start, end, sentence)
         self._current_word_id = None
-        self._panel.show_loading(lemma)
-        self._show_word_card()
-        set_status(self._status, f"正在查询 {lemma} …", "loading")
+        self._start_lookup(word, sentence)
 
+    def _start_lookup(self, word: str, sentence: str, *, refresh: bool = False) -> None:
+        """发起查词请求；refresh=True 时跳过缓存，按当前句子重新查询。"""
+        if self._article is None or self._article.id is None:
+            return
         article_id = self._article.id
         level = self._context.level()
         service = self._context.dictionary_service()
-        worker = TaskWorker(lambda: service.lookup(word, sentence, article_id, level))
+        self._panel.show_loading(word)
+        self._show_word_card()
+        set_status(
+            self._status,
+            f"正在按本句重查 {word} …" if refresh else f"正在查询 {word} …",
+            "loading",
+        )
+        worker = TaskWorker(
+            lambda: service.lookup(word, sentence, article_id, level, refresh=refresh)
+        )
         worker.succeeded.connect(self._on_lookup_ready)
         worker.failed.connect(self._on_lookup_failed)
         worker.cancelled.connect(self._on_worker_finished)
         worker.finished.connect(self._on_worker_finished)
         self._worker = worker
         worker.start()
+
+    def _on_refresh_requested(self) -> None:
+        """用户发现缓存释义与当前语境不符时，按本句重查。"""
+        if self._worker is not None and self._worker.isRunning():
+            return
+        if self._pending is None:
+            return
+        lemma, _, _, sentence = self._pending
+        self._start_lookup(lemma, sentence, refresh=True)
 
     def _on_lookup_ready(self, result: object) -> None:
         if self._pending is None:
@@ -367,7 +388,12 @@ class ReaderPage(QWidget):
             return
         sentence = self._pending[3]
         self._current_word_id = result.word.id
-        self._panel.show_definition(result.word, sentence, cached=result.cached)
+        self._panel.show_definition(
+            result.word,
+            sentence,
+            cached=result.cached,
+            context_mismatch=result.context_mismatch,
+        )
         self._show_word_card()
 
         if self._pending is not None and self._has_highlight_at(self._pending[1], self._pending[2]):

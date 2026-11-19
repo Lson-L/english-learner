@@ -11,9 +11,12 @@ Service 组装好，页面只依赖它，不自己 new 这些东西，方便测�
 
 from __future__ import annotations
 
+import threading
+
 from ..models.entities import Profile
 from ..storage.db import Database
 from ..storage.repositories import (
+    AICallRepo,
     ArticleRepo,
     LevelEvidenceRepo,
     ProfileRepo,
@@ -41,13 +44,43 @@ class AppContext:
         self.config = config.normalized()
         self.store = store
         self.db = db
+        self._client: AIClient | None = None
+        self._retired_clients: list[AIClient] = []
+        self._client_lock = threading.Lock()
 
     # ------------------------------------------------------------------ 配置
     def set_config(self, config: AIConfig) -> None:
-        self.config = config.normalized()
+        """更新配置；旧客户端先退役，避免关闭正在被后台线程使用的连接。"""
+        normalized = config.normalized()
+        with self._client_lock:
+            if self._client is not None and self._client.config != normalized:
+                # 后台任务可能还持有旧 AIClient 的引用，立刻 close 会让请求失败；
+                # 先放进退役列表，等应用退出、线程都结束后统一关闭。
+                self._retired_clients.append(self._client)
+                self._client = None
+            self.config = normalized
 
     def client(self) -> AIClient:
-        return AIClient(self.config)
+        """返回可复用的 AIClient；一次检测的多轮请求共享同一个连接池。
+
+        客户端注入调用记录仓库：每次 AI 请求的 token / 耗时 / 错误都落库，
+        设置页用它展示用量。记录失败不会影响业务请求。
+        """
+        with self._client_lock:
+            if self._client is None:
+                self._client = AIClient(self.config, recorder=self.db.ai_calls)
+            return self._client
+
+    def close(self) -> None:
+        """关闭 AI 连接池（应用退出时调用，避免残留 socket）。"""
+        with self._client_lock:
+            clients = list(self._retired_clients)
+            self._retired_clients.clear()
+            if self._client is not None:
+                clients.append(self._client)
+                self._client = None
+        for client in clients:
+            client.close()
 
     # ------------------------------------------------------------------ 仓库
     @property
@@ -81,6 +114,10 @@ class AppContext:
     @property
     def weekly_review_repo(self) -> WeeklyReviewRepo:
         return self.db.weekly_reviews
+
+    @property
+    def ai_call_repo(self) -> AICallRepo:
+        return self.db.ai_calls
 
     # ------------------------------------------------------------------ 服务
     def assessment_service(self) -> AssessmentService:
@@ -139,6 +176,7 @@ class AppContext:
             self.quiz_repo,
             self.level_evidence_repo,
             self.weekly_review_repo,
+            self.ai_call_repo,
         )
 
     # ------------------------------------------------------------------ 便捷

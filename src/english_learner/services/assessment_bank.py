@@ -13,6 +13,12 @@ from dataclasses import dataclass
 
 OPTION_LETTERS = "ABCD"
 
+# 用户在选择题里主动表示“不会”时使用的作答下标。
+# 用 -2 而不是 -1：-1 仍保留给“未作答”，两者在 Prompt 里要区分开
+# （“不知道”是有效作答，按错误计分；“未作答”说明用户跳过了题）。
+UNKNOWN_ANSWER = -2
+UNKNOWN_LABEL = "不知道"
+
 DEFAULT_SET_KEY = "b"
 
 
@@ -30,6 +36,19 @@ class Question:
         if 0 <= value < len(OPTION_LETTERS):
             return OPTION_LETTERS[value]
         return "-"
+
+    def answer_text(self, index: int) -> str:
+        """把作答下标转成给 AI 看的描述。
+
+        A/B/C/D 之外还有两种非选项作答：`UNKNOWN_ANSWER` 表示用户主动
+        选了“不知道”，其余负数表示未作答。两者对评分的含义不同，不能被
+        统一显示成 “-”。
+        """
+        if index == UNKNOWN_ANSWER:
+            return UNKNOWN_LABEL
+        if index < 0:
+            return "未作答"
+        return self.letter(index)
 
 
 @dataclass(frozen=True)

@@ -25,7 +25,7 @@ from .gui.fonts import load_application_fonts
 from .gui.main_window import MainWindow
 from .gui.onboarding import OnboardingDialog
 from .gui.theme import build_stylesheet
-from .services.config_store import AIConfig, ConfigError, ConfigStore, config_dir
+from .services.config_store import AIConfig, ConfigError, ConfigStore, log_dir
 from .storage.db import Database
 
 logger = logging.getLogger(__name__)
@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 
 def setup_logging() -> None:
     """日志同时写控制台和轮转文件，方便排查用户环境问题。"""
-    log_dir = config_dir() / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    directory = log_dir()
+    directory.mkdir(parents=True, exist_ok=True)
 
     formatter = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -47,7 +47,7 @@ def setup_logging() -> None:
         root.removeHandler(handler)
 
     file_handler = RotatingFileHandler(
-        log_dir / "app.log",
+        directory / "app.log",
         maxBytes=1_000_000,
         backupCount=3,
         encoding="utf-8",

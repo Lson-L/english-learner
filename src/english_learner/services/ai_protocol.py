@@ -18,4 +18,5 @@ class TextCompleter(Protocol):
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        task: str = "",
     ) -> str: ...

@@ -18,9 +18,18 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from ..models.entities import Article, AssessmentResult, Profile, Word, now_iso, today_str
+from ..models.entities import (
+    CEFR_LEVELS,
+    Article,
+    AssessmentResult,
+    Profile,
+    Word,
+    normalize_cefr_level,
+    now_iso,
+    today_str,
+)
 from ..storage.repositories import ArticleRepo, ProfileRepo, WordRepo
 from .ai_client import AIError
 from .ai_protocol import TextCompleter
@@ -33,6 +42,59 @@ logger = logging.getLogger(__name__)
 
 # 重写文章时最多带多少个今日生词；太多会挤占篇幅、伤害流畅度。
 MAX_FEEDBACK_WORDS = 8
+
+# 调级 JSON 的输出额度：只返回评级与简短说明。
+LEVEL_FEEDBACK_MAX_TOKENS = 1200
+
+# 反馈里的方向词：用于本地兜底，防止模型给出与用户感受相反或跨级的结果。
+_DIFFICULT_MARKERS = (
+    "太难",
+    "生词太多",
+    "读不下去",
+    "很吃力",
+    "吃力",
+    "too hard",
+    "too difficult",
+    "hard to read",
+    "difficult to read",
+)
+_EASY_MARKERS = (
+    "太简单",
+    "没挑战",
+    "太容易",
+    "too easy",
+    "too simple",
+    "not challenging",
+)
+
+
+def clamp_reassessed_level(current: str, target: str, feedback: str) -> str:
+    """把“阅读反馈调级”的 AI 结果限制在合理范围。
+
+    规则：
+    1. 等级最多一次变化一档（与阅读检测、每周复盘保持一致）；
+    2. 反馈明确说“太难/吃力”时，不允许升级；
+    3. 反馈明确说“太简单/没挑战”时，不允许降级。
+
+    注意：只在 AI 给出“反方向”时才纠正，不代替 AI 做“必须降/升”的决定；
+    这样模型返回非法等级、回退到当前等级时不会被反馈词误伤。
+    """
+    current_level = normalize_cefr_level(current, "B1")
+    target_level = normalize_cefr_level(target, current_level)
+    current_index = CEFR_LEVELS.index(current_level)
+    target_index = CEFR_LEVELS.index(target_level)
+
+    text = (feedback or "").strip().lower()
+    if any(marker in text for marker in _DIFFICULT_MARKERS) and target_index > current_index:
+        target_index = max(0, current_index - 1)
+    if any(marker in text for marker in _EASY_MARKERS) and target_index < current_index:
+        target_index = min(len(CEFR_LEVELS) - 1, current_index + 1)
+
+    if target_index > current_index:
+        target_index = min(target_index, current_index + 1)
+    elif target_index < current_index:
+        target_index = max(target_index, current_index - 1)
+    return CEFR_LEVELS[target_index]
 
 
 @dataclass(frozen=True)
@@ -105,7 +167,12 @@ class LevelFeedbackService:
             profile.cefr_level,
             len(words),
         )
-        text = self._client.complete_json(messages, temperature=0.2)
+        text = self._client.complete_json(
+            messages,
+            temperature=0.2,
+            max_tokens=LEVEL_FEEDBACK_MAX_TOKENS,
+            task="阅读反馈调级",
+        )
         try:
             data = parse_json_object(text)
         except JsonParseError as exc:
@@ -143,6 +210,15 @@ class LevelFeedbackService:
         # 先取词：重写文章后旧高亮会被级联删除。
         words = self.collect_today_words(article.id, day)
         result = self.reassess(profile, text, words, article)
+        clamped = clamp_reassessed_level(profile.cefr_level, result.cefr, text)
+        if clamped != result.cefr:
+            logger.info(
+                "阅读反馈调级被本地收敛：%s → AI %s → 实际 %s",
+                profile.cefr_level,
+                result.cefr,
+                clamped,
+            )
+            result = replace(result, cefr=clamped)
         result = self._merge_profile_details(profile, result)
         target_words = [word.lemma for word in words]
 
@@ -153,6 +229,9 @@ class LevelFeedbackService:
             article.topic,
             strict_targets=False,
             learner_feedback=text,
+            learner_focus="、".join(
+                item.strip() for item in profile.weaknesses if item and item.strip()
+            ),
             # 明确避开刚读完的这篇，否则模型容易换个说法重写同一篇。
             avoid_titles=[article.title],
         )
@@ -199,4 +278,4 @@ class LevelFeedbackService:
         )
 
 
-__all__ = ["LevelAdjustment", "LevelFeedbackService"]
+__all__ = ["LevelAdjustment", "LevelFeedbackService", "clamp_reassessed_level"]

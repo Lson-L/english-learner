@@ -28,7 +28,7 @@ from .assessment_bank import OPTION_LETTERS, AssessmentSet, Question
 if TYPE_CHECKING:  # 避免与 assessment_service 循环导入
     from .assessment_service import AnswerSheet, ObjectiveScore
 
-PROMPT_VERSION = "m3-11"
+PROMPT_VERSION = "m3-14"
 
 # ---------------------------------------------------------------- 摸底测评
 ASSESSMENT_SYSTEM = (
@@ -49,10 +49,26 @@ def build_assessment_messages(
         f"【起点参考】这套题按 {assessment_set.level_hint} 难度设计；"
         "如果证据不足，就以该等级为准。",
         f"【客观题得分】{score.summary()}",
-        _format_questions("【阅读理解】", assessment_set.comprehension, sheet.comprehension),
-        _format_questions("【词汇】", assessment_set.vocabulary, sheet.vocabulary),
+        _format_questions(
+            "【阅读理解】",
+            assessment_set.comprehension,
+            sheet.comprehension,
+            sheet.comprehension_notes,
+        ),
+        _format_questions(
+            "【词汇】",
+            assessment_set.vocabulary,
+            sheet.vocabulary,
+            sheet.vocabulary_notes,
+        ),
         f"【翻译题】题目：{assessment_set.translation_prompt}",
         f"【用户译文】{sheet.translation.strip() or '（未作答）'}",
+        (
+            "说明：用户答案里的“不知道”表示用户主动承认不会，按答错处理；"
+            "“未作答”表示题目被跳过。“用户补充”是用户对某道题的疑问或自述"
+            "（可能是中文），只能作为判断薄弱点、区分“词汇不认识”和"
+            "“题意没读懂”的参考，不要把它当成答案。"
+        ),
         (
             "请综合客观题正确率与翻译质量给出评级，并输出 JSON：\n"
             "{\n"
@@ -72,14 +88,22 @@ def build_assessment_messages(
     ]
 
 
-def _format_questions(title: str, questions: tuple[Question, ...], answers: tuple[int, ...]) -> str:
+def _format_questions(
+    title: str,
+    questions: tuple[Question, ...],
+    answers: tuple[int, ...],
+    notes: tuple[str, ...] = (),
+) -> str:
     lines = [title]
     for index, question in enumerate(questions):
         lines.append(f"{index + 1}. {question.prompt}")
         for option_index, option in enumerate(question.options):
             lines.append(f"   {OPTION_LETTERS[option_index]}. {option}")
         chosen = answers[index] if index < len(answers) else -1
-        lines.append(f"   标准答案：{question.letter()}；用户答案：{question.letter(chosen)}")
+        lines.append(f"   标准答案：{question.letter()}；用户答案：{question.answer_text(chosen)}")
+        note = notes[index].strip() if index < len(notes) else ""
+        if note:
+            lines.append(f"   用户补充：{note}")
     return "\n".join(lines)
 
 
@@ -104,21 +128,25 @@ def build_article_messages(
     paragraph_min: int = ARTICLE_PARAGRAPH_MIN,
     soft_targets: bool = False,
     learner_feedback: str = "",
+    learner_focus: str = "",
     angle: str = "",
     avoid_titles: list[str] | tuple[str, ...] = (),
     user_request: str = "",
     current_article: Article | None = None,
+    repair_note: str = "",
 ) -> list[dict[str, str]]:
     """每日文章生成请求。target_words 来自生词本里到期的词。
 
     soft_targets=True 用于“按阅读反馈重写文章”：目标是让文章更流畅、更适合
     用户当前状态，生词能自然带上最好，带不上不强制。
     learner_feedback 非空时，把上一篇的阅读感受也告诉模型，让它控制生词密度。
+    learner_focus 是画像里的薄弱点，作为软提示，不要求生硬覆盖。
     angle 是随机的切入角度；avoid_titles 是已经写过的标题，用来防止“换一篇”
     时模型重复同一个选题（例如反复写丝绸之路）。
     user_request 是用户在“换一篇”弹窗里写的要求，优先于默认主题。
     current_article 只在“用户写了换一篇要求”时传入：让模型理解“这篇的风格 /
     这个话题 / 这段结尾”之类指代；没有用户要求时不传，免得模型被原文带偏。
+    repair_note 是上一次校验失败的原因，重试时喂回模型，避免盲目重抽。
     """
     if target_words and soft_targets:
         target_rule = (
@@ -141,7 +169,10 @@ def build_article_messages(
             "另外：文章通顺自然优先；target_words 只统计正文里实际出现过的词，不要硬塞；\n"
         )
     else:
-        target_check = "另外：target_words 里的每个词都必须真实出现在正文中（可用不同大小写）；\n"
+        target_check = (
+            "另外：target_words 里的每个词都必须真实出现在正文中，"
+            "可以使用常见词形变化（复数、过去式、派生词等）；\n"
+        )
 
     feedback_rule = ""
     if learner_feedback.strip():
@@ -149,6 +180,20 @@ def build_article_messages(
             f"补充要求：学习者对上一篇的反馈是“{learner_feedback.strip()[:200]}”。\n"
             "请据此调整：优先使用高频常见词、缩短句子、控制生词密度，"
             f"但整体等级仍保持 CEFR {level}。\n"
+        )
+
+    focus_rule = ""
+    if learner_focus.strip():
+        focus_rule = (
+            f"补充要求：学习者近期的薄弱点是“{learner_focus.strip()[:160]}”。"
+            "如果与当前主题自然契合，可以适当覆盖这些点；不要为了覆盖而牺牲可读性。\n"
+        )
+
+    repair_rule = ""
+    if repair_note.strip():
+        repair_rule = (
+            f"上一次生成未通过本地校验：{repair_note.strip()[:300]}。"
+            "请针对这个问题修正后重新输出完整 JSON，不要解释原因。\n"
         )
 
     subject = topic.strip() or "daily life"
@@ -209,6 +254,8 @@ def build_article_messages(
         f"{target_rule}"
         f"{target_check}"
         f"{feedback_rule}"
+        f"{focus_rule}"
+        f"{repair_rule}"
         "最后：只输出 JSON，不要解释、不要代码围栏。\n\n"
         "JSON 结构：\n"
         "{\n"
@@ -216,8 +263,7 @@ def build_article_messages(
         f'  "level": "{level}",\n'
         f'  "topic": "{subject}",\n'
         '  "paragraphs": ["第一段", "第二段", "第三段"],\n'
-        '  "target_words": ["resilient", "consistent"],\n'
-        '  "glossary": [{"word": "resilient", "meaning_cn": "有韧性的"}]\n'
+        '  "target_words": ["resilient", "consistent"]\n'
         "}"
     )
     return [
@@ -383,14 +429,35 @@ def build_quiz_stage_one_messages(
     article: Article,
     level: str,
     question_count: int = QUIZ_STAGE_ONE_COUNT,
+    *,
+    weak_skills: Sequence[str] = (),
+    repair_note: str = "",
 ) -> list[dict[str, str]]:
-    """第一轮：3 道当前等级选择题，不提前暴露高难度题。"""
+    """第一轮：3 道当前等级选择题，不提前暴露高难度题。
+
+    `weak_skills` 来自最近几次检测的技能正确率，用来让新题优先覆盖薄弱项；
+    `repair_note` 是上一次校验失败的原因，重试时喂回模型。
+    """
     content = article.content.strip()
     if len(content) > 4000:
         content = content[:4000] + "…"
     current = level.strip().upper()
     if current not in CEFR_LEVELS:
         current = "B1"
+
+    focus_rule = ""
+    skills = [skill.strip() for skill in weak_skills if skill and skill.strip()]
+    if skills:
+        focus_rule = (
+            f"9. 优先覆盖这些薄弱技能：{'、'.join(skills[:3])}；"
+            "如果与文章内容冲突，以文章本身为准。\n"
+        )
+    repair_rule = ""
+    if repair_note.strip():
+        repair_rule = (
+            f"上一次出题未通过校验：{repair_note.strip()[:300]}。"
+            "请针对这个问题修正后重新输出完整 JSON。\n"
+        )
 
     user = (
         f"请根据下面这篇 CEFR {article.level} 的英语短文出 {question_count} 道选择题。\n\n"
@@ -405,8 +472,10 @@ def build_quiz_stage_one_messages(
         "5. 干扰项要合理，不要一眼排除；\n"
         "6. answer_index 用 0~3 的整数（0=A，1=B，2=C，3=D）；\n"
         "7. explanation 用中文写正确答案依据，40~120 字；\n"
-        "8. 不要出短答题，不要出高难度题。\n\n"
-        "只输出 JSON：\n"
+        "8. 不要出短答题，不要出高难度题；\n"
+        f"{focus_rule}"
+        f"{repair_rule}"
+        "\n只输出 JSON：\n"
         "{\n"
         '  "questions": [\n'
         "    {\n"
@@ -439,10 +508,13 @@ def build_quiz_stage_two_messages(
     target_level: str,
     *,
     choice_count: int = QUIZ_STAGE_TWO_CHOICE_COUNT,
+    weak_skills: Sequence[str] = (),
+    repair_note: str = "",
 ) -> list[dict[str, str]]:
     """第二轮：2 道边界难度选择题 + 1 道短答 + 1 道句子改写。
 
     `target_level` 由第一轮正确率决定：答得好往上一档探测，答得差别往下确认。
+    `weak_skills` 让新题优先覆盖薄弱技能；`repair_note` 用于重试时带回失败原因。
     """
     content = article.content.strip()
     if len(content) > 4000:
@@ -453,6 +525,20 @@ def build_quiz_stage_two_messages(
     target = target_level.strip().upper()
     if target not in CEFR_LEVELS:
         target = current
+
+    focus_rule = ""
+    skills = [skill.strip() for skill in weak_skills if skill and skill.strip()]
+    if skills:
+        focus_rule = (
+            f"6. 优先覆盖这些薄弱技能：{'、'.join(skills[:3])}；"
+            "如果与文章内容冲突，以文章本身为准。\n"
+        )
+    repair_rule = ""
+    if repair_note.strip():
+        repair_rule = (
+            f"上一次出题未通过校验：{repair_note.strip()[:300]}。"
+            "请针对这个问题修正后重新输出完整 JSON。\n"
+        )
 
     user = (
         f"学习者刚刚完成了 {QUIZ_STAGE_ONE_COUNT} 道 {current} 难度的基础题。"
@@ -469,8 +555,10 @@ def build_quiz_stage_two_messages(
         f"难度 {current}~{target}；\n"
         "3. 选择题要覆盖不同技能，干扰项合理；\n"
         "4. answer_index 用 0~3 的整数；explanation 用中文写依据/评分要点；\n"
-        "5. 两道产出题都要给 reference_answer；不要出成选择题。\n\n"
-        "只输出 JSON：\n"
+        "5. 两道产出题都要给 reference_answer；不要出成选择题；\n"
+        f"{focus_rule}"
+        f"{repair_rule}"
+        "\n只输出 JSON：\n"
         "{\n"
         '  "questions": [\n'
         "    {\n"
@@ -508,8 +596,9 @@ def build_quiz_stage_two_messages(
 
 
 QUESTION_REVIEW_SYSTEM = (
-    "你是一名严格的英语试题审核员。你会检查选择题是否答案唯一、干扰项是否合理、"
-    "是否必须读文章才能作答。你只输出 JSON 对象，不输出解释或代码围栏。"
+    "你是一名严格的英语试题审核员。你会先独立作答，再判断题目是否答案唯一、"
+    "干扰项是否合理、是否必须读文章才能作答。你只输出 JSON 对象，"
+    "不输出解释或代码围栏。"
 )
 
 
@@ -517,22 +606,23 @@ def build_question_review_messages(
     article: Article,
     questions: Sequence[object],
 ) -> list[dict[str, str]]:
-    """题目审核 pass：返回不合格题目的下标（0 开始）。
+    """题目审核 pass：独立作答 + 标出不合格题。
 
+    关键设计：**不告诉模型出题人标注的答案**，让它像考生一样独立作答；
+    调用方再用本地答案键比对，发现“模型独立作答与标注答案不一致”的题。
+    这比只问“答案是否唯一”更容易发现答案键标错。
     审核失败时调用方会保留原题，不能因为审核模型抽风就让整个检测不可用。
     """
     lines: list[str] = []
     for index, question in enumerate(questions):
         prompt = str(getattr(question, "prompt", ""))
         options = getattr(question, "options", ()) or ()
-        answer_index = int(getattr(question, "answer_index", -1))
         if options:
             option_lines = "\n".join(
                 f"   {chr(ord('A') + position)}. {option}"
                 for position, option in enumerate(options)
             )
-            answer = chr(ord("A") + answer_index) if 0 <= answer_index < len(options) else "未提供"
-            lines.append(f"[{index}] 选择题：{prompt}\n{option_lines}\n   标注答案：{answer}")
+            lines.append(f"[{index}] 选择题：{prompt}\n{option_lines}")
         else:
             reference = str(getattr(question, "reference_answer", "") or "（未提供）")
             lines.append(f"[{index}] 产出题：{prompt}\n   参考要点：{reference}")
@@ -541,7 +631,8 @@ def build_question_review_messages(
     if len(content) > 3000:
         content = content[:3000] + "…"
     user = (
-        "请审核下面这组阅读题，只挑出**明确不合格**的题：\n"
+        "请审核下面这组阅读题。请先**不看任何标注答案**，像考生一样独立作答，"
+        "然后只挑出**明确不合格**的题：\n"
         "- 答案不唯一、两个选项都说得通；\n"
         "- 答案与文章依据矛盾；\n"
         "- 不读文章也能凭常识答对；\n"
@@ -551,8 +642,13 @@ def build_question_review_messages(
         f"【正文】\n{content}\n\n"
         "【题目】\n" + "\n\n".join(lines) + "\n\n"
         "只输出 JSON：\n"
-        '{"invalid_indices": [0], "reasons": ["第 0 题两个选项都可以"]}\n'
-        "规则：下标从 0 开始；没有不合格题时返回空数组；不要因为风格偏好判不合格。"
+        '{"answers": [1, 2, null, null], '
+        '"invalid_indices": [0], "reasons": ["第 0 题两个选项都可以"]}\n'
+        "规则：\n"
+        "- answers 与题目顺序一一对应；选择题填你独立作答的选项下标（0~3），"
+        "产出题填 null；\n"
+        "- invalid_indices 只放你确认不合格的选择题下标；产出题不要放进这里；\n"
+        "- 下标从 0 开始；没有问题就返回空数组；不要因为风格偏好判不合格。"
     )
     return [
         {"role": "system", "content": QUESTION_REVIEW_SYSTEM},
@@ -650,12 +746,14 @@ def build_quiz_grading_messages(
     history: Sequence[QuizHistoryEntry] = (),
     difficulty_stats: Sequence[object] = (),
     skill_stats: Sequence[object] = (),
+    repair_note: str = "",
 ) -> list[dict[str, str]]:
     """答题后的讲评请求（讲评模型可以看到当前等级）。
 
     选择题得分由本地算好（AI 不重算）；每道主动产出题由 AI 给 0/1 分。
     等级建议不在这里做——Phase 3 起由不看当前等级的盲评模型单独给，
     本函数只负责讲评、产出题评分与薄弱点总结。
+    `repair_note` 用于“上一次漏了产出题分数”时的定向重试。
     """
     texts = list(production_texts) or [short_answer_text]
     lines: list[str] = []
@@ -706,6 +804,12 @@ def build_quiz_grading_messages(
     production_feedback_example = ", ".join(
         f'"第 {index} 道产出题的反馈"' for index in range(1, max(1, production_total) + 1)
     )
+    repair_rule = ""
+    if repair_note.strip():
+        repair_rule = (
+            f"\n\n上一次输出有问题：{repair_note.strip()[:300]}。"
+            "请严格按上面的 JSON 结构重新输出完整结果。"
+        )
 
     user = (
         "学习者读完了下面这篇文章，并完成了一套阅读检测"
@@ -749,7 +853,7 @@ def build_quiz_grading_messages(
         "- production_scores 与产出题顺序一一对应（共 "
         + str(production_total)
         + " 条，每条 0 或 1）；\n"
-        "- strengths/weaknesses 各 1~3 条中文短语；comment 不超过 100 字。"
+        "- strengths/weaknesses 各 1~3 条中文短语；comment 不超过 100 字。" + repair_rule
     )
     return [
         {"role": "system", "content": QUIZ_GRADING_SYSTEM},

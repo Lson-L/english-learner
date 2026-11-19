@@ -17,10 +17,13 @@ import json
 import sqlite3
 from dataclasses import replace
 from datetime import date, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..models.entities import (
     CEFR_LEVELS,
+    AICall,
+    AIUsageByTask,
+    AIUsageSummary,
     Article,
     BandReviewStat,
     DailyStats,
@@ -993,3 +996,127 @@ class StatsRepo(_BaseRepo):
             streak += 1
             current -= timedelta(days=1)
         return streak
+
+
+class AICallRepo(_BaseRepo):
+    """AI 调用记录：只追加，不修改。
+
+    `since` 是日期字符串（YYYY-MM-DD），用 `called_at >= since` 过滤；
+    `called_at` 统一是本地 ISO 时间，字典序与时间序一致。
+    """
+
+    _SUMMARY_COLUMNS = """
+        COUNT(*) AS calls,
+        COALESCE(SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0) AS failed_calls,
+        COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+        COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+        COALESCE(SUM(total_tokens), 0) AS total_tokens,
+        COALESCE(CAST(AVG(latency_ms) AS INTEGER), 0) AS avg_latency_ms
+    """
+
+    def insert(self, call: AICall) -> AICall:
+        params = call.to_params()
+        if not params["called_at"]:
+            params["called_at"] = now_iso()
+        columns = ", ".join(params)
+        placeholders = ", ".join(f":{name}" for name in params)
+        cursor = self._db.execute(
+            f"INSERT INTO ai_calls ({columns}) VALUES ({placeholders})", params
+        )
+        return replace(call, id=int(cursor.lastrowid or 0), called_at=params["called_at"])
+
+    def get_by_id(self, call_id: int) -> AICall | None:
+        row = self._db.query_one("SELECT * FROM ai_calls WHERE id = ?", (int(call_id),))
+        return AICall.from_row(row) if row is not None else None
+
+    def list_recent(
+        self,
+        limit: int = 500,
+        *,
+        task: str | None = None,
+        only_failed: bool = False,
+        since: str | None = None,
+    ) -> list[AICall]:
+        """最近调用（按时间倒序）；limit 只影响展示，不影响统计。"""
+        clauses, params = self._filters(task=task, only_failed=only_failed, since=since)
+        sql = "SELECT * FROM ai_calls"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY called_at DESC, id DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        return [AICall.from_row(row) for row in self._db.query_all(sql, tuple(params))]
+
+    def summary(self, *, since: str | None = None) -> AIUsageSummary:
+        """调用次数、失败数与 token 汇总；未返回 usage 的调用不计 token。"""
+        clause, params = self._where(since=since)
+        row = self._db.query_one(
+            f"SELECT {self._SUMMARY_COLUMNS} FROM ai_calls{clause}", tuple(params)
+        )
+        return AIUsageSummary.from_row(row) if row is not None else AIUsageSummary()
+
+    def by_task(self, *, since: str | None = None, limit: int = 50) -> list[AIUsageByTask]:
+        """按任务聚合，调用次数多的在前。"""
+        clause, params = self._where(since=since)
+        params.append(max(1, int(limit)))
+        rows = self._db.query_all(
+            f"""
+            SELECT task,
+                   COUNT(*) AS calls,
+                   COALESCE(SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0) AS failed_calls,
+                   COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                   COALESCE(CAST(AVG(latency_ms) AS INTEGER), 0) AS avg_latency_ms
+            FROM ai_calls{clause}
+            GROUP BY task
+            ORDER BY calls DESC, total_tokens DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        )
+        return [AIUsageByTask.from_row(row) for row in rows]
+
+    def task_options(self) -> tuple[str, ...]:
+        """出现过的任务名（供界面筛选下拉框）。"""
+        rows = self._db.query_all(
+            "SELECT DISTINCT task FROM ai_calls WHERE task <> '' ORDER BY task"
+        )
+        return tuple(str(row["task"]) for row in rows)
+
+    def list_all(self) -> list[AICall]:
+        """全部调用记录（导出用），按时间升序。"""
+        rows = self._db.query_all("SELECT * FROM ai_calls ORDER BY called_at, id")
+        return [AICall.from_row(row) for row in rows]
+
+    def count(self) -> int:
+        row = self._db.query_one("SELECT COUNT(*) AS n FROM ai_calls")
+        return int(row["n"]) if row is not None else 0
+
+    def delete_all(self) -> int:
+        """清空调用记录；返回删除行数。"""
+        cursor = self._db.execute("DELETE FROM ai_calls")
+        return int(cursor.rowcount or 0)
+
+    @staticmethod
+    def _where(*, since: str | None = None) -> tuple[str, list[Any]]:
+        if since:
+            return " WHERE called_at >= ?", [since]
+        return "", []
+
+    @classmethod
+    def _filters(
+        cls,
+        *,
+        task: str | None = None,
+        only_failed: bool = False,
+        since: str | None = None,
+    ) -> tuple[list[str], list[Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if since:
+            clauses.append("called_at >= ?")
+            params.append(since)
+        if task:
+            clauses.append("task = ?")
+            params.append(task)
+        if only_failed:
+            clauses.append("ok = 0")
+        return clauses, params

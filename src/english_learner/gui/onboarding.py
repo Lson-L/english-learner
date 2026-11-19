@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
-    QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -183,18 +182,17 @@ class OnboardingDialog(QDialog):
         self._model_edit.setPlaceholderText("deepseek-chat")
         form.addRow(self._field_label("模型 id"), self._model_edit)
 
-        self._temperature_spin = QDoubleSpinBox()
-        self._temperature_spin.setRange(0.0, 2.0)
-        self._temperature_spin.setSingleStep(0.1)
-        self._temperature_spin.setDecimals(1)
-        self._temperature_spin.setValue(0.7)
-        form.addRow(self._field_label("温度"), self._temperature_spin)
+        # 温度是内部按任务调的（出题 0.6、讲评 0.2…），不再暴露给用户，
+        # 避免设置了一个实际上不生效的数值。
+        self._temperature = 0.7
 
         card.body.addLayout(form)
 
         hint = QLabel(
             "提示：base_url 一般以 /v1 结尾（本地 Ollama 为 http://localhost:11434/v1）；"
-            "模型 id 以服务商控制台为准。"
+            "模型 id 以服务商控制台为准。本项目只支持 OpenAI 兼容接口，"
+            "若地址路径含 /anthropic 请换成该服务的 OpenAI 兼容地址"
+            "（如 https://opencode.ai/inference/go/openai/v1）。"
         )
         hint.setObjectName("muted")
         hint.setWordWrap(True)
@@ -222,7 +220,6 @@ class OnboardingDialog(QDialog):
 
         for edit in (self._url_edit, self._key_edit, self._model_edit):
             edit.textChanged.connect(self._invalidate_test)
-        self._temperature_spin.valueChanged.connect(self._invalidate_test)
         return page
 
     def _build_done_page(self) -> QWidget:
@@ -296,7 +293,7 @@ class OnboardingDialog(QDialog):
         self._url_edit.setText(config.base_url)
         self._key_edit.setText(config.api_key)
         self._model_edit.setText(config.model)
-        self._temperature_spin.setValue(config.temperature)
+        self._temperature = config.temperature
         for index, preset in enumerate(PRESETS, start=1):
             if preset.base_url == config.base_url:
                 self._preset_combo.setCurrentIndex(index)
@@ -321,7 +318,7 @@ class OnboardingDialog(QDialog):
             base_url=self._url_edit.text(),
             api_key=self._key_edit.text(),
             model=self._model_edit.text(),
-            temperature=self._temperature_spin.value(),
+            temperature=self._temperature,
         ).normalized()
 
     # --------------------------------------------------------------- 流程
@@ -435,7 +432,6 @@ class OnboardingDialog(QDialog):
             self._url_edit,
             self._key_edit,
             self._model_edit,
-            self._temperature_spin,
             self._show_key_check,
             self._test_button,
             self._back_button,
