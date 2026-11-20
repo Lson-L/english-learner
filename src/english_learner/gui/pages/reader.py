@@ -28,8 +28,11 @@ from PySide6.QtWidgets import (
 
 from ...models.entities import Article, Highlight, now_iso, today_str
 from ...services.app_context import AppContext
+from ...services.back_translation import SCORE_PER_SENTENCE
 from ...services.dictionary_service import LookupResult, normalize_lemma
+from ...services.readability import ReadabilityMetrics, threshold_warnings
 from ...services.reading_quiz_service import UPGRADE_EVIDENCE_REQUIRED
+from ..back_translation_dialog import BackTranslationDialog
 from ..level_feedback_dialog import LevelFeedbackDialog
 from ..reading_quiz_dialog import ReadingQuizDialog
 from ..regenerate_dialog import RegenerateDialog
@@ -80,6 +83,14 @@ class ReaderPage(QWidget):
         self._quiz_button.clicked.connect(self._on_quiz_clicked)
         header_row.addWidget(self._quiz_button, 0, Qt.AlignmentFlag.AlignBottom)
 
+        self._back_translation_button = QPushButton("回译练习")
+        self._back_translation_button.setObjectName("secondaryButton")
+        self._back_translation_button.setToolTip(
+            "从文章里抽 3 句翻成中文，你写回英文；AI 给最小修改与原因（不影响等级）"
+        )
+        self._back_translation_button.clicked.connect(self._on_back_translation_clicked)
+        header_row.addWidget(self._back_translation_button, 0, Qt.AlignmentFlag.AlignBottom)
+
         self._regenerate_button = QPushButton("换一篇")
         self._regenerate_button.setObjectName("secondaryButton")
         self._regenerate_button.setToolTip("写下想读的内容再换一篇；留空则由 AI 自己选题")
@@ -128,6 +139,7 @@ class ReaderPage(QWidget):
 
         self._generate_button.setVisible(False)
         self._quiz_button.setEnabled(False)
+        self._back_translation_button.setEnabled(False)
         self._regenerate_button.setEnabled(False)
         self._feedback_button.setEnabled(False)
         set_status(self._status, "进入本页会自动准备今天的文章。", "hint")
@@ -156,6 +168,7 @@ class ReaderPage(QWidget):
             self._meta_label.setText("")
             self._quiz_button.setText("阅读完成")
             self._quiz_button.setEnabled(False)
+            self._back_translation_button.setEnabled(False)
             self._feedback_button.setEnabled(False)
             self._start_generation(regenerate=False)
             return
@@ -175,9 +188,18 @@ class ReaderPage(QWidget):
         meta_parts = [article.level, f"{article.word_count} 词"]
         if article.topic:
             meta_parts.append(article.topic)
+        # M5.3：本地可读性指标（旧文章没有 metrics 时整段不显示）。
+        metrics = ReadabilityMetrics.from_dict(article.metrics)
+        if metrics is not None and metrics.wordlist_size > 0 and metrics.word_total:
+            meta_parts.append(f"生词 {metrics.unknown_ratio:.1%}")
+            if metrics.target_total:
+                meta_parts.append(f"目标词 {metrics.target_total} 个")
+            if threshold_warnings(metrics, self._context.readability_thresholds()):
+                meta_parts.append("偏难")
         self._meta_label.setText(" · ".join(meta_parts))
 
         self._generate_button.setVisible(False)
+        self._back_translation_button.setEnabled(True)
         self._regenerate_button.setEnabled(True)
         self._feedback_button.setEnabled(self._context.profile() is not None)
         self._refresh_quiz_button(article)
@@ -285,6 +307,29 @@ class ReaderPage(QWidget):
                 f"等级保持 {quiz.result_level or self._context.level()}。"
             )
         set_status(self._status, text, "success")
+
+    def _on_back_translation_clicked(self) -> None:
+        """回译练习：看中文写英文，AI 只做练习反馈，不影响等级与复习。"""
+        if self._article is None or self._article.id is None:
+            return
+        if self._worker is not None and self._worker.isRunning():
+            return
+
+        self._hide_word_card()
+        dialog = BackTranslationDialog(self._context, self._article, parent=self)
+        dialog.exec()
+
+        attempts = dialog.result_attempts
+        if not attempts:
+            return
+        total = sum(item.score for item in attempts)
+        maximum = len(attempts) * SCORE_PER_SENTENCE
+        correct = sum(1 for item in attempts if item.score >= SCORE_PER_SENTENCE)
+        set_status(
+            self._status,
+            f"回译练习完成：{total}/{maximum} 分，{correct} 句完全正确；修改与原因见练习弹窗。",
+            "success",
+        )
 
     def _on_feedback_clicked(self) -> None:
         """写下阅读感受 → AI 重新定级并换一篇。"""
@@ -474,6 +519,7 @@ class ReaderPage(QWidget):
         self._quiz_button.setEnabled(
             (not busy) and has_article and self._context.profile() is not None
         )
+        self._back_translation_button.setEnabled((not busy) and has_article)
         self._regenerate_button.setEnabled((not busy) and has_article)
         self._feedback_button.setEnabled(
             (not busy) and has_article and self._context.profile() is not None

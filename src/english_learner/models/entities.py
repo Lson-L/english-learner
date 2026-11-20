@@ -68,6 +68,29 @@ def dump_str_list(values: tuple[str, ...] | list[str]) -> str:
     return json.dumps(list(values), ensure_ascii=False)
 
 
+def load_json_dict(value: Any) -> dict[str, Any] | None:
+    """把 JSON 对象列读成 dict；空串、非法 JSON、空对象一律返回 None。
+
+    用于“可能没有数据”的可选字段（如 M5.3 的文章可读性指标）：
+    旧文章 / 旧库升级后这一列为空串，调用方据此走“无指标”分支。
+    """
+    if isinstance(value, dict):
+        return dict(value) or None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data else None
+
+
+def dump_json_dict(value: dict[str, Any] | None) -> str:
+    """dict → JSON 文本；None / 空 dict 写成空串（与 `load_json_dict` 对称）。"""
+    return json.dumps(value, ensure_ascii=False) if value else ""
+
+
 # --------------------------------------------------------------- 学习画像
 @dataclass(frozen=True)
 class Profile:
@@ -135,6 +158,8 @@ class Article:
     topic: str = ""
     word_count: int = 0
     target_words: tuple[str, ...] = ()
+    # M5.3 本地可读性指标（不参与等级判定）；旧文章为 None。
+    metrics: dict[str, Any] | None = None
     read_at: str | None = None
     created_at: str = ""
     id: int | None = None
@@ -150,6 +175,7 @@ class Article:
             topic=str(row["topic"] or ""),
             word_count=int(row["word_count"]),
             target_words=load_str_list(row["target_words_json"]),
+            metrics=load_json_dict(row["metrics_json"]),
             read_at=row["read_at"],
             created_at=str(row["created_at"] or ""),
         )
@@ -164,6 +190,7 @@ class Article:
             "topic": self.topic,
             "word_count": int(self.word_count),
             "target_words_json": dump_str_list(self.target_words),
+            "metrics_json": dump_json_dict(self.metrics),
             "read_at": self.read_at,
             "created_at": self.created_at,
         }
@@ -798,6 +825,67 @@ def _load_posterior(value: Any) -> tuple[float, ...]:
     if not data:
         return ()
     return tuple(float(data.get(level) or 0.0) for level in CEFR_LEVELS)
+
+
+# --------------------------------------------------------------- 回译练习
+@dataclass(frozen=True)
+class WritingAttempt:
+    """回译练习的一条记录：英文原句、中文参考、用户英文与 AI 批改结果。
+
+    一篇文章最多 3 条（`position` 0~2）。首次打开练习时写入题目
+    （sentence_en / reference_cn），提交批改后回写 answer_en / verdict /
+    score / graded_at；重复打开只读缓存，不重复请求 AI。
+
+    `verdict` 是单句批改 JSON（`edited` / `reason` / `error_types`），
+    与 `Article.metrics` 一样用 dict 存储，避免 models 反向依赖 services。
+    `graded_at` 为空表示还没提交过批改；`score` 只有 0 / 2 两档。
+    """
+
+    article_id: int
+    article_date: str
+    position: int = 0
+    sentence_en: str = ""
+    reference_cn: str = ""
+    answer_en: str = ""
+    verdict: dict[str, Any] | None = None
+    score: int = 0
+    created_at: str = ""
+    graded_at: str | None = None
+    id: int | None = None
+
+    @property
+    def graded(self) -> bool:
+        return self.graded_at is not None
+
+    @classmethod
+    def from_row(cls, row: Any) -> WritingAttempt:
+        return cls(
+            id=int(row["id"]),
+            article_id=int(row["article_id"]),
+            article_date=str(row["article_date"] or ""),
+            position=int(row["position"] or 0),
+            sentence_en=str(row["sentence_en"] or ""),
+            reference_cn=str(row["reference_cn"] or ""),
+            answer_en=str(row["answer_en"] or ""),
+            verdict=load_json_dict(row["verdict_json"]),
+            score=int(row["score"] or 0),
+            created_at=str(row["created_at"] or ""),
+            graded_at=row["graded_at"],
+        )
+
+    def to_params(self) -> dict[str, Any]:
+        return {
+            "article_id": int(self.article_id),
+            "article_date": self.article_date,
+            "position": int(self.position),
+            "sentence_en": self.sentence_en,
+            "reference_cn": self.reference_cn,
+            "answer_en": self.answer_en,
+            "verdict_json": dump_json_dict(self.verdict),
+            "score": int(self.score),
+            "created_at": self.created_at,
+            "graded_at": self.graded_at,
+        }
 
 
 @dataclass(frozen=True)

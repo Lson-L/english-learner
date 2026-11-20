@@ -1,9 +1,10 @@
 """复习页：卡片式间隔重复，四档反馈，完全本地运行。
 
-两种正面（对应 HISTORY.md M2 / M3.16）：
-- 看词回忆（默认）：正面给单词、音标和当初的上下文，先回忆再看答案；
-- 拼写回忆：正面只给中文释义和挖空例句，输入英文后回车判分，再按 1~4 评分；
-- 空格 / 回车翻面，翻面后用 1~4 或按钮选择「忘记 / 模糊 / 认识 / 太简单」；
+卡片形态由 `services.review_plan` 自动编排，用户不再选择模式：
+- 看词回忆：正面给单词、音标和当初的上下文，先回忆再看答案；
+- 拼写回忆：正面只给中文释义和挖空例句，输入英文后回车判分；
+- 看词 + 拼写（双阶段）：先看词回忆，翻面后遮住词形再默写一次，
+  同一张卡只评分一次、只调度一次；
 - 一轮复习取今天所有到期词（最多 200 个），结束后显示本轮统计；
 - 复习只做本地 SQLite 读写，不走 TaskWorker、不依赖网络。
 """
@@ -11,12 +12,10 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QComboBox,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -30,11 +29,6 @@ from PySide6.QtWidgets import (
 
 from ...models.entities import Word
 from ...services.app_context import AppContext
-from ...services.config_store import (
-    REVIEW_MODE_RECOGNITION,
-    REVIEW_MODE_SPELLING,
-    ConfigError,
-)
 from ...services.recall import (
     STATUS_CORRECT,
     STATUS_NEAR,
@@ -43,6 +37,13 @@ from ...services.recall import (
     SpellingPrompt,
     build_spelling_prompt,
     check_spelling,
+)
+from ...services.review_plan import (
+    CARD_DUAL,
+    CARD_RECOGNITION,
+    CARD_SPELLING,
+    ReviewCard,
+    build_session_plan,
 )
 from ...services.srs import (
     RATING_EASY,
@@ -66,28 +67,37 @@ _RATING_SPECS: tuple[tuple[int, str, str], ...] = (
     (RATING_EASY, "太简单 (4)", "ratingEasy"),
 )
 
+_MODE_TITLES = {
+    CARD_RECOGNITION: "看词回忆",
+    CARD_SPELLING: "拼写回忆",
+    CARD_DUAL: "看词 + 拼写",
+}
+
+_IDLE_HINT = (
+    "系统会按每个词的学习阶段自动安排：新词先看词回忆，熟悉后加入拼写；"
+    "忘记或写错的词会先认一遍再默写。"
+)
+
 
 class ReviewPage(QWidget):
     def __init__(self, context: AppContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._context = context
 
-        # 复习模式来自 config.json 的 ui 段；会话中不允许切换。
-        self._ui = context.store.load_ui()
-        self._review_mode = self._ui.review_mode
-
-        # 会话状态：_session 是本次排队的所有词，_index 指向当前卡片。
-        self._session: list[Word] = []
+        # 会话状态：_session 是本次排好的卡片，_index 指向当前卡片。
+        self._session: list[ReviewCard] = []
         self._index = 0
         self._current: Word | None = None
+        self._current_mode = CARD_RECOGNITION
         self._revealed = False
         self._reviewed = 0
         self._recalled = 0
+        self._mode_counts = {CARD_RECOGNITION: 0, CARD_SPELLING: 0, CARD_DUAL: 0}
 
-        # 拼写模式当前卡片的题面与判分结果；None 表示没走拼写或已跳过。
-        self._spelling_active = False
+        # 拼写输入状态：题面、判分结果、输入框是否可编辑。
         self._prompt: SpellingPrompt | None = None
         self._recall_result: RecallResult | None = None
+        self._spell_input_active = False
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._build_ui()
@@ -102,7 +112,8 @@ class ReviewPage(QWidget):
         layout.addWidget(
             PageHeader(
                 "复习",
-                "只复习今天到期的词：看词回忆或拼写回忆，再按 1~4 反馈记得牢不牢。全程离线可用。",
+                "只复习今天到期的词；系统自动在看词回忆与拼写回忆之间穿插，"
+                "翻面后按 1~4 反馈记得牢不牢。全程离线可用。",
             )
         )
 
@@ -112,17 +123,6 @@ class ReviewPage(QWidget):
         self._due_label.setObjectName("muted")
         status_row.addWidget(self._due_label)
         status_row.addStretch(1)
-
-        mode_label = QLabel("复习模式")
-        mode_label.setObjectName("muted")
-        status_row.addWidget(mode_label)
-        self._mode_combo = QComboBox()
-        self._mode_combo.addItem("看词回忆", REVIEW_MODE_RECOGNITION)
-        self._mode_combo.addItem("拼写回忆", REVIEW_MODE_SPELLING)
-        # 先设好选中项再连信号，避免构造期间误触发一次保存。
-        self._mode_combo.setCurrentIndex(max(self._mode_combo.findData(self._review_mode), 0))
-        self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
-        status_row.addWidget(self._mode_combo)
         layout.addLayout(status_row)
 
         card = QFrame()
@@ -180,11 +180,18 @@ class ReviewPage(QWidget):
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(12)
 
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(10)
         self._progress_label = QLabel("")
         self._progress_label.setObjectName("muted")
-        box.addWidget(self._progress_label)
+        progress_row.addWidget(self._progress_label)
+        progress_row.addStretch(1)
+        self._mode_label = QLabel("")
+        self._mode_label.setObjectName("muted")
+        progress_row.addWidget(self._mode_label)
+        box.addLayout(progress_row)
 
-        # 拼写模式的正脸：只给释义和挖空例句，原词 / 音标 / 原形都先藏起来。
+        # 拼写正面 / 双阶段默写：只给释义和挖空例句，原词 / 音标 / 原形都藏起来。
         self._spelling_box = QWidget()
         spelling = QVBoxLayout(self._spelling_box)
         spelling.setContentsMargins(0, 0, 0, 0)
@@ -348,50 +355,34 @@ class ReviewPage(QWidget):
     def _install_shortcuts(self) -> None:
         """空格/回车翻面，1~4 评分；只在复习页及其子控件获得焦点时生效。"""
         self._shortcuts: list[QShortcut] = []
+        self._reveal_shortcuts: list[QShortcut] = []
+        self._rating_shortcuts: list[QShortcut] = []
         for key in ("Space", "Return"):
             shortcut = QShortcut(QKeySequence(key), self)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             shortcut.activated.connect(self._reveal)
+            self._reveal_shortcuts.append(shortcut)
             self._shortcuts.append(shortcut)
 
         for rating, _text, _object_name in _RATING_SPECS:
             shortcut = QShortcut(QKeySequence(str(rating)), self)
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             shortcut.activated.connect(lambda r=rating: self._rate(r))
+            self._rating_shortcuts.append(shortcut)
             self._shortcuts.append(shortcut)
 
     def _set_shortcuts_enabled(self, enabled: bool) -> None:
-        """拼写输入阶段禁用全部快捷键，否则空格/回车/数字会被 QShortcut 抢走。"""
         for shortcut in self._shortcuts:
             shortcut.setEnabled(enabled)
 
-    def _on_mode_changed(self, index: int) -> None:
-        """切换复习模式并写入 ui 偏好；会话进行中不允许改。"""
-        mode = str(self._mode_combo.itemData(index) or REVIEW_MODE_RECOGNITION)
-        if mode == self._review_mode:
-            return
-        if self._is_session_active():
-            self._mode_combo.setCurrentIndex(self._mode_combo.findData(self._review_mode))
-            return
+    def _set_reveal_shortcuts_enabled(self, enabled: bool) -> None:
+        """空格/回车在拼写输入阶段必须禁用，否则会被 QShortcut 抢走。"""
+        for shortcut in self._reveal_shortcuts:
+            shortcut.setEnabled(enabled)
 
-        self._review_mode = mode
-        self._ui = replace(self._context.store.load_ui(), review_mode=mode)
-        try:
-            self._context.store.save_ui(self._ui)
-        except (ConfigError, OSError) as exc:
-            # 保存失败不影响本次切换，只提示一下，下次启动回到旧偏好。
-            set_status(self._status, f"复习模式已切换，但偏好保存失败：{exc}", "error")
-        else:
-            set_status(self._status, "复习模式已保存。", "hint")
-
-        if self._stack.currentWidget() is self._idle_page:
-            self._update_idle_hint()
-
-    def _update_idle_hint(self) -> None:
-        if self._review_mode == REVIEW_MODE_SPELLING:
-            self._idle_hint.setText("卡片正面只给中文释义和挖空例句，先拼出英文，再看答案核对。")
-        else:
-            self._idle_hint.setText("卡片正面只给单词和当初的上下文；想起来了再翻面。")
+    def _set_rating_shortcuts_enabled(self, enabled: bool) -> None:
+        for shortcut in self._rating_shortcuts:
+            shortcut.setEnabled(enabled)
 
     # -------------------------------------------------------------- 生命周期
     def on_activated(self) -> None:
@@ -412,15 +403,15 @@ class ReviewPage(QWidget):
             self._start_button.setEnabled(False)
         else:
             self._idle_title.setText(f"今天有 {due_count} 个词到期")
-            self._update_idle_hint()
+            self._idle_hint.setText(_IDLE_HINT)
             self._start_button.setEnabled(True)
 
         self._current = None
+        self._current_mode = CARD_RECOGNITION
         self._revealed = False
-        self._spelling_active = False
         self._prompt = None
         self._recall_result = None
-        self._mode_combo.setEnabled(True)
+        self._spell_input_active = False
         self._stack.setCurrentWidget(self._idle_page)
 
     # ------------------------------------------------------------------ 会话
@@ -438,31 +429,38 @@ class ReviewPage(QWidget):
             set_status(self._status, "今天没有到期的词，读一篇文章再回来吧。", "hint")
             return
 
-        self._session = words
+        # 一次查完所有词最近一次复习记录，用于决定卡片形态（避免 N+1 查询）。
+        history = self._context.review_repo.last_reviews(
+            [word.id for word in words if word.id is not None]
+        )
+        self._session = build_session_plan(words, history)
         self._index = 0
         self._reviewed = 0
         self._recalled = 0
+        self._mode_counts = {CARD_RECOGNITION: 0, CARD_SPELLING: 0, CARD_DUAL: 0}
         self._current = None
         self._revealed = False
-        self._mode_combo.setEnabled(False)
         set_status(self._status, "", "hint")
         self._stack.setCurrentWidget(self._card_page)
         self._show_current()
-        # 拼写模式把焦点留在输入框，不能再用页面抢焦点。
-        if not self._spelling_active:
+        # 拼写正面把焦点留在输入框，不能再用页面抢焦点。
+        if not self._spell_input_active:
             self.setFocus()
 
     def _show_current(self) -> None:
-        word = self._session[self._index]
+        card = self._session[self._index]
+        word = card.word
         self._current = word
+        self._current_mode = card.mode
         self._revealed = False
         self._recall_result = None
+        self._spell_input_active = False
         self._prompt = (
-            build_spelling_prompt(word) if self._review_mode == REVIEW_MODE_SPELLING else None
+            build_spelling_prompt(word) if card.mode in (CARD_SPELLING, CARD_DUAL) else None
         )
-        self._spelling_active = self._prompt is not None
 
         self._progress_label.setText(f"第 {self._index + 1} / {len(self._session)} 个")
+        self._mode_label.setText(_MODE_TITLES.get(card.mode, ""))
         self._word_label.setText(word.display_form or word.lemma)
         if word.display_form and word.display_form.lower() != word.lemma.lower():
             self._lemma_label.setText(f"原形：{word.lemma}")
@@ -495,26 +493,6 @@ class ReviewPage(QWidget):
         self._rating_bar.setVisible(False)
         self._rating_hint.setVisible(False)
         self._rating_hint.setText("按 1~4 或点击按钮：忘记 / 模糊 / 认识 / 太简单")
-
-        if self._spelling_active:
-            self._show_spelling_front(word)
-        else:
-            self._show_recognition_front(word)
-
-    def _show_spelling_front(self, word: Word) -> None:
-        """拼写模式的正脸：释义 + 挖空例句 + 输入框。"""
-        prompt = self._prompt
-        if prompt is None:
-            return
-
-        hint = "根据释义写出英文单词"
-        if prompt.pos:
-            hint = f"{hint} · {prompt.pos}"
-        self._prompt_hint.setText(hint)
-        self._prompt_meaning.setText(prompt.meaning)
-        self._prompt_context.setText(prompt.masked_sentence)
-        self._prompt_context.setVisible(bool(prompt.masked_sentence))
-
         self._spelling_result.clear()
         self._spelling_result.setVisible(False)
         self._spelling_input.clear()
@@ -522,7 +500,30 @@ class ReviewPage(QWidget):
         self._spelling_input.setEnabled(True)
         self._spelling_submit.setVisible(True)
         self._spelling_submit.setEnabled(True)
+
+        if card.mode == CARD_SPELLING:
+            self._show_spelling_front()
+        else:
+            self._show_recognition_front()
+            if card.mode == CARD_DUAL:
+                self._reveal_button.setText("显示释义并默写（空格）")
+
+    def _show_spelling_front(self) -> None:
+        """拼写模式的正脸：释义 + 挖空例句 + 输入框。"""
+        prompt = self._prompt
+        if prompt is None:
+            # 编排阶段已经确认可拼写；理论上不会走到这里，兜底回退看词。
+            self._current_mode = CARD_RECOGNITION
+            self._mode_label.setText(_MODE_TITLES[CARD_RECOGNITION])
+            self._show_recognition_front()
+            return
+
+        hint = "根据释义写出英文单词"
+        if prompt.pos:
+            hint = f"{hint} · {prompt.pos}"
+        self._fill_spelling_prompt(hint)
         self._spelling_box.setVisible(True)
+        self._spell_input_active = True
 
         # 正面不能露题：原词、原形、音标、原文都先藏起来。
         self._word_label.setVisible(False)
@@ -536,38 +537,98 @@ class ReviewPage(QWidget):
         self._set_shortcuts_enabled(False)
         self._spelling_input.setFocus()
 
-    def _show_recognition_front(self, word: Word) -> None:
+    def _show_recognition_front(self) -> None:
         """看词回忆的正脸：原词 + 音标 + 上下文。"""
         self._spelling_box.setVisible(False)
         self._word_label.setVisible(True)
         self._lemma_label.setVisible(bool(self._lemma_label.text()))
-        self._phonetic_label.setVisible(bool(word.phonetic))
-        self._pos_label.setVisible(bool(word.pos))
-        self._context_label.setVisible(bool(word.context_sentence))
+        self._phonetic_label.setVisible(bool(self._current and self._current.phonetic))
+        self._pos_label.setVisible(bool(self._current and self._current.pos))
+        self._context_label.setVisible(bool(self._current and self._current.context_sentence))
         self._reveal_button.setText("显示答案（空格）")
         self._reveal_button.setVisible(True)
+        self._answer_box.setVisible(False)
+        self._rating_bar.setVisible(False)
+        self._rating_hint.setVisible(False)
         self._set_shortcuts_enabled(True)
 
+    def _fill_spelling_prompt(self, hint: str) -> None:
+        """把题面写进拼写区；拼写正面与双阶段默写共用。"""
+        prompt = self._prompt
+        if prompt is None:
+            return
+        self._prompt_hint.setText(hint)
+        self._prompt_meaning.setText(prompt.meaning)
+        self._prompt_meaning.setVisible(True)
+        self._prompt_context.setText(prompt.masked_sentence)
+        self._prompt_context.setVisible(bool(prompt.masked_sentence))
+
+    # ------------------------------------------------------------------ 翻面
     def _reveal(self) -> None:
-        """翻面看释义；拼写模式下也用于“跳过输入直接看答案”。"""
+        """翻面看释义；拼写模式用于“跳过输入直接看答案”，双阶段进入默写。"""
         if self._stack.currentWidget() is not self._card_page:
             return
         if self._current is None or self._revealed:
             return
         self._revealed = True
-        if self._spelling_active:
+
+        if self._current_mode == CARD_SPELLING:
             self._reveal_spelling_answer()
-        self._answer_box.setVisible(True)
+            self._answer_box.setVisible(True)
+            self._show_rating_bar()
+        elif self._current_mode == CARD_DUAL and self._prompt is not None:
+            self._show_dual_spell_phase()
+        else:
+            # 双阶段题面异常时回退成普通看词翻面，不能让界面卡住。
+            self._answer_box.setVisible(True)
+            self._show_rating_bar()
+
+    def _show_rating_bar(self) -> None:
         self._reveal_button.setVisible(False)
         self._rating_bar.setVisible(True)
         self._rating_hint.setVisible(True)
         self._set_shortcuts_enabled(True)
+
+    def _show_dual_spell_phase(self) -> None:
+        """双阶段翻面：遮住词形，只留挖空释义，让用户再默写一次。"""
+        word = self._current
+        if word is None:
+            return
+        self._fill_spelling_prompt("遮住词形，再默写一次（回车检查；也可直接按 1~4 评分）")
+        self._spelling_box.setVisible(True)
+        self._spelling_result.clear()
+        self._spelling_result.setVisible(False)
+        self._spelling_input.clear()
+        self._spelling_input.setReadOnly(False)
+        self._spelling_input.setEnabled(True)
+        self._spelling_submit.setVisible(True)
+        self._spelling_submit.setEnabled(True)
+        self._spell_input_active = True
+
+        # 默写阶段不能露词：原词、原形、音标、上下文、答案区全部藏起来。
+        self._word_label.setVisible(False)
+        self._lemma_label.setVisible(False)
+        self._phonetic_label.setVisible(False)
+        self._pos_label.setVisible(False)
+        self._context_label.setVisible(False)
+        self._answer_box.setVisible(False)
+
+        self._reveal_button.setVisible(False)
+        self._rating_bar.setVisible(True)
+        self._rating_hint.setText("按 1~4 直接评分（跳过默写），或先写一遍再评分")
+        self._rating_hint.setVisible(True)
+
+        # 回车交给输入框，空格禁用；1~4 保留，方便直接跳过默写。
+        self._set_reveal_shortcuts_enabled(False)
+        self._set_rating_shortcuts_enabled(True)
+        self._spelling_input.setFocus()
 
     def _reveal_spelling_answer(self) -> None:
         """拼写模式翻面：停用输入框，露出原词与音标。"""
         word = self._current
         if word is None:
             return
+        self._spell_input_active = False
         self._spelling_input.setReadOnly(True)
         self._spelling_submit.setVisible(False)
         self._word_label.setVisible(True)
@@ -578,24 +639,57 @@ class ReviewPage(QWidget):
             set_status(self._spelling_result, "已跳过输入，按实际记忆程度评分。", "hint")
             self._spelling_result.setVisible(True)
 
+    # ------------------------------------------------------------------ 拼写
     def _submit_spelling(self) -> None:
         """判分当前拼写答案；结果只给建议，最终仍由用户按 1~4 确认。"""
         if self._stack.currentWidget() is not self._card_page:
             return
-        if self._current is None or self._revealed or not self._spelling_active:
+        # 双阶段默写发生在翻面之后，所以这里不能用 _revealed 拦截；
+        # 只有输入框仍可编辑（正面拼写 / 双阶段默写）时才接受提交。
+        if self._current is None or not self._spell_input_active:
             return
         answer = self._spelling_input.text().strip()
         if not answer:
-            set_status(self._status, "先输入一个答案，或点「跳过」直接看答案。", "hint")
+            set_status(self._status, "先输入一个答案；也可以直接按 1~4 评分跳过默写。", "hint")
             self._spelling_input.setFocus()
             return
 
         set_status(self._status, "", "hint")
         result = check_spelling(self._current, answer)
         self._recall_result = result
-        self._reveal()
 
-        expected = self._answer_display(self._current)
+        if self._current_mode == CARD_DUAL:
+            # 双阶段已经在默写阶段，不需要再走一次 _reveal。
+            self._finish_dual_spelling()
+        else:
+            self._reveal()
+
+        self._show_spelling_feedback(result)
+
+    def _finish_dual_spelling(self) -> None:
+        """双阶段默写结束：停用输入框，恢复完整答案，等待 1~4 评分。"""
+        word = self._current
+        if word is None:
+            return
+        self._spell_input_active = False
+        self._spelling_input.setReadOnly(True)
+        self._spelling_submit.setVisible(False)
+        self._prompt_hint.setText("默写结果")
+        self._prompt_meaning.setVisible(False)
+        self._prompt_context.setVisible(False)
+
+        self._word_label.setVisible(True)
+        self._lemma_label.setVisible(bool(self._lemma_label.text()))
+        self._phonetic_label.setVisible(bool(word.phonetic))
+        self._pos_label.setVisible(bool(word.pos))
+        self._context_label.setVisible(bool(word.context_sentence))
+        self._answer_box.setVisible(True)
+        self._rating_bar.setVisible(True)
+        self._rating_hint.setVisible(True)
+        self._set_shortcuts_enabled(True)
+
+    def _show_spelling_feedback(self, result: RecallResult) -> None:
+        expected = self._answer_display(self._current) if self._current else result.expected
         if result.status == STATUS_CORRECT:
             set_status(self._spelling_result, f"拼写正确：{expected}", "success")
         elif result.status == STATUS_NEAR:
@@ -624,6 +718,7 @@ class ReviewPage(QWidget):
             return f"{display}（原形：{lemma}）"
         return display or lemma
 
+    # ------------------------------------------------------------------ 评分
     def _rate(self, rating: int) -> None:
         """记录评分并前进到下一张；只有翻面后才接受评分。
 
@@ -641,13 +736,13 @@ class ReviewPage(QWidget):
                 return
             note, advice = help_result
 
-        # 拼写证据：只有真正提交过答案才有；看词回忆、拼写跳过、短语回退
-        # 都没有用户输入，统一记 skipped（M5.1）。
+        # 拼写证据：真正提交过答案才有；看词回忆、拼写跳过、双阶段未默写
+        # 统一记 skipped（M5.1）。
         answer_text = ""
         verdict = VERDICT_SKIPPED
         distance = 0
         result = self._recall_result
-        if self._spelling_active and result is not None:
+        if result is not None:
             answer_text = result.answer
             verdict = result.status
             distance = result.distance
@@ -668,6 +763,7 @@ class ReviewPage(QWidget):
             return
 
         self._reviewed += 1
+        self._mode_counts[self._current_mode] = self._mode_counts.get(self._current_mode, 0) + 1
         if rating >= RATING_KNOWN:
             self._recalled += 1
 
@@ -690,14 +786,17 @@ class ReviewPage(QWidget):
         from ..review_help_dialog import ReviewHelpDialog
 
         dialog = ReviewHelpDialog(self._context, self._current, rating, parent=self)
-        # 弹窗打开期间禁用 1~4 快捷键，避免输入原因时误触发评分。
+        # 弹窗打开期间禁用全部快捷键，避免输入原因时误触发评分。
+        # 关闭后必须按快照恢复：双阶段默写阶段本来就禁用空格/回车，
+        # 无条件 setEnabled(True) 会让回车被页面快捷键截获、无法提交默写。
+        previous = [(shortcut, shortcut.isEnabled()) for shortcut in self._shortcuts]
         for shortcut in self._shortcuts:
             shortcut.setEnabled(False)
         try:
             accepted = dialog.exec() == QDialog.DialogCode.Accepted
         finally:
-            for shortcut in self._shortcuts:
-                shortcut.setEnabled(True)
+            for shortcut, enabled in previous:
+                shortcut.setEnabled(enabled)
 
         if not accepted:
             return None
@@ -706,17 +805,23 @@ class ReviewPage(QWidget):
     def _finish_session(self) -> None:
         self._current = None
         self._revealed = False
-        self._spelling_active = False
         self._prompt = None
         self._recall_result = None
-        self._mode_combo.setEnabled(True)
+        self._spell_input_active = False
         total = self._reviewed
         recalled = self._recalled
         percent = round(recalled * 100 / total) if total else 0
 
+        parts: list[str] = []
+        for mode in (CARD_RECOGNITION, CARD_SPELLING, CARD_DUAL):
+            count = self._mode_counts.get(mode, 0)
+            if count:
+                parts.append(f"{_MODE_TITLES[mode]} {count} 个")
+        breakdown = f"（{'、'.join(parts)}）" if parts else ""
+
         self._summary_title.setText("本轮复习完成")
         self._summary_detail.setText(
-            f"复习了 {total} 个词，其中 {recalled} 个记得（{percent}%）。\n"
+            f"复习了 {total} 个词{breakdown}，其中 {recalled} 个记得（{percent}%）。\n"
             "「忘记」和「模糊」的词会更早再次出现。"
         )
         self._stack.setCurrentWidget(self._summary_page)

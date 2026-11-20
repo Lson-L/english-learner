@@ -24,11 +24,93 @@ from ..models.entities import (
     Word,
 )
 from .assessment_bank import OPTION_LETTERS, AssessmentSet, Question
+from .back_translation import WRITING_ERROR_LABELS, WRITING_ERROR_TYPES
+from .learner_memory import LearnerMemory
 
 if TYPE_CHECKING:  # 避免与 assessment_service 循环导入
     from .assessment_service import AnswerSheet, ObjectiveScore
 
-PROMPT_VERSION = "m3-17"
+# M5.4：新增回译练习的翻译 / 批改 prompt；文章 prompt 结构未变，
+# 但学习者记忆多了“英文写作薄弱”一行，整体版本照例升一次。
+PROMPT_VERSION = "m5-4"
+
+# ------------------------------------------------------------ 学习者记忆
+# 记忆按任务过滤：不同 AI 任务只该看到与自己相关的那几行。
+# 阅读检测不在这里渲染整块，而是把 error_types 并入 `_weak_skills()`。
+MEMORY_TASK_ARTICLE = "article"
+MEMORY_TASK_DICTIONARY = "dictionary"
+MEMORY_TASK_REVIEW_HELP = "review_help"
+
+_MEMORY_FIELDS: dict[str, tuple[str, ...]] = {
+    # 上周计划不在这里渲染：文章走独立的 learner_plan 参数，避免同一句话出现两次。
+    MEMORY_TASK_ARTICLE: (
+        "level",
+        "weaknesses",
+        "errors",
+        "forgotten",
+        "misspelled",
+        "writing",
+        "backlog",
+    ),
+    MEMORY_TASK_DICTIONARY: ("level", "errors"),
+    MEMORY_TASK_REVIEW_HELP: ("level", "forgotten", "misspelled", "focus"),
+}
+
+# 记忆块字符上限：字段本身都很短，正常情况远低于上限；
+# 这里只是防止用户把 focus / 调级原因写成长文本后挤占正文。
+# 按中英混合 tokenizer 估算约 150~200 token。
+MAX_MEMORY_CHARS = 280
+
+
+def _clip(text: str, limit: int) -> str:
+    """截断到 limit 个字符；保留换行（记忆块是多行文本）。"""
+    value = (text or "").strip()
+    return value if len(value) <= limit else value[: max(0, limit - 1)] + "…"
+
+
+def build_learner_memory_block(memory: LearnerMemory, task: str) -> str:
+    """把学习记忆渲染成 prompt 片段；空记忆返回空串。
+
+    调用方只在返回值非空时插入 prompt，因此“没有数据”的用户
+    拿到的 prompt 与 M5.2 之前逐字节一致（有快照测试兜底）。
+    """
+    fields = _MEMORY_FIELDS.get(task)
+    if memory is None or memory.is_empty or not fields:
+        return ""
+
+    lines = ["【学习者记忆】"]
+    if "level" in fields and memory.level:
+        detail = f"- 等级：{memory.level}"
+        extras: list[str] = []
+        if memory.confidence > 0:
+            extras.append(f"置信度 {memory.confidence:.2f}")
+        if memory.level_reason:
+            extras.append(_clip(memory.level_reason, 40))
+        if extras:
+            detail += "（" + "；".join(extras) + "）"
+        lines.append(detail)
+    if "weaknesses" in fields and memory.weaknesses:
+        items = "、".join(_clip(item, 20) for item in memory.weaknesses[:3])
+        lines.append("- 测评薄弱点：" + items)
+    if "errors" in fields and memory.error_types:
+        labels = [_SKILL_LABELS.get(item, item) for item in memory.error_types]
+        lines.append("- 近 7 天主要错因：" + "、".join(labels))
+    if "forgotten" in fields and memory.forgotten_words:
+        lines.append("- 反复忘记：" + "、".join(memory.forgotten_words))
+    if "misspelled" in fields and memory.misspelled_words:
+        lines.append("- 拼写薄弱：" + "、".join(memory.misspelled_words))
+    if "writing" in fields and memory.writing_error_types:
+        labels = [WRITING_ERROR_LABELS.get(item, item) for item in memory.writing_error_types[:3]]
+        lines.append("- 英文写作薄弱：" + "、".join(labels))
+    if "backlog" in fields and memory.due_backlog > 0:
+        lines.append(f"- 到期未复习：{memory.due_backlog} 个词")
+    if "focus" in fields and memory.focus:
+        lines.append("- 上周计划重点：" + "、".join(_clip(item, 20) for item in memory.focus[:4]))
+
+    if len(lines) == 1:
+        return ""
+    return _clip("\n".join(lines), MAX_MEMORY_CHARS)
+
 
 # ---------------------------------------------------------------- 摸底测评
 ASSESSMENT_SYSTEM = (
@@ -131,6 +213,8 @@ def build_article_messages(
     soft_targets: bool = False,
     learner_feedback: str = "",
     learner_focus: str = "",
+    learner_memory: str = "",
+    learner_plan: str = "",
     angle: str = "",
     avoid_titles: list[str] | tuple[str, ...] = (),
     user_request: str = "",
@@ -142,7 +226,9 @@ def build_article_messages(
     soft_targets=True 用于“按阅读反馈重写文章”：目标是让文章更流畅、更适合
     用户当前状态，生词能自然带上最好，带不上不强制。
     learner_feedback 非空时，把上一篇的阅读感受也告诉模型，让它控制生词密度。
-    learner_focus 是画像里的薄弱点，作为软提示，不要求生硬覆盖。
+    learner_focus 是画像里的薄弱点，作为软提示，不要求生硬覆盖；
+    learner_memory 非空时（M5.2 学习者记忆）优先使用它，调用方不再传 focus。
+    learner_plan 是上周复盘给出的重点，作为本周选词与内容的软约束。
     angle 是随机的切入角度；avoid_titles 是已经写过的标题，用来防止“换一篇”
     时模型重复同一个选题（例如反复写丝绸之路）。
     user_request 是用户在“换一篇”弹窗里写的要求，优先于默认主题。
@@ -189,6 +275,21 @@ def build_article_messages(
         focus_rule = (
             f"补充要求：学习者近期的薄弱点是“{learner_focus.strip()[:160]}”。"
             "如果与当前主题自然契合，可以适当覆盖这些点；不要为了覆盖而牺牲可读性。\n"
+        )
+
+    memory_rule = ""
+    if learner_memory.strip():
+        memory_rule = (
+            f"{learner_memory.strip()[:MAX_MEMORY_CHARS]}\n"
+            "以上是学习者的长期记忆：写作时如果与主题自然契合，优先覆盖这些薄弱点；"
+            "不要为了覆盖而牺牲可读性。\n"
+        )
+
+    plan_rule = ""
+    if learner_plan.strip():
+        plan_rule = (
+            f"补充要求：上周复盘给学习者定的重点是“{learner_plan.strip()[:160]}”。"
+            "请把它们作为本周选词与内容的软约束，能自然覆盖就覆盖，不要求生硬照做。\n"
         )
 
     repair_rule = ""
@@ -257,6 +358,8 @@ def build_article_messages(
         f"{target_check}"
         f"{feedback_rule}"
         f"{focus_rule}"
+        f"{memory_rule}"
+        f"{plan_rule}"
         f"{repair_rule}"
         "最后：只输出 JSON，不要解释、不要代码围栏。\n\n"
         "JSON 结构：\n"
@@ -994,8 +1097,13 @@ def build_weekly_review_messages(
     words_added: int = 0,
     reviews_done: int = 0,
     articles_read: int = 0,
+    previous_focus: Sequence[str] = (),
 ) -> list[dict[str, str]]:
-    """每周复盘：汇总一周数据，输出总结、建议等级与下周重点。"""
+    """每周复盘：汇总一周数据，输出总结、建议等级与下周重点。
+
+    `previous_focus` 是上周复盘给出的重点（M5.2 计划回流）：
+    有值时要求模型在 summary 里交代计划完成度，再据此调整本周 focus。
+    """
     band_lines = []
     for stat in band_review_stats:
         if not stat.band or not stat.total:
@@ -1008,6 +1116,16 @@ def build_weekly_review_messages(
     current = profile.cefr_level
     if profile.vocab_estimate:
         current += f"，估算词汇量约 {profile.vocab_estimate}"
+
+    plan_block = ""
+    plan_items = [_clip(item, 40) for item in previous_focus if item and item.strip()][:4]
+    if plan_items:
+        plan_block = (
+            f"【上周计划重点】{'、'.join(plan_items)}\n"
+            "请在 summary 里说明上周计划完成度（哪些做到了、哪些没做到），"
+            "并据此调整本周 focus；不要把没完成的计划直接删掉。\n"
+        )
+
     user = (
         f"请复盘学习者 {week_start} ~ {week_end} 这一周的学习情况。\n\n"
         f"【当前等级】{current}\n"
@@ -1017,6 +1135,7 @@ def build_weekly_review_messages(
         f"{_format_difficulty_stats(difficulty_stats)}"
         f"{_format_skill_stats(skill_stats)}"
         f"【生词复习】\n{band_text}\n\n"
+        f"{plan_block}"
         "请输出 JSON：\n"
         "{\n"
         '  "summary": "本周阅读稳定性提升，推断题仍是主要失分点。",\n'
@@ -1043,12 +1162,29 @@ DICTIONARY_SYSTEM = (
 )
 
 
-def build_dictionary_messages(word: str, sentence: str, level: str) -> list[dict[str, str]]:
-    """查词请求：必须带上下文句子，否则 AI 容易给出不相关的义项。"""
+def build_dictionary_messages(
+    word: str,
+    sentence: str,
+    level: str,
+    *,
+    learner_memory: str = "",
+) -> list[dict[str, str]]:
+    """查词请求：必须带上下文句子，否则 AI 容易给出不相关的义项。
+
+    `learner_memory` 非空时提醒模型按学习者已暴露的薄弱点调整讲解深度；
+    为空时 prompt 与 M5.2 之前逐字节一致。
+    """
+    memory_block = ""
+    if learner_memory.strip():
+        memory_block = (
+            f"{learner_memory.strip()[:MAX_MEMORY_CHARS]}\n"
+            "讲解时使用学习者当前等级能理解的词汇，必要时点出他容易混淆的地方。\n"
+        )
     user = (
         f"单词（文章中出现的形态）：{word}\n"
         f"所在句子：{sentence or '（无上下文）'}\n"
-        f"学习者等级：{level}\n\n"
+        f"学习者等级：{level}\n"
+        f"{memory_block}\n"
         "请给出该词在这个句子中的语境义，并给出一个方便记忆的方法，面向中文母语者。\n"
         "JSON 结构：\n"
         "{\n"
@@ -1123,8 +1259,14 @@ def build_review_help_messages(
     rating: int,
     reason: str,
     level: str,
+    *,
+    learner_memory: str = "",
 ) -> list[dict[str, str]]:
-    """复习时点“忘记/模糊”后的求助请求：结合用户说明给具体建议。"""
+    """复习时点“忘记/模糊”后的求助请求：结合用户说明给具体建议。
+
+    `learner_memory` 非空时带上他反复忘记 / 拼错的词与上周计划，
+    让建议能连到已有学习轨迹；为空时 prompt 与 M5.2 之前逐字节一致。
+    """
     rating_label = "完全忘记" if rating == 1 else "有点模糊、不确定"
     form_line = (
         f"（文章中出现的形态：{word.display_form}）"
@@ -1132,6 +1274,12 @@ def build_review_help_messages(
         else ""
     )
     reason_text = reason.strip()[:300] or "（用户没有填写具体原因）"
+    memory_block = ""
+    if learner_memory.strip():
+        memory_block = (
+            f"\n{learner_memory.strip()[:MAX_MEMORY_CHARS]}\n"
+            "如果这个词与上面的薄弱点有关，请顺带点明联系；不要泛泛重复。\n"
+        )
     user = (
         f"学习者在复习时选择了「{rating_label}」。\n"
         f"【单词】{word.lemma}{form_line}\n"
@@ -1142,7 +1290,8 @@ def build_review_help_messages(
         f"【原文句子】{word.context_sentence or '（无）'}\n"
         f"【已有记忆方法】{word.mnemonic or '（无）'}\n"
         f"【学习者说明】{reason_text}\n"
-        f"【学习者等级】{level}\n\n"
+        f"【学习者等级】{level}\n"
+        f"{memory_block}\n"
         "请针对他卡住的原因给出具体帮助，而不是泛泛地重复释义。\n"
         "只输出 JSON：\n"
         "{\n"
@@ -1156,5 +1305,119 @@ def build_review_help_messages(
     )
     return [
         {"role": "system", "content": REVIEW_HELP_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+
+
+# ---------------------------------------------------------------- 回译练习
+BACK_TRANSLATION_TRANSLATE_SYSTEM = (
+    "你是一名英语教材编辑。你会把英文句子翻译成自然、准确的中文，"
+    "供学习者做回译练习（看中文写英文）。你只输出 JSON 对象，"
+    "不输出解释或代码围栏。"
+)
+
+
+def build_back_translation_translate_messages(
+    sentences: Sequence[str],
+    level: str,
+    *,
+    repair_note: str = "",
+) -> list[dict[str, str]]:
+    """回译出题：把本地抽出的 3 句翻成中文。
+
+    `sentences` 已经由 `back_translation.pick_sentences()` 在本地选好，
+    模型只负责翻译，不参与选题，保证每次练习的句子可复现。
+    """
+    current = (level or "").strip().upper()
+    if current not in CEFR_LEVELS:
+        current = "B1"
+    numbered = "\n".join(f"{index + 1}. {sentence}" for index, sentence in enumerate(sentences))
+    repair_rule = ""
+    if repair_note.strip():
+        repair_rule = (
+            f"上一次译文未通过校验：{repair_note.strip()[:300]}。"
+            "请针对这个问题修正后重新输出完整 JSON。\n"
+        )
+    user = (
+        f"学习者的英语等级是 CEFR {current}。请把下面 {len(sentences)} 句英文"
+        "翻译成自然、准确的中文。\n\n"
+        f"【英文句子】\n{numbered}\n\n"
+        "要求：\n"
+        "1. 准确传达原句的信息、指代与逻辑关系，不增删内容；\n"
+        "2. 中文要自然通顺，不要逐词硬译；\n"
+        "3. 不要提示英文关键词、语法点或参考答案，译文只作为回译题面；\n"
+        "4. 顺序与输入一致，一句对应一条；\n"
+        f"{repair_rule}"
+        "\n只输出 JSON：\n"
+        '{"translations": ["第一句的中文", "第二句的中文", "第三句的中文"]}'
+    )
+    return [
+        {"role": "system", "content": BACK_TRANSLATION_TRANSLATE_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+
+
+BACK_TRANSLATION_GRADE_SYSTEM = (
+    "你是一名严谨但鼓励式的英语写作老师。学习者刚做完回译练习：先看中文，"
+    "再写出英文。你要对照英文原句批改学习者的英文，给最小修改、原因与 0/2 分。"
+    "你只输出 JSON 对象，不输出解释或代码围栏。"
+)
+
+
+def build_back_translation_grade_messages(
+    items: Sequence[tuple[str, str, str]],
+    level: str,
+    *,
+    repair_note: str = "",
+) -> list[dict[str, str]]:
+    """回译批改：items = (英文原句, 中文参考, 学习者英文)，一次批量批改。
+
+    评分只有 0 / 2 两档：只作练习反馈，不参与等级与 SRS，
+    因此宁可鼓励，也不要因为风格偏好扣分。
+    """
+    current = (level or "").strip().upper()
+    if current not in CEFR_LEVELS:
+        current = "B1"
+    error_list = "、".join(f"{key}（{WRITING_ERROR_LABELS[key]}）" for key in WRITING_ERROR_TYPES)
+    blocks: list[str] = []
+    for index, (sentence, reference, answer) in enumerate(items):
+        blocks.append(
+            f"【第 {index + 1} 句】\n"
+            f"英文原句：{sentence}\n"
+            f"中文参考（出题时给学习者的）：{reference}\n"
+            f"学习者写的英文：{answer}"
+        )
+    repair_rule = ""
+    if repair_note.strip():
+        repair_rule = (
+            f"上一次批改未通过校验：{repair_note.strip()[:300]}。"
+            "请针对这个问题修正后重新输出完整 JSON。\n"
+        )
+    user = (
+        f"学习者等级：CEFR {current}。下面是 {len(items)} 句回译练习，"
+        "请逐句对照英文原句批改学习者的英文。\n\n"
+        + "\n\n".join(blocks)
+        + "\n\n评分口径（严格遵守）：\n"
+        "- 2 分：意思与原文一致，语法基本正确；小的拼写 / 标点问题不扣分；\n"
+        "- 0 分：漏译、译反、关键信息缺失，或出现影响理解的语法错误；\n"
+        "- 只给 0 或 2，不要给 1 分；\n"
+        "- edited 给“最小修改后的完整英文句子”：只改必要的地方，"
+        "保留学习者原本的表达；完全正确时填原句；\n"
+        "- reason 用中文说明最主要的问题（1~2 句）；0 分必须指出关键差异，"
+        "2 分可以给一句肯定或小建议；\n"
+        "- index 从 0 开始，与上面句子的顺序一一对应；score 必须是 0 或 2；\n"
+        f"- error_types 只能从这些值里选：{error_list}；完全正确就给空数组；\n"
+        "- 不要因为风格偏好或“不够地道但正确”扣分；\n"
+        f"{repair_rule}"
+        "\n只输出 JSON：\n"
+        "{\n"
+        '  "items": [\n'
+        '    {"index": 0, "score": 2, "edited": "最小修改后的英文句子", '
+        '"reason": "中文原因", "error_types": ["tense"]}\n'
+        "  ]\n"
+        "}"
+    )
+    return [
+        {"role": "system", "content": BACK_TRANSLATION_GRADE_SYSTEM},
         {"role": "user", "content": user},
     ]

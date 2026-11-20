@@ -12,6 +12,7 @@ Java 对照：≈ 一个 `VocabularyCoachService`，调用 LLM 并把新的记�
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..models.entities import Word
@@ -19,7 +20,13 @@ from ..storage.repositories import WordRepo
 from .ai_client import AIError
 from .ai_protocol import TextCompleter
 from .json_utils import JsonParseError, as_text, parse_json_object
-from .prompts import PROMPT_VERSION, build_review_help_messages
+from .learner_memory import LearnerMemory, load_memory
+from .prompts import (
+    MEMORY_TASK_REVIEW_HELP,
+    PROMPT_VERSION,
+    build_learner_memory_block,
+    build_review_help_messages,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +41,16 @@ class ReviewHelpResult:
 
 
 class ReviewHelpService:
-    def __init__(self, client: TextCompleter, word_repo: WordRepo) -> None:
+    def __init__(
+        self,
+        client: TextCompleter,
+        word_repo: WordRepo,
+        *,
+        memory_provider: Callable[[], LearnerMemory] | None = None,
+    ) -> None:
         self._client = client
         self._words = word_repo
+        self._memory_provider = memory_provider
 
     def help(
         self,
@@ -51,7 +65,14 @@ class ReviewHelpService:
         if word.id is None:
             raise ValueError("help() 需要已落库的词条")
 
-        messages = build_review_help_messages(word, rating, reason, level)
+        memory = load_memory(self._memory_provider)
+        messages = build_review_help_messages(
+            word,
+            rating,
+            reason,
+            level,
+            learner_memory=build_learner_memory_block(memory, MEMORY_TASK_REVIEW_HELP),
+        )
         logger.info("复习求助 prompt=%s word=%s rating=%s", PROMPT_VERSION, word.lemma, rating)
         text = self._client.complete_json(
             messages, temperature=0.5, max_tokens=1200, task="复习求助"

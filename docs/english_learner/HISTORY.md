@@ -305,6 +305,181 @@ M5.1（复习证据落库）完成（2026-11-20）：
   （Repo 层 verdict 校验、`answer_text` 截断一致性）；报告保存在本地
   `verification/VERIFICATION_M5.1.md`，该目录已加入 `.gitignore`、不入库。
 
+M5.2（学习者记忆 + 计划回流）完成（2026-11-20）：
+
+- **目标**：每次 AI 调用前先知道“面对的是谁”——把已有学习数据压成 ≤200 token
+  的本地摘要；把上周复盘重点回流成文章生成约束与本次复盘要交代的完成度；
+- **新增 `services/learner_memory.py`**：`LearnerMemory` 冻结 DTO +
+  `LearnerMemoryService.build()`，汇总等级 / 置信度 / 最近调级原因、
+  测评画像薄弱点、近 7 天（今天 + 之前 6 天）错因 Top2（`level_evidence`）、
+  反复评“忘记”的词（rating=1 且至少 2 次）、拼写错误最多的词
+  （`verdict in wrong/near`）、到期积压词数、上一周复盘重点；
+  不建表、0 次 AI 调用、不保存任何档案；
+- **仓库**：`ReviewRepo.list_forgotten_words / list_misspelled_words`（均 join words、
+  只统计已入生词本的词、按次数降序），`WordRepo.count_due`；verdict / rating
+  由调用方传常量，SQL 里不散落字面量；
+- **prompt**：`PROMPT_VERSION` 升到 `m5-2`；新增
+  `build_learner_memory_block(memory, task)` 按任务过滤（文章 / 查词 / 复习求助），
+  `MAX_MEMORY_CHARS = 280` 兜底截断；空记忆返回空串，四个 builder 的默认输出与
+  注入前逐字节一致（快照用例）；
+- **注入点**：`AppContext.learner_memory_service()` 生成 provider，
+  传给 `ArticleService / DictionaryService / ReviewHelpService / ReadingQuizService`；
+  记忆在后台线程的 service 方法内构建，失败由 `load_memory()` 吞掉并降级为空记忆；
+  阅读检测不渲染整块，而是把 `error_types`（白名单技能）并入 `_weak_skills()`；
+- **计划回流**：文章 prompt 新增 `learner_plan`（上周 focus，软约束）；
+  每周复盘新增 `previous_focus`，要求 summary 说明上周计划完成度再调整本周 focus；
+  `apply_suggestion()` 的“用户确认才改级”边界不变；
+- **测试**：373 passed（新增 21 条：记忆汇总口径 / 7 天窗口含未来日期与跨年边界 /
+  非技能错因过滤 / 任务过滤 / 截断 / 只有薄弱点时的任务过滤 / provider 异常降级 /
+  空记忆 prompt 逐字节一致 / 文章记忆替换旧薄弱点行 / 查词与求助注入 /
+  检测薄弱技能合并 / 每周复盘计划回流），`ruff check` 与 `ruff format --check` 通过；
+- **外部验收**：3 轮静态审查通过，无 P0/P1/P2。第 1 轮发现 7 天窗口少减 1 天（P2，
+  已改为含今天共 7 天并补边界用例），另采纳 2 条 P3（保留 `profile.weaknesses`、
+  去重上周计划渲染）；第 2 轮补未来日期上界与跨年用例；第 3 轮收尾确认通过。
+  遗留 3 条 P3 观察（`list_recent` 上限顺序、ISO 日期依赖、整块截断优先级），
+  报告保存在本地 `verification/VERIFICATION_M5.2.md`，不入库。
+
+M5.3（本地可测 i+1）完成（2026-11-20）：
+
+- **目标**：把“模型自称 B1”变成“本地能验证这篇对你只难一点”——
+  用静态词表算出文章的生词比例、句长与目标词覆盖，只记录 / 告警 / 展示，
+  不参与改等级；先观察一周，再决定是否强制重试；
+- **静态词表**：`assets/wordlists/ai_frequency.json`（3212 词，60.8KB，
+  A1 484 / A2 739 / B1 894 / B2 783 / C1 312），由 AI 在开发期一次性生成并
+  人工抽查，`{word: band}` 直接入库随程序分发；`scripts/generate_wordlist.py`
+  保留为换网关时的复现脚本（当前网关长输出会被 `finish_reason=length` 截断）；
+- **纯函数模块**：新增 `services/readability.py`：分词（缩写归一化 +
+  常见屈折还原）、`ReadabilityMetrics`（词数 / 生词数 / 生词比例 / 平均与最长句长 /
+  目标词总数与命中数 / 词表规模）、`ReadabilityThresholds` 宽松解析、
+  `threshold_warnings()`；已知词 = 词表 + `in_vocabulary = 1` 或
+  `interval_days >= 30`（`WordRepo.list_known_lemmas(30)`，阈值由调用方传入）；
+- **schema**：`articles.metrics_json`（`''` = 旧文章无指标）。M5.1 已发布 v8，
+  因此该列用幂等 `_add_column` 在每次启动补齐，不放在 `version < 8` 分支；
+  旧库升级不丢文章，旧文章 `metrics` 读成 None；
+- **生成流程**：`ArticleService.generate_article()` 校验通过后调用 `_analyze()`
+  计算并记录指标；`config.json` 新增 `readability` 段
+  （`enabled / retry_enabled / max_unknown_ratio / max_avg_sentence_len`），
+  默认只记录，开启 `retry_enabled` 后超阈值带 `repair_note` 走现有第二次尝试
+  （最坏 +1 次同类调用，不新增任务标签）；`ConfigStore.save()` 改为保留未知段；
+- **宽容规则**：词表缺失 / 小于 500 词时阈值放宽 1.5 倍，正文少于 40 词不告警；
+  指标不参与等级与 SRS 调度；
+- **界面与导出**：阅读页 meta 行显示 `生词 X% · 目标词 N 个`，超阈值追加
+  “偏难”，旧文章无指标时整段不显示；JSON 快照包含 `metrics` 对象，
+  `articles.csv` 增加 `metrics` 列；
+- **测试**：414 passed（新增 41 条：分词与屈折、生词比例 / 句长 / 目标词覆盖、
+  阈值默认与夹取、词表缺失 / 过小宽容、指标序列化、词表读取与分发文件校验、
+  文章生成落库指标 / 关闭指标 / 默认不重试 / 开启重试带偏难原因 /
+  已掌握词不计生词、v8 旧库幂等补列、导出 JSON 与 CSV、
+  阅读页展示 / 偏难标记 / 旧文章兼容、配置段读写与保留），
+  `ruff check` 与 `ruff format --check` 通过；
+- **外部验收**：3 轮静态审查。第 1 轮 1×P1（词表缺 to/is/was 等功能词，
+  生词率虚高）+ 3×P2（重试丢第一篇、阅读反馈路径不读配置、字符串 "false"
+  解析成 True）+ 2×P3；第 2 轮 4×P3（脚本可复现性、残余词表缺口、
+  save_ui/save_readability 未清理明文、目标词覆盖口径）；第 3 轮新发现 1×P2
+  （三个 save 方法直接删扁平配置导致 AI 配置丢失），均已在轮次内或第 3 轮后
+  修复并补回归用例；按规则不再开第 4 轮。报告保存在本地
+  `verification/VERIFICATION_M5.3.md`，该目录不入库。
+
+M5.4（回译练习）完成（2026-11-20）：
+
+- **目标**：补上产品里唯一缺失的英文产出练习——M3.17 之后用户在整个产品里
+  不再写英文句子；回译（看中文写英文）复用当天文章，训练产出而不新增题库；
+- **决策调整**：原任务卡写“一天最多 1 次调用”，但同时要求“本地抽 3 句 +
+  给中文译文 + AI 批改”，而译文没有现成缓存。项目为个人自用、调用量可控，
+  按“学习效果优先”取消每天 1 次上限：出题与批改各一次，均做缓存；
+- **schema**：新增 `writing_attempts`（新表用 `CREATE TABLE IF NOT EXISTS`，
+  不动版本号）：`article_id / article_date / position / sentence_en /
+  reference_cn / answer_en / verdict_json / score / created_at / graded_at`，
+  `UNIQUE(article_id, position)`，文章替换时级联删除；
+- **纯函数**：`services/back_translation.py` 负责切句（缩写、小数、引号）、
+  抽句（含目标词 + 长度适中，按原文顺序）、译文 / 批改 JSON 校验与错误类型归一化；
+  批改分数只有 0 / 2，错误类型固定为 `tense / agreement / article / preposition /
+  collocation / word_form / word_order / vocabulary / spelling / other`；
+- **服务**：`BackTranslationService.load_or_create()` 先查缓存，没有才抽句并做
+  一次 `回译出题`（`task="回译出题"`）翻译；`grade()` 一次 `回译批改` 批量批改，
+  解析失败带原因重试一次，仍失败抛 `AIError` 且不写库、保留用户答案；
+- **学习者记忆**：`LearnerMemory` 增加 `writing_error_types`（近 7 天错误类型
+  Top2），文章 prompt 增加“英文写作薄弱”一行；空记忆时 prompt 仍逐字节一致；
+- **界面**：阅读页新增「回译练习」按钮（只需文章、不需要测评）；弹窗分加载 /
+  练习 / 已批改三态，逐句展示中文参考、英文输入、最小修改、原因与问题类型；
+  出题与批改都走 `TaskWorker`，请求中拒绝关闭；已批改再次打开直接展示结果；
+- **导出**：`writing_attempts` 成为第十二张表，JSON 快照与 CSV 同步；
+- **测试**：454 passed（新增 40 条），`ruff check` 与 `ruff format --check` 通过；
+- **外部验收**：2 轮静态审查。第 1 轮 1×P2（批改分数缺失被静默判 0）+
+  4×P3（批改后答案框置灰、失败文案被覆盖、残缺缓存判定不一致、切句缩写 heuristics）；
+  P2 与 3 个 P3 已修复并补 4 条回归用例，第 2 轮复验通过；剩余切句/正则/窗口/
+  文案类 P3 记录为遗留项。报告保存在本地
+  `verification/VERIFICATION_M5.4.md`，该目录不入库。
+
+M5.5（学习效果看板）完成（2026-11-20）：
+
+- **目标**：把 M5.1~M5.4 落下的数据变成可解释的本地指标，回答“复习有没有
+  记住、计划有没有执行、AI 有没有频繁重试、同等级检测是否在进步”；
+- **新增 `services/metrics_service.py`**：`MetricsService.build()` 返回冻结
+  `MetricsSnapshot`，包含 `RateMetric / RetryMetric / PlanCompletion /
+  QuizPoint / QuizTrend`；全只读、0 次 AI 调用、不写库；空数据显示 “—”
+  而不是用 0 误导；
+- **统计口径（固定）**：默认近 30 天（含今天）。首次通过率按每词第一条
+  `review_logs`（`ROW_NUMBER() OVER (PARTITION BY word_id ORDER BY
+  reviewed_at, id)`）判定，窗口按首次复习日期过滤；回炉率 = 窗口内复习过的
+  词中出现过 `rating <= 2` 的比例；计划完成率只看紧邻上周复盘的 `focus`，
+  关键词映射到阅读 / 复习 / 生词 / 检测 / 写作行为，听力口语等无法映射的
+  条目不进分母；文章与检测重试率 = `ai_calls` 中 `attempt > 1` 的行数 /
+  该任务全部尝试数；得分趋势按文章等级分组，最近 3 次均值 − 更早 3 次均值，
+  ±3 个百分点内视为持平；
+- **仓库只读聚合**：`ReviewRepo.first_review_stats / relearn_stats`、
+  `AICallRepo.attempt_stats`（支持精确任务与前缀）、
+  `QuizRepo.count_completed_between`、`WritingAttemptRepo.count_graded_between`；
+  业务常量（通过分 3、弱评分 1/2、趋势样本 3、任务标签）集中在
+  `metrics_service.py`；
+- **界面**：设置页新增「学习效果（近 30 天）」卡片，5 个指标 + 按等级分组的
+  得分趋势文字，进入页面与切回时刷新；计算异常只降级为 “—”，不影响设置页；
+- **测试**：472 passed（新增 18 条：空库、窗口可配、首次通过窗口与同秒 id
+  排序、未来记录排除、关键词映射、上周计划 × 本周行为、无上周计划、
+  全部不可映射返回 None、跨周完成计入本周、写作行为、按任务重试、
+  等级分组与练习排除、趋势方向 ±3 边界、趋势按完成日期、设置页空库与
+  有数据渲染），`ruff check` 与 `ruff format --check` 通过；
+- **外部验收**：2 轮静态审查。第 1 轮 3×P2 + 1×P3：趋势 ±3 边界与文档相反、
+  focus 全部无法映射时返回 `planned=0` 对象而非 None、检测完成口径按
+  `article_date` 而非 `completed_at`、窗口缺上界导致未来记录计入；均已修复
+  并补回归用例（严格边界比较、planned=0 返回 None、按完成日期过滤、
+  `BETWEEN start AND end`）。第 2 轮复验通过，无 P0/P1/P2；仅提示收尾更新
+  用例计数。报告保存在本地 `verification/VERIFICATION_M5.5.md`，该目录不入库；
+- **边界**：指标只用于观察，不参与等级、SRS 与文章生成；词表许可 /
+  外部分发问题与 M5.3 相同（个人自用）。
+
+M3.18（复习卡片自动编排）完成（2026-11-20）：
+
+- **目标**：取消复习页的模式下拉框，按每个词的学习阶段自动决定卡片形态，
+  并让看词与拼写在同一次会话里穿插；同一个词可以在一张卡里先认义、再默写；
+- **新增 `services/review_plan.py`**：纯函数编排。判定顺序为
+  题面不可用 → 看词；`repetitions == 0` → 看词；上次评分 ≤ 2 或上次 verdict
+  是 `near/wrong` → 双阶段；`repetitions == 1` → 双阶段；其余 → 拼写。
+  穿插按卡面拆成两个队列，优先消耗剩余更多的一类，同类连续不超过 2 张
+  （另一类用完时除外），同类型内部保持到期顺序；
+- **仓库查询**：`ReviewRepo.last_reviews(word_ids)` 用 `MAX(id)` 分组，
+  一次取完整会话的 `(rating, verdict)`，避免逐词查询；
+- **复习页**：删除 `ui.review_mode` 下拉框与持久化；`_session` 改为
+  `list[ReviewCard]`，进度行显示当前形态；双阶段卡正面仍是看词回忆，
+  翻面后隐藏词形/音标/上下文/答案区，只留挖空释义与输入框，提交后恢复完整
+  答案；空格/回车在默写阶段禁用、1~4 保留用于跳过默写；本轮摘要按三种形态
+  分别计数。双阶段仍只评分一次、只调度一次，证据写入口径不变；
+  求助弹窗关闭后按打开前的快照恢复快捷键，避免双阶段默写中的回车被页面
+  快捷键截获；
+- **配置清理**：`UiConfig.review_mode` 与 `REVIEW_MODE_*` 常量删除，
+  旧 `config.json` 的该键直接忽略，不做迁移；
+- **测试**：499 passed（净增 27 条：纯函数阶段判定与穿插、释义纯掩码回退、
+  `last_reviews` 批量查询、自动出卡、拼写卡、双阶段提交/跳过/调度/弹窗取消、
+  摘要分类、旧配置忽略），`ruff check` 与 `ruff format --check` 通过；
+- **外部验收**：2 轮静态审查。第 1 轮 1×P2 + 2×P3：双阶段默写中取消求助
+  弹窗后快捷键被无条件恢复、`_interleave` docstring 示例不符、释义整体被
+  挖空成 `____` 仍排拼写卡；均已修复并补回归用例（P2 用 fake dialog 覆盖
+  取消路径，P3 增加 `_meaning_has_hint()` 与边界用例）。第 2 轮复验通过，
+  无 P0/P1/P2；剩余启发式边界与“接受弹窗后保存失败”路径记录为测试盲区。
+  报告保存在本地 `verification/VERIFICATION_M3.18.md`，该目录不入库；
+- **边界**：不新增 AI 调用、不改 schema、不改 SM-2；双阶段只给过渡期与
+  上次没记牢的词，避免会话变长；短语 / 缺释义自动回退看词。
+
 ## 5. 验证记录
 
 ### 5.1 M0（2026-11-18）

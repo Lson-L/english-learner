@@ -9,6 +9,7 @@ import pytest
 
 from english_learner.models.entities import Word, now_iso
 from english_learner.services.ai_client import AIError
+from english_learner.services.learner_memory import LearnerMemory
 from english_learner.services.review_help_service import ReviewHelpService
 from english_learner.storage.db import Database
 
@@ -17,9 +18,11 @@ class FakeCompleter:
     def __init__(self, *replies: str | Exception) -> None:
         self.replies = list(replies)
         self.calls = 0
+        self.messages: list[list[dict[str, str]]] = []
 
     def complete_json(self, messages, *, temperature=None, max_tokens=None, task="") -> str:
         self.calls += 1
+        self.messages.append(messages)
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
@@ -99,3 +102,24 @@ def test_help_rejects_invalid_rating(db: Database) -> None:
 
     with pytest.raises(ValueError):
         service.help(word, 3, "", "B1")
+
+
+def test_help_injects_learner_memory(db: Database) -> None:
+    word = db.words.upsert(make_word())
+    assert word.id is not None
+    payload = {"advice": "把它和 resistant 区分开。", "mnemonic": "re-silient：压弯能弹回"}
+    fake = FakeCompleter(json.dumps(payload, ensure_ascii=False))
+    memory = LearnerMemory(
+        level="B1",
+        error_types=("vocabulary",),
+        forgotten_words=("resilient",),
+        focus=("推断题",),
+    )
+    service = ReviewHelpService(fake, db.words, memory_provider=lambda: memory)
+
+    service.help(word, 1, "又忘了", "B1")
+
+    prompt = fake.messages[0][-1]["content"]
+    assert "【学习者记忆】" in prompt
+    assert "反复忘记：resilient" in prompt
+    assert "上周计划重点：推断题" in prompt

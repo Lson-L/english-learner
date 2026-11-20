@@ -25,14 +25,19 @@ from ..storage.repositories import (
     StatsRepo,
     WeeklyReviewRepo,
     WordRepo,
+    WritingAttemptRepo,
 )
 from .ai_client import AIClient
 from .article_service import ArticleService
 from .assessment_service import AssessmentService
+from .back_translation_service import BackTranslationService
 from .config_store import AIConfig, ConfigStore
 from .dictionary_service import DictionaryService
 from .export_service import ExportService
+from .learner_memory import LearnerMemoryService
 from .level_feedback_service import LevelFeedbackService
+from .metrics_service import MetricsService
+from .readability import ReadabilityThresholds
 from .reading_quiz_service import ReadingQuizService
 from .review_help_service import ReviewHelpService
 from .srs import ReviewService
@@ -119,29 +124,67 @@ class AppContext:
     def ai_call_repo(self) -> AICallRepo:
         return self.db.ai_calls
 
+    @property
+    def writing_attempt_repo(self) -> WritingAttemptRepo:
+        return self.db.writing_attempts
+
     # ------------------------------------------------------------------ 服务
+    def learner_memory_service(self) -> LearnerMemoryService:
+        """M5.2 学习者记忆：纯本地派生，0 次 AI 调用。"""
+        return LearnerMemoryService(
+            self.profile_repo,
+            self.review_repo,
+            self.word_repo,
+            self.weekly_review_repo,
+            self.level_evidence_repo,
+            self.writing_attempt_repo,
+        )
+
     def assessment_service(self) -> AssessmentService:
         return AssessmentService(self.client(), self.profile_repo)
 
+    def readability_thresholds(self) -> ReadabilityThresholds:
+        """本地可读性阈值：config.json 的 `readability` 段，缺省用默认值。"""
+        return self.store.load_readability()
+
     def article_service(self) -> ArticleService:
-        return ArticleService(self.client(), self.article_repo, self.word_repo)
+        memory = self.learner_memory_service()
+        return ArticleService(
+            self.client(),
+            self.article_repo,
+            self.word_repo,
+            memory_provider=memory.build,
+            readability=self.readability_thresholds(),
+        )
 
     def dictionary_service(self) -> DictionaryService:
-        return DictionaryService(self.client(), self.word_repo, self.stats_repo)
+        memory = self.learner_memory_service()
+        return DictionaryService(
+            self.client(),
+            self.word_repo,
+            self.stats_repo,
+            memory_provider=memory.build,
+        )
 
     def level_feedback_service(self) -> LevelFeedbackService:
         return LevelFeedbackService(
-            self.client(), self.profile_repo, self.article_repo, self.word_repo
+            self.client(),
+            self.profile_repo,
+            self.article_repo,
+            self.word_repo,
+            readability=self.readability_thresholds(),
         )
 
     def reading_quiz_service(self) -> ReadingQuizService:
         """读完文章后的自测：自适应出题、判分、AI 讲评与本地后验调级。"""
+        memory = self.learner_memory_service()
         return ReadingQuizService(
             self.client(),
             self.quiz_repo,
             self.profile_repo,
             self.level_evidence_repo,
             self.review_repo,
+            memory_provider=memory.build,
         )
 
     def weekly_review_service(self) -> WeeklyReviewService:
@@ -161,9 +204,29 @@ class AppContext:
         """复习调度完全本地化：不注入 AI 客户端，断网也能用。"""
         return ReviewService(self.word_repo, self.review_repo, self.stats_repo)
 
+    def back_translation_service(self) -> BackTranslationService:
+        """回译练习：本地抽句 + 两次 AI 调用（出题翻译 / 批量批改）。"""
+        return BackTranslationService(self.client(), self.writing_attempt_repo)
+
     def review_help_service(self) -> ReviewHelpService:
         """点“忘记/模糊”后的 AI 记忆帮助（可选，失败可跳过）。"""
-        return ReviewHelpService(self.client(), self.word_repo)
+        memory = self.learner_memory_service()
+        return ReviewHelpService(
+            self.client(),
+            self.word_repo,
+            memory_provider=memory.build,
+        )
+
+    def metrics_service(self) -> MetricsService:
+        """M5.5 学习效果度量：纯本地聚合，0 次 AI 调用。"""
+        return MetricsService(
+            self.review_repo,
+            self.stats_repo,
+            self.quiz_repo,
+            self.weekly_review_repo,
+            self.ai_call_repo,
+            self.writing_attempt_repo,
+        )
 
     def export_service(self) -> ExportService:
         """数据导出同样是纯本地操作。"""
@@ -177,6 +240,7 @@ class AppContext:
             self.level_evidence_repo,
             self.weekly_review_repo,
             self.ai_call_repo,
+            self.writing_attempt_repo,
         )
 
     # ------------------------------------------------------------------ 便捷

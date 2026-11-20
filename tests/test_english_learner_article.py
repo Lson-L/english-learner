@@ -14,7 +14,9 @@ from english_learner.services.article_service import (
     InvalidArticleError,
     parse_article_draft,
 )
+from english_learner.services.learner_memory import LearnerMemory
 from english_learner.services.prompts import build_article_messages
+from english_learner.services.readability import ReadabilityThresholds
 from english_learner.storage.db import Database
 
 # 12 个词；重复 6 次 = 72 词，3 段 = 216 词，落在 200~400 的校验区间内。
@@ -312,3 +314,208 @@ def test_regenerate_failure_keeps_old_article(db: Database, profile: Profile) ->
     assert stored is not None
     assert stored.id == first.id
     assert stored.title == first.title
+
+
+def test_article_uses_learner_memory_instead_of_profile_focus(db: Database) -> None:
+    """有记忆时用记忆块替代画像里的一行薄弱点，并带上上周计划。"""
+    profile = db.profiles.save(Profile(cefr_level="B1", weaknesses=("学术词汇",)))
+    memory = LearnerMemory(
+        level="B1",
+        weaknesses=("学术词汇",),
+        error_types=("inference",),
+        focus=("推断题", "B2 高频词"),
+    )
+    fake = FakeCompleter(payload_text())
+    service = ArticleService(
+        fake,
+        db.articles,
+        db.words,
+        memory_provider=lambda: memory,
+    )
+
+    service.get_or_create_today(profile, today="2026-11-18")
+
+    prompt = fake.messages[0][1]["content"]
+    assert "【学习者记忆】" in prompt
+    assert "测评薄弱点：学术词汇" in prompt
+    assert "近 7 天主要错因：推断" in prompt
+    assert "上周复盘给学习者定的重点是“推断题、B2 高频词”" in prompt
+    # 记忆非空时不再重复注入画像里的旧薄弱点行。
+    assert "学习者近期的薄弱点是" not in prompt
+
+
+def test_article_without_memory_keeps_profile_focus(db: Database) -> None:
+    """没有记忆（或记忆为空）时保持 M5.2 之前的 prompt 行为。"""
+    profile = db.profiles.save(Profile(cefr_level="B1", weaknesses=("学术词汇",)))
+    fake = FakeCompleter(payload_text())
+    service = make_service(db, fake)
+
+    service.get_or_create_today(profile, today="2026-11-18")
+
+    prompt = fake.messages[0][1]["content"]
+    assert "学习者近期的薄弱点是“学术词汇”" in prompt
+    assert "【学习者记忆】" not in prompt
+    assert "上周复盘给学习者定的重点" not in prompt
+
+
+# ------------------------------------------------------- M5.3 本地可读性指标
+READABILITY_WORDLIST = {
+    "small": "A1",
+    "habit": "A1",
+    "are": "A1",
+    "easy": "A1",
+    "to": "A1",
+    "start": "A1",
+    "and": "A1",
+    "repeat": "A2",
+    "every": "A1",
+    "day": "A1",
+}
+# 12 个正文里完全没有的“生词”，用来构造一篇明显超阈值的文章。
+HARD_SENTENCE = "Zorb quix flarn pleek stoop vlim brunt shree glim trove blen krast."
+
+
+def hard_payload_text(**overrides) -> str:
+    paragraphs = [" ".join([HARD_SENTENCE] * 6) for _ in range(3)]
+    payload = {
+        "title": "Hard Article",
+        "level": "B1",
+        "topic": "science",
+        "paragraphs": paragraphs,
+        "target_words": [],
+        "glossary": [],
+    }
+    payload.update(overrides)
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def make_readability_service(
+    db: Database,
+    fake: FakeCompleter,
+    *,
+    thresholds: ReadabilityThresholds | None = None,
+) -> ArticleService:
+    return ArticleService(
+        fake,
+        db.articles,
+        db.words,
+        readability=thresholds,
+        wordlist_provider=lambda: READABILITY_WORDLIST,
+    )
+
+
+def test_generated_article_records_readability_metrics(db: Database, profile: Profile) -> None:
+    fake = FakeCompleter(payload_text())
+    service = make_readability_service(db, fake)
+
+    article = service.get_or_create_today(profile, today="2026-11-20")
+
+    assert article.metrics is not None
+    assert article.metrics["word_total"] > 0
+    assert article.metrics["wordlist_size"] == len(READABILITY_WORDLIST)
+    assert article.metrics["target_total"] == 1
+    assert article.metrics["target_found"] == 1
+    # 入库后按 JSON 还原，字段不丢。
+    stored = db.articles.get_by_date("2026-11-20")
+    assert stored is not None
+    assert stored.metrics == article.metrics
+
+
+def test_readability_metrics_can_be_disabled(db: Database, profile: Profile) -> None:
+    fake = FakeCompleter(payload_text())
+    service = make_readability_service(db, fake, thresholds=ReadabilityThresholds(enabled=False))
+
+    article = service.get_or_create_today(profile, today="2026-11-20")
+
+    assert article.metrics is None
+    stored = db.articles.get_by_date("2026-11-20")
+    assert stored is not None and stored.metrics is None
+
+
+def test_hard_article_is_recorded_but_not_retried_by_default(
+    db: Database, profile: Profile
+) -> None:
+    """默认只记录 / 告警：不因为指标难看就多花一次调用。"""
+    fake = FakeCompleter(hard_payload_text())
+    service = make_readability_service(db, fake)
+
+    article = service.get_or_create_today(profile, today="2026-11-20")
+
+    assert fake.calls == 1
+    assert article.title == "Hard Article"
+    assert article.metrics is not None
+    assert article.metrics["unknown_count"] == article.metrics["word_total"]
+
+
+def test_retry_enabled_rewrites_article_that_is_too_hard(db: Database, profile: Profile) -> None:
+    fake = FakeCompleter(hard_payload_text(), payload_text())
+    service = make_readability_service(
+        db,
+        fake,
+        thresholds=ReadabilityThresholds(retry_enabled=True),
+    )
+
+    article = service.get_or_create_today(profile, today="2026-11-20")
+
+    assert fake.calls == 2
+    assert article.title == "Small Habits"
+    # 重试走现有 repair_note 通道，把“偏难”原因喂回模型。
+    assert "偏难" in fake.messages[1][-1]["content"]
+    assert article.metrics is not None
+    assert article.metrics["unknown_count"] == 0
+
+
+def test_known_user_words_count_as_known(db: Database, profile: Profile) -> None:
+    """生词本里已加入 / 间隔够长的词，不再算生词。"""
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO words (lemma, in_vocabulary, status, interval_days, "
+            "created_at, updated_at) VALUES ('zorb', 1, 'learning', 0, ?, ?)",
+            (now_iso(), now_iso()),
+        )
+        conn.execute(
+            "INSERT INTO words (lemma, in_vocabulary, status, interval_days, "
+            "created_at, updated_at) VALUES ('quix', 0, 'mastered', 45, ?, ?)",
+            (now_iso(), now_iso()),
+        )
+    known = db.words.list_known_lemmas()
+    assert "zorb" in known and "quix" in known
+
+    fake = FakeCompleter(hard_payload_text())
+    service = make_readability_service(db, fake)
+    article = service.get_or_create_today(profile, today="2026-11-20")
+
+    assert article.metrics is not None
+    # 每段 6 句 × 12 词，其中每句固定出现 zorb / quix 两个已知词。
+    assert article.metrics["unknown_count"] < article.metrics["word_total"]
+
+
+def test_readability_retry_failure_keeps_first_article(db: Database, profile: Profile) -> None:
+    """P2 回归：第二次生成校验失败时，不能把第一篇已通过校验的文章丢掉。"""
+    fake = FakeCompleter(hard_payload_text(), "not json")
+    service = make_readability_service(
+        db,
+        fake,
+        thresholds=ReadabilityThresholds(retry_enabled=True),
+    )
+
+    article = service.get_or_create_today(profile, today="2026-11-20")
+
+    assert fake.calls == 2
+    assert article.title == "Hard Article"
+    assert article.metrics is not None
+
+
+def test_readability_retry_ai_error_keeps_first_article(db: Database, profile: Profile) -> None:
+    """第二次生成网络失败时同样保留第一篇，不抛给界面。"""
+    fake = FakeCompleter(hard_payload_text(), AIError("网络错误"))
+    service = make_readability_service(
+        db,
+        fake,
+        thresholds=ReadabilityThresholds(retry_enabled=True),
+    )
+
+    article = service.get_or_create_today(profile, today="2026-11-20")
+
+    assert article.title == "Hard Article"
+    assert article.metrics is not None

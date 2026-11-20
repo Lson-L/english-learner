@@ -13,6 +13,7 @@ from english_learner.models.entities import (
     Profile,
     QuizQuestion,
     ReadingQuiz,
+    WeeklyReview,
     Word,
     now_iso,
 )
@@ -176,6 +177,38 @@ def test_get_or_generate_caches_per_week(db: Database) -> None:
     assert "2026-11-16" in prompt
     assert "Small Habits" in prompt
     assert "B2 词档" in prompt
+
+
+def test_previous_week_focus_is_fed_back(db: Database) -> None:
+    """M5.2 计划回流：本次复盘 prompt 带上周重点，要求交代完成度。"""
+    profile = seed_week(db)
+    db.weekly_reviews.save(
+        WeeklyReview(
+            week_start="2026-11-09",
+            summary="上周复盘",
+            focus=("推断题", "B2 高频词"),
+            created_at="2026-11-15T20:00:00",
+        )
+    )
+    fake = FakeCompleter(review_payload())
+    service = make_service(db, fake)
+
+    service.get_or_generate(profile, on=ON)
+
+    prompt = fake.messages[0][-1]["content"]
+    assert "【上周计划重点】推断题、B2 高频词" in prompt
+    assert "上周计划完成度" in prompt
+
+
+def test_no_previous_week_focus_keeps_prompt_unchanged(db: Database) -> None:
+    profile = seed_week(db)
+    fake = FakeCompleter(review_payload())
+    service = make_service(db, fake)
+
+    service.get_or_generate(profile, on=ON)
+
+    prompt = fake.messages[0][-1]["content"]
+    assert "【上周计划重点】" not in prompt
 
 
 def test_no_data_raises_without_calling_ai(db: Database) -> None:

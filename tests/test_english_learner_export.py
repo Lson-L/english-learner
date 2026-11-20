@@ -19,6 +19,7 @@ from english_learner.models.entities import (
     ReadingQuiz,
     WeeklyReview,
     Word,
+    WritingAttempt,
     now_iso,
 )
 from english_learner.services.export_service import ExportService
@@ -43,6 +44,7 @@ def make_service(db: Database) -> ExportService:
         db.evidence,
         db.weekly_reviews,
         db.ai_calls,
+        db.writing_attempts,
     )
 
 
@@ -115,6 +117,36 @@ def seed(db: Database) -> None:
             total_tokens=200,
             latency_ms=900,
         )
+    )
+    db.writing_attempts.replace_for_article(
+        article.id,
+        [
+            WritingAttempt(
+                article_id=article.id,
+                article_date="2026-11-19",
+                position=0,
+                sentence_en="Small habits are powerful.",
+                reference_cn="小习惯很有力量。",
+                created_at=now_iso(),
+            )
+        ],
+    )
+    db.writing_attempts.save_grades(
+        article.id,
+        [
+            (
+                0,
+                "Small habits are powerful.",
+                {
+                    "score": 2,
+                    "edited": "Small habits are powerful.",
+                    "reason": "很好",
+                    "error_types": [],
+                },
+                2,
+                "2026-11-19T21:30:00",
+            )
+        ],
     )
     db.evidence.insert(
         LevelEvidence(
@@ -227,6 +259,7 @@ def test_export_json_contains_all_tables(db: Database, tmp_path: Path) -> None:
         "level_evidence": 1,
         "weekly_reviews": 1,
         "ai_calls": 1,
+        "writing_attempts": 1,
     }
     assert data["profile"]["cefr_level"] == "B1"
     assert data["profile"]["strengths"] == ["阅读理解"]
@@ -254,6 +287,8 @@ def test_export_json_contains_all_tables(db: Database, tmp_path: Path) -> None:
     assert data["weekly_reviews"][0]["suggested_level"] == "B2"
     assert data["ai_calls"][0]["task"] == "查词"
     assert data["ai_calls"][0]["total_tokens"] == 200
+    assert data["writing_attempts"][0]["score"] == 2
+    assert "回译练习 1" in result.summary()
     assert "生词 1" in result.summary()
     assert "阅读检测 1" in result.summary()
     assert "等级证据 1" in result.summary()
@@ -291,6 +326,7 @@ def test_export_csv_writes_one_file_per_table(db: Database, tmp_path: Path) -> N
         "level_evidence.csv",
         "weekly_reviews.csv",
         "ai_calls.csv",
+        "writing_attempts.csv",
     }
     assert all(path.is_file() for path in result.files)
 
@@ -344,6 +380,16 @@ def test_export_csv_writes_one_file_per_table(db: Database, tmp_path: Path) -> N
     assert "What is the main idea?" in quiz_rows[0]["questions"]
     assert quiz_rows[0]["feedback"] == "细节理解不错，推断题需要再练。"
 
+    writing_rows = list(
+        csv.DictReader(
+            io.StringIO((target / "writing_attempts.csv").read_text(encoding="utf-8-sig"))
+        )
+    )
+    assert writing_rows[0]["sentence_en"] == "Small habits are powerful."
+    assert writing_rows[0]["reference_cn"] == "小习惯很有力量。"
+    assert writing_rows[0]["score"] == "2"
+    assert json.loads(writing_rows[0]["verdict"])["reason"] == "很好"
+
 
 def test_export_empty_database(db: Database, tmp_path: Path) -> None:
     service = make_service(db)
@@ -356,7 +402,7 @@ def test_export_empty_database(db: Database, tmp_path: Path) -> None:
     csv_result = service.export_csv(tmp_path / "empty_csv")
     words_text = (tmp_path / "empty_csv" / "words.csv").read_text(encoding="utf-8-sig")
     assert words_text.strip().startswith("id,lemma")
-    assert len(csv_result.files) == 11
+    assert len(csv_result.files) == 12
 
 
 def test_export_csv_directory_is_created(db: Database, tmp_path: Path) -> None:
@@ -364,3 +410,33 @@ def test_export_csv_directory_is_created(db: Database, tmp_path: Path) -> None:
     result = make_service(db).export_csv(nested)
     assert nested.is_dir()
     assert result.files
+
+
+def test_export_articles_includes_readability_metrics(db: Database, tmp_path: Path) -> None:
+    """M5.3：JSON 快照保留 metrics 对象，CSV 里写成 JSON 字符串。"""
+    metrics = {"word_total": 8, "unknown_count": 0, "wordlist_size": 3000}
+    db.articles.insert(
+        Article(
+            article_date="2026-11-20",
+            title="Small Habits",
+            content="Small habits are powerful.",
+            level="B1",
+            word_count=4,
+            target_words=("habits",),
+            metrics=metrics,
+            created_at=now_iso(),
+        )
+    )
+    service = make_service(db)
+
+    result = service.export_json(tmp_path / "backup.json")
+    data = json.loads(result.files[0].read_text(encoding="utf-8"))
+    assert data["articles"][0]["metrics"] == metrics
+
+    service.export_csv(tmp_path / "csv")
+    rows = list(
+        csv.DictReader(
+            io.StringIO((tmp_path / "csv" / "articles.csv").read_text(encoding="utf-8-sig"))
+        )
+    )
+    assert json.loads(rows[0]["metrics"]) == metrics

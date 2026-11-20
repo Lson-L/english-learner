@@ -4,7 +4,7 @@
 > 当前状态见 [PROGRESS.md](PROGRESS.md)，历史记录见 [HISTORY.md](HISTORY.md)，
 > 已知问题见 [TECH_DEBT.md](TECH_DEBT.md)。章节编号沿用拆分前的 PROGRESS。
 
-## 4. 文件地图（M3.17 完成后的现状）
+## 4. 文件地图（M5.5 完成后的现状）
 
 ```
 src/english_learner/
@@ -12,14 +12,15 @@ src/english_learner/
 ├── __main__.py                 支持 python -m english_learner
 ├── app.py                      入口：日志、配置、Database、主窗口、首次测评
 ├── assets/
-│   └── fonts/                  内置开源字体 Inter + Literata（OFL 1.1，见 OFL-*.txt）
+│   ├── fonts/                  内置开源字体 Inter + Literata（OFL 1.1，见 OFL-*.txt）
+│   └── wordlists/              M5.3 静态词表 ai_frequency.json（3212 词，A1~C1）
 ├── models/
 │   └── entities.py             Profile / Article / Word / Highlight / DailyStats /
-│                               ReadingQuiz / AICall / AIUsageSummary 等 frozen dataclass
+│                               ReadingQuiz / WritingAttempt / AICall 等 frozen dataclass
 ├── storage/
 │   ├── db.py                   SQLite 连接、PRAGMA、建表迁移（schema v8）、事务、仓库入口
 │   └── repositories.py         Profile / Article / Word / Review / Stats / Quiz / Evidence /
-│                               WeeklyReview / AICall 仓库（纯 SQL）
+│                               WeeklyReview / AICall / WritingAttempt 仓库（纯 SQL）
 ├── services/
 │   ├── ai_client.py            OpenAI 兼容客户端；test_connection / complete / complete_json
 │   │                           支持 AICallRecorder 注入（token/耗时/错误落 ai_calls）
@@ -28,7 +29,7 @@ src/english_learner/
 │   ├── config_store.py         AIConfig、JSON 配置读写、URL 规范化、Key 脱敏
 │   ├── provider_presets.py     服务商预设
 │   ├── json_utils.py           parse_json_object 三档兜底 + 字段类型转换
-│   ├── prompts.py              全部提示词 + PROMPT_VERSION = "m3-17"
+│   ├── prompts.py              全部提示词 + PROMPT_VERSION = "m5-4"
 │   ├── assessment_bank.py      3 套固定题（A2/B1/B2），默认 B1
 │   ├── assessment_service.py   本地计分、AI 评分、CEFR 回退、手动选级、落库
 │   ├── article_service.py      文章生成、JSON 校验、重试一次、当天缓存、换一篇
@@ -40,9 +41,15 @@ src/english_learner/
 │   ├── weekly_review_service.py 每周复盘：汇总数据 + AI 建议 + 用户确认
 │   ├── srs.py                  简化 SM-2 调度 + ReviewService（纯本地，不依赖 AI）
 │   ├── recall.py               拼写回忆判分与挖空题面（纯函数，不调 AI）
+│   ├── review_plan.py          复习卡片自动编排：看词 / 拼写 / 双阶段（M3.18，纯函数）
 │   ├── secret_store.py         API Key 的 Windows DPAPI 加解密（非 Windows 回退明文）
 │   ├── log_files.py            日志尾部读取 / 轮转文件排序 / 关键字筛选（纯 Python）
-│   ├── export_service.py       JSON / CSV 数据导出（十一张表，含 AI 调用记录）
+│   ├── learner_memory.py       学习者记忆：本地派生摘要 + 按任务过滤（M5.2）
+│   ├── readability.py          本地可读性指标：生词比例 / 句长 / 目标词覆盖（M5.3，纯函数）
+│   ├── back_translation.py     回译：切句 / 抽句 / 译文与批改解析（M5.4，纯函数）
+│   ├── back_translation_service.py 回译出题缓存 + 批量批改（M5.4，两次 AI 调用）
+│   ├── metrics_service.py      学习效果度量：通过率 / 回炉率 / 计划完成 / 重试 / 趋势（M5.5，纯本地）
+│   ├── export_service.py       JSON / CSV 数据导出（十二张表，含 AI 调用记录与回译）
 │   └── review_help_service.py  复习“忘记/模糊”求助：AI 建议 + 更新记忆方法
 └── gui/
     ├── fonts.py                内置字体注册 + 全局英文字体（默认 Lexend，可选 Literata/Georgia/Inter）
@@ -52,6 +59,7 @@ src/english_learner/
     ├── assessment_dialog.py     摸底测评弹窗（答题 → 评分 → 结果/手动选级）
     ├── level_feedback_dialog.py 阅读感受弹窗（快捷选项 + 文本 → 调级并换文章）
     ├── reading_quiz_dialog.py  阅读检测弹窗（两轮自适应 + 产出题 + 置信度结果）
+    ├── back_translation_dialog.py 回译练习弹窗（中文 → 写英文 → 最小修改与原因）
     ├── review_help_dialog.py   复习求助弹窗（原因 → AI 建议 → 更新记忆方法）
     ├── weekly_review_dialog.py 每周复盘弹窗（AI 总结 → 用户确认后改级）
     ├── ai_usage_dialog.py      AI 调用记录弹窗（范围汇总 / 按任务 / 明细 / 清空）
@@ -63,12 +71,12 @@ src/english_learner/
     └── pages/
         ├── common.py           Card / PageHeader / StatCard(可刷新) / set_status
         ├── today.py            今日页：连续天数/到期复习/累计生词/文章状态/测评入口
-        ├── reader.py           阅读页：正文全宽 + 悬浮释义卡、换一篇、调整难度、阅读完成
+        ├── reader.py           阅读页：正文全宽 + 悬浮释义卡、换一篇、调整难度、阅读完成、回译练习
         ├── vocabulary.py       生词本页：筛选/搜索/排序/编辑/批量删除/脏检查/求助记录回显
-        ├── review.py           复习页：看词/拼写两种卡片、本地判分建议、会话统计（M3.16）
-        └── settings.py         配置、调用记录摘要与入口、字体、数据位置、JSON/CSV 导出
+        ├── review.py           复习页：自动编排看词/拼写/双阶段卡、本地判分建议、会话统计（M3.18）
+        └── settings.py         配置、学习效果、调用记录摘要与入口、字体、数据位置、JSON/CSV 导出
 
-tests/（共 352 个用例，全部 mock AI、无网络）
+tests/（共 499 个用例，全部 mock AI、无网络）
 ├── test_english_learner_config.py        配置读写/校验/脱敏
 ├── test_english_learner_ai_client.py     连接测试与错误翻译
 ├── test_english_learner_ai_usage.py      AI 调用仓库汇总/筛选、客户端埋点与重试、AppContext 注入
@@ -88,8 +96,14 @@ tests/（共 352 个用例，全部 mock AI、无网络）
 ├── test_english_learner_srs.py           SM-2 四档调度/易度边界/间隔上限/复习服务落库
 ├── test_english_learner_review_help.py   复习求助：建议解析/记忆方法落库/失败兜底
 ├── test_english_learner_review_help_dialog.py 求助弹窗：快捷原因/AI 建议/跳过
-├── test_english_learner_review_page.py   复习页状态机/翻面/评分/会话统计/队列上限
+├── test_english_learner_review_page.py   复习页状态机/翻面/评分/自动出卡/双阶段/会话统计/队列上限
+├── test_english_learner_review_plan.py   卡片编排：阶段判定/历史覆盖/穿插规则/不丢卡不重复
 ├── test_english_learner_recall.py        拼写归一化/编辑距离/判分与建议评分
+├── test_english_learner_learner_memory.py 记忆汇总口径/任务过滤/截断/空数据 prompt 快照
+├── test_english_learner_back_translation.py 回译切句/抽句/译文与批改解析/缓存/落库/级联
+├── test_english_learner_back_translation_dialog.py 回译弹窗：缓存/校验/批改展示/失败重试
+├── test_english_learner_metrics.py       学习效果口径：首次通过/回炉/计划完成/重试/趋势
+├── test_english_learner_metrics_page.py  设置页学习效果卡片（offscreen）
 ├── test_english_learner_vocabulary_page.py 生词本筛选/搜索/排序/编辑/批量删除/脏检查/求助记录回显
 ├── test_english_learner_secret_store.py   DPAPI 往返/明文兼容/损坏密文
 ├── test_english_learner_export.py        JSON 快照/CSV 分表/空库/原子写入
@@ -516,7 +530,8 @@ tests/（共 352 个用例，全部 mock AI、无网络）
 - **日志查看器不要设 font-family**：项目约定所有英文外观由 `gui/fonts.py` +
   全局 QSS 决定（CLAUDE.md 第 9 条），即使是日志窗口也不单独设等宽字体；
 - **导出**：`ai_calls` 是第十一张表；`ExportService` 的构造参数新增
-  `ai_calls`（可选，默认 None），旧测试/调用方不传也能工作。
+  `ai_calls`（可选，默认 None），旧测试/调用方不传也能工作。M5.4 起
+  `writing_attempts` 是第十二张表，同样以可选构造参数注入。
 
 ### 6.24 M3.16：复习拼写回忆
 
@@ -531,14 +546,17 @@ tests/（共 352 个用例，全部 mock AI、无网络）
   `mask_occurrences()` 用 `\b` 单词边界和大小写不敏感替换，避免把 go 挖进 good；
   释义里出现的英文原词也会被挖掉。含空格的短语、缺少释义的词返回 None，
   复习页自动回退到看词回忆；
-- **UI 状态**：`_spelling_active` 表示当前卡片是否走拼写；拼写正面隐藏
+- **UI 状态**：`_current_mode` 表示当前卡片的形态（`recognition` / `spelling` /
+  `dual`），`_spell_input_active` 表示输入框是否可编辑。拼写正面隐藏
   `_word_label / _lemma_label / _phonetic_label / _pos_label / _context_label`，
   翻面后再显示。输入框只读后保留用户答案，提交按钮隐藏；
-- **快捷键**：拼写输入阶段 `_set_shortcuts_enabled(False)` 禁用全部 QShortcut，
-  否则 QLineEdit 里的空格、回车和数字会被页面级快捷键抢走；判分翻面后恢复。
-  回车提交走 `QLineEdit.returnPressed`，不走 Return 快捷键；
-- **偏好**：`ui.review_mode`（`recognition` / `spelling`）由复习页直接保存；
-  设置页改字体必须用 `dataclasses.replace` 只改 `english_font`，否则会冲掉模式；
+- **快捷键**：拆成 `_reveal_shortcuts`（空格/回车）与 `_rating_shortcuts`（1~4）。
+  拼写正面两套都禁用；双阶段默写只禁用空格/回车（回车交给输入框），
+  保留 1~4 让用户直接跳过默写；判分翻面后全部恢复。回车提交走
+  `QLineEdit.returnPressed`，不走 Return 快捷键；
+- **偏好**：M3.16 的 `ui.review_mode` 已在 M3.18 移除，卡片形态改由
+  `services/review_plan.py` 自动编排（见 6.31）；设置页改字体仍用
+  `dataclasses.replace` 只改 `english_font`；
 - **不做的事**：不落新表、不调 AI、不自动改调度。拼写正确率统计已在 M5.1
   通过 `review_logs` 新增列落地（见 6.26）。
 
@@ -587,3 +605,148 @@ tests/（共 352 个用例，全部 mock AI、无网络）
   非法值直接 `ValueError`，避免留下“词条已更新、日志没写”的半截状态；
 - **边界**：证据只用于统计与后续学习者记忆（M5.2），**不参与 `schedule()`**；
   调度结果与改动前完全一致，有对照单测。
+
+### 6.27 M5.2：学习者记忆与计划回流
+
+- **派生而非存储**：`services/learner_memory.py` 的 `LearnerMemoryService.build()`
+  每次从 `profile / level_evidence / review_logs / words / weekly_reviews`
+  现算一份 `LearnerMemory`，不建表、不新增 AI 调用、不保存“压缩档案”；
+  数据一改，下一次 prompt 立刻反映；
+- **空数据必须无感**：`LearnerMemory.is_empty` 为真时
+  `prompts.build_learner_memory_block()` 返回空串，各 prompt builder 只在非空时
+  插入；有快照测试保证默认参数与空记忆的输出逐字节一致；
+- **按任务过滤**：文章生成看等级 / 测评薄弱点 / 错因 / 反复忘记 / 拼写薄弱 / 积压
+  （上周计划走独立的 `learner_plan`，不在记忆块里重复）；查词只看等级与错因；
+  复习求助看等级 / 遗忘词 / 拼写薄弱 / 计划。把测评的 `profile.weaknesses`
+  也纳入文章记忆，避免“刚测评完、还没有检测证据”时丢掉原有的个性化提示。
+  阅读检测不渲染整块，而是把 `error_types` 并入 `_weak_skills()`（只接受
+  `main_idea / detail / inference / vocabulary / grammar`，产出题技能与
+  `careless` 等非技能值被过滤）；
+- **注入点**：`AppContext` 构造 `LearnerMemoryService` 并把 `memory.build`
+  作为 `memory_provider` 传给文章 / 查词 / 复习求助 / 阅读检测四个 service；
+  记忆在后台线程的 service 方法里构建，UI 线程不查库；
+- **失败降级**：`load_memory()` 吞掉 provider 异常并记 warning，退化为空记忆，
+  不能让统计失败拖垮一次 AI 调用；
+- **计划回流**：上周复盘的 `focus` 通过文章 prompt 的 `learner_plan`
+  作为软约束；本次每周复盘 prompt 通过 `previous_focus` 要求模型交代
+  “上周计划完成度”，等级变更仍只走用户确认；
+- **预算**：记忆块字段都很短，`MAX_MEMORY_CHARS = 280` 兜底截断，约 150~200 token；
+  不要往里面加文章原文或对话历史。
+
+### 6.28 M5.3：本地可测 i+1（可读性指标）
+
+- **静态词表**：`assets/wordlists/ai_frequency.json` 是开发期一次性生成的
+  `{word: CEFR}` 映射（3212 词，A1~C1），运行时只读、结果可复现；
+  PyInstaller 的 `datas` 整目录打包，不需要改 spec。生成脚本
+  `scripts/generate_wordlist.py` 保留复现手段，但长输出会被网关
+  `finish_reason=length` 截断，A1 档当时未走通，词表由 AI 单次生成后人工抽查；
+- **纯函数**：`services/readability.py` 只依赖文本与词表。词表按路径缓存，
+  手工改词表后需重启应用才生效；分词把缩写归一化
+  （`don't → do`、`it's → it`），`_candidates()` 按常见后缀还原屈折
+  （habits / repeated / running），宁可多认已知词，避免误报难文；
+- **指标**：`ReadabilityMetrics` 记录词数、生词数、生词比例、平均 / 最长句长、
+  目标词总数 / 命中数、词表规模。`wordlist_size = 0` 表示词表缺失，
+  指标不可信，展示与告警都跳过；
+- **已知词集合**：词表 + 用户已掌握的词。`WordRepo.list_known_lemmas(30)`
+  返回 `in_vocabulary = 1 OR interval_days >= 30` 的原形（阈值由调用方传入，
+  storage 不引用 services 常量），与学习者记忆的“掌握”口径一致；
+- **schema**：`articles.metrics_json`（`''` 表示旧文章没有指标）。它属于 v8 的
+  M5.3 增量，但 M5.1 已把 v8 发布出去了，所以**不能**只在 `version < 8`
+  分支加列；`_apply_schema()` 用幂等的 `_add_column` 每次启动补齐，旧库升级
+  不丢数据。`Article.metrics` 是 `dict | None`，导出 JSON 是嵌套对象，
+  `articles.csv` 增加 `metrics` 列（JSON 字符串）；
+- **生成流程**：`ArticleService.generate_article()` 在本地校验通过后调用
+  `_analyze()` 计算指标并写日志；默认只记录（`retry_enabled = False`，先观察
+  一周），开启后超阈值会带 `repair_note` 走本循环的第二次尝试——复用现有重试
+  通道，最坏只多 1 次同类调用，不新增任务标签；
+- **阈值可配**：`config.json` 的 `readability` 段（`enabled / retry_enabled /
+  max_unknown_ratio / max_avg_sentence_len`），由
+  `ConfigStore.load_readability()` 宽松解析，非法值回退默认；
+  `ConfigStore.save()` 已改为保留未知段，重新配置 AI 不会冲掉 `readability`；
+- **宽容规则**：词表缺失或小于 500 词时阈值放宽 1.5 倍；正文少于 40 词不告警；
+  指标**不参与改等级**，也不改变 SRS 调度；
+- **界面**：阅读页 meta 行展示 `生词 X% · 目标词 N 个`，超阈值追加 `偏难`；
+  旧文章没有 `metrics` 时整段不显示，不影响阅读与检测。
+
+### 6.29 M5.4：回译练习
+
+- **分层**：切句、抽句与 JSON 解析在 `services/back_translation.py`（纯函数）；
+  AI 编排在 `services/back_translation_service.py`；界面只负责三态展示。
+  新增规则先改纯函数模块，不要往弹窗里塞；
+- **两次调用，两张标签**：首次打开练习做一次 `回译出题`（把本地抽出的 3 句翻成
+  中文并落库），提交后做一次 `回译批改`（3 句批量）。原任务卡写“一天最多 1 次”，
+  但译文没有现成缓存，2026-11-20 决定按“学习效果优先”取消每天上限；缓存策略
+  保证**出题每篇 1 次、批改每次提交 1 次**，重复打开不重复请求；
+- **抽句**：`pick_sentences()` 先切句（处理 Dr. / U.S. / e.g. / 小数 / 引号），
+  排除 <7 或 >40 词的句子，按“含目标词 +3 / 长度理想 +2”排序取前 3，
+  再按原文顺序返回；选题在本地完成，模型只翻译，结果可复现；
+- **批改契约**：逐句 `score` 只允许 0 / 2（模型给 1 也归一化为 0），`reason` 必填，
+  `error_types` 收敛到固定词表（中文标签也映射）；解析失败带原因重试一次，
+  仍失败抛 `AIError` 且**不写库**，用户输入保留在界面上可直接重试；
+- **schema**：`writing_attempts` 是 v8 上的新表，由 `CREATE TABLE IF NOT EXISTS`
+  在旧库启动时自动补齐，不升版本号。`verdict_json` 只存单句批改结果
+  （edited / reason / error_types），与 `Article.metrics` 一样用 dict 字段，
+  避免 models 反向依赖 services；`graded_at IS NULL` 表示尚未批改；
+- **学习者记忆**：`LearnerMemoryService` 读取近 7 天已批改记录的错误类型 Top2，
+  渲染为文章 prompt 的“英文写作薄弱”一行；没有回译数据时不出现该行，
+  空记忆 prompt 仍逐字节一致；
+- **界面**：阅读页「回译练习」只依赖当天文章，不需要先做测评；弹窗打开时
+  同步读缓存（本地 SQL），无缓存才起 `TaskWorker` 出题；请求中拒绝关闭，
+  已批改再次打开只读展示，不重复判分；
+- **边界**：只作练习反馈，不写 `profile`、不写 `review_logs`、不触发等级或
+  SRS 变化；失败 / 离线可直接关闭，不阻塞阅读；
+- **导出**：`writing_attempts` 成为第十二张表，`verdict` 在 CSV 里是 JSON 字符串。
+
+### 6.30 M5.5：学习效果度量
+
+- **分层**：口径与计算全在 `services/metrics_service.py`（只读、无 AI）；
+  仓库只提供聚合 SQL，界面只做格式化。改口径先改服务与 `AI_TASKS.md` 6.1，
+  不要把判定散落到设置页；
+- **首次通过率**：`ROW_NUMBER() OVER (PARTITION BY word_id ORDER BY
+  reviewed_at, id)` 取每词第一条，再按首次复习日期过滤窗口；同一秒多条记录
+  用 id 兜底。不要用 `MIN(reviewed_at)` 关联，时间相同会重复计数；
+- **回炉率**：`COUNT(DISTINCT CASE WHEN rating IN (1,2) THEN word_id END)`，
+  分母是窗口内复习过的词数，按词去重，不按次数；
+- **计划完成率**：只看紧邻上周的 `weekly_reviews`，本周行为由
+  `daily_stats / reading_quizzes / writing_attempts` 判定；focus 是自由文本，
+  用固定关键词表映射（阅读 / 复习 / 生词 / 检测 / 写作），无法映射的条目不进
+  分母，避免把“练习听力”这类本产品不做的条目算成失败；全部无法映射时返回
+  `None`，不要返回 `planned=0` 的对象；
+- **重试率**：`ai_calls` 每次 HTTP 尝试一行，`attempt > 1` 为重试；文章按精确
+  任务 `每日文章`，检测按前缀 `阅读检测`（含第一轮 / 第二轮 / 审核 / 讲评 / 盲评）；
+- **趋势**：非练习检测按文章等级分组，窗口与排序都按 `completed_at`
+  （跨天提交算完成日），最近 3 次与更早 3 次不重叠；样本 < 4 次不判断方向，
+  差值严格大于 ±3 个百分点才判 ↑ / ↓，等于边界算持平，避免小样本抖动；
+- **窗口上下界**：所有聚合 SQL 都同时带 `>= 起始日` 与 `<= 今天`，
+  未来时间戳（系统时钟异常 / 手工写库）不进入“近 30 天”；
+- **展示**：设置页卡片在构造与 `on_activated` 时刷新；计算异常只写日志并显示
+  “—”，不影响设置页其他功能。
+
+### 6.31 M3.18：复习卡片自动编排（看词 / 拼写 / 双阶段）
+
+- **分层**：编排规则全在 `services/review_plan.py`（纯函数、无数据库 / PySide6）；
+  `gui/pages/review.py` 只按 `ReviewCard.mode` 展示。改规则先改这里与
+  `test_english_learner_review_plan.py`，不要把阶段判断写回 UI；
+- **判定顺序**：拼写题面不可用 → 看词；`repetitions == 0` → 看词；
+  上次评分 ≤ 2 或上次 verdict 是 `near/wrong` → 双阶段；`repetitions == 1`
+  → 双阶段；其余 → 拼写。顺序不能乱：`repetitions == 0` 必须优先于
+  “上次没记牢”，否则评过“忘记”的词会被要求直接拼写；
+- **题面可用性**：除 `build_spelling_prompt()` 返回 None 外，还要检查
+  `_meaning_has_hint()`：释义本身是目标词时会被整体挖成 `____`，这种没有
+  线索的题面自动回退看词；数字、中文、英文都算有效线索；
+- **历史查询**：`ReviewRepo.last_reviews(word_ids)` 用 `MAX(id)` 分组，
+  一次取完整会话的 `(rating, verdict)`，避免 N+1；没有历史的词不返回；
+- **穿插**：按卡面拆成看词类 / 拼写类两个队列，每次优先取剩余更多的一类，
+  数量相同按首次出现顺序；同类连续不超过 2 张（除非另一类已用完）。
+  不要用随机打乱：单测需要确定性，用户也需要可预期；
+- **双阶段卡**：仍是一张卡。正面 = 看词回忆；翻面后进入默写阶段，隐藏
+  原词 / 音标 / 上下文 / 答案区，只留挖空释义与输入框；提交后恢复完整答案。
+  空格/回车禁用、1~4 保留，用户可以直接评分跳过默写；
+- **求助弹窗与快捷键**：弹窗打开前记录每个 shortcut 的 `isEnabled()` 快照，
+  关闭后按快照恢复，不能无条件全部启用——双阶段默写阶段本来就禁用空格/回车，
+  无条件恢复会让页面级 Return 截获回车，`QLineEdit.returnPressed` 不再触发；
+- **调度不变**：双阶段只调用一次 `ReviewService.review()`，`schedule()` 的输入
+  仍是用户确认的 1~4；默写结果只进 `review_logs` 的
+  `answer_text / verdict / distance`，与 M5.1 口径一致；
+- **配置清理**：`ui.review_mode` 与 `UiConfig.review_mode` 已删除，
+  旧 `config.json` 里的该键被忽略，不做迁移；复习页不再有模式下拉框。

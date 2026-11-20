@@ -34,7 +34,7 @@ from __future__ import annotations
 import logging
 import random
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 
@@ -56,6 +56,7 @@ from .ai_client import AIError
 from .ai_protocol import TextCompleter
 from .assessment_service import assessment_result_from_data
 from .json_utils import JsonParseError, as_int, as_text, parse_json_object
+from .learner_memory import LearnerMemory, load_memory
 from .level_estimator import (
     LevelPosterior,
     estimate_level,
@@ -125,6 +126,16 @@ _PRODUCTION_SKILLS = {
     "translation",
     "translate",
     "short_answer",
+}
+
+# 学习者记忆里的错因是“错因键”，能映射成选择题技能的才并入薄弱技能。
+# careless / none / unknown 不是技能，忽略。
+_MEMORY_ERROR_SKILLS = {
+    "main_idea",
+    "detail",
+    "inference",
+    "vocabulary",
+    "grammar",
 }
 
 LEVEL_ORDER = CEFR_LEVELS
@@ -682,6 +693,7 @@ class ReadingQuizService:
         *,
         shuffle_options: bool = True,
         rng: random.Random | None = None,
+        memory_provider: Callable[[], LearnerMemory] | None = None,
     ) -> None:
         self._client = client
         self._quizzes = quiz_repo
@@ -690,6 +702,7 @@ class ReadingQuizService:
         self._reviews = review_repo
         self._shuffle_options = shuffle_options
         self._rng = rng
+        self._memory_provider = memory_provider
 
     # ------------------------------------------------------------ 出题 / 缓存
     def get_cached(self, article_id: int) -> ReadingQuiz | None:
@@ -850,24 +863,34 @@ class ReadingQuizService:
         return tuple(shuffle_question_options(question, self._rng) for question in questions)
 
     def _weak_skills(self) -> tuple[str, ...]:
-        """从最近几次正式检测里挑正确率最低的技能，喂给出题 prompt。
+        """最近几次正式检测的低正确率技能 + 学习者记忆里的近期错因，喂给出题 prompt。
 
-        样本太少（少于 WEAK_SKILL_MIN_SAMPLES）不参与，避免一次失误被当成长期弱点。
+        样本太少（少于 WEAK_SKILL_MIN_SAMPLES）不参与，避免一次失误被当成长期弱点；
+        M5.2 起把 `level_evidence.error_types` 的 Top2 也并进来——检测样本少时，
+        记忆里的错因仍能提示模型该覆盖哪些技能。
         """
+        weak: list[str] = []
         recent = self._quizzes.list_recent_completed_with_titles(limit=8)
         quizzes = [quiz for quiz, _ in recent if not quiz.practice_mode]
-        if not quizzes:
-            return ()
-        stats = skill_stats(quizzes)
-        weak = [
-            stat.skill
-            for stat in stats
-            if stat.skill
-            and stat.skill != "unknown"
-            and stat.skill.lower() not in _PRODUCTION_SKILLS
-            and stat.total >= WEAK_SKILL_MIN_SAMPLES
-            and stat.accuracy < WEAK_SKILL_MAX_ACCURACY
-        ]
+        if quizzes:
+            stats = skill_stats(quizzes)
+            weak = [
+                stat.skill
+                for stat in stats
+                if stat.skill
+                and stat.skill != "unknown"
+                and stat.skill.lower() not in _PRODUCTION_SKILLS
+                and stat.total >= WEAK_SKILL_MIN_SAMPLES
+                and stat.accuracy < WEAK_SKILL_MAX_ACCURACY
+            ]
+
+        memory = load_memory(self._memory_provider)
+        existing = {item.strip().lower() for item in weak}
+        for item in memory.error_types:
+            key = item.strip().lower()
+            if key in _MEMORY_ERROR_SKILLS and key not in existing:
+                weak.append(key)
+                existing.add(key)
         return tuple(weak[:WEAK_SKILL_LIMIT])
 
     def _review_questions(

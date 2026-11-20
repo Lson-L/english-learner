@@ -12,9 +12,11 @@ from english_learner.services.config_store import (
     AIConfig,
     ConfigError,
     ConfigStore,
+    UiConfig,
     config_dir,
     normalize_base_url,
 )
+from english_learner.services.readability import ReadabilityThresholds
 
 
 def make_config(**overrides) -> AIConfig:
@@ -168,3 +170,98 @@ def test_config_dir_uses_appdata_on_windows(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("APPDATA", r"D:\fake\Roaming")
     if os.name == "nt":
         assert config_dir() == Path(r"D:\fake\Roaming") / "EnglishLearner"
+
+
+def test_readability_thresholds_roundtrip_and_are_preserved(tmp_path: Path) -> None:
+    """readability 段可读写，且重新保存 AI 配置不会把它冲掉。"""
+    store = ConfigStore(tmp_path / "config.json")
+    thresholds = ReadabilityThresholds(
+        enabled=True,
+        retry_enabled=True,
+        max_unknown_ratio=0.1,
+        max_avg_sentence_len=18.0,
+    )
+    store.save_readability(thresholds)
+    assert store.load_readability() == thresholds
+
+    store.save(make_config())
+    assert store.load_readability() == thresholds
+    # ui 段也不受影响。
+    store.save_ui(UiConfig(english_font="literata"))
+    assert store.load_readability() == thresholds
+
+
+def test_readability_thresholds_fall_back_to_defaults(tmp_path: Path) -> None:
+    store = ConfigStore(tmp_path / "missing.json")
+    assert store.load_readability() == ReadabilityThresholds()
+
+    store.path.write_text('{"readability": "broken"}', encoding="utf-8")
+    assert store.load_readability() == ReadabilityThresholds()
+
+
+def test_save_removes_legacy_flat_ai_fields(tmp_path: Path) -> None:
+    """P3 回归：旧扁平格式的顶层明文 api_key 不能在保存后残留在文件里。"""
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "base_url": "https://api.deepseek.com/v1",
+                "api_key": "sk-plain-legacy",
+                "model": "deepseek-chat",
+                "temperature": 0.7,
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = ConfigStore(path)
+
+    assert store.load() is not None
+    store.save(make_config(model="deepseek-chat"))
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert "api_key" not in payload
+    assert "base_url" not in payload
+    assert "model" not in payload
+    assert "temperature" not in payload
+    assert payload["ai"]["model"] == "deepseek-chat"
+
+
+def make_flat_legacy_payload() -> dict:
+    payload = make_config().to_dict()
+    # 扁平格式：顶层直接放 AI 字段（load() 明确兼容），且 api_key 是明文。
+    payload["ui"] = {"english_font": "lexend"}
+    return payload
+
+
+def test_save_readability_migrates_flat_config_without_losing_ai(tmp_path: Path) -> None:
+    """P2 回归：只改可读性阈值时，扁平配置的 AI 字段要迁移进 `ai` 段，不能丢。"""
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(make_flat_legacy_payload()), encoding="utf-8")
+    store = ConfigStore(path)
+    before = store.load()
+    assert before is not None and before.api_key == "sk-1234567890abcdef"
+
+    store.save_readability(ReadabilityThresholds(max_unknown_ratio=0.1))
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    for key in ("base_url", "api_key", "model", "temperature"):
+        assert key not in payload
+    assert payload["readability"]["max_unknown_ratio"] == 0.1
+    assert payload["ui"]["english_font"] == "lexend"
+    # 迁移后仍然能正常加载，且 Key 已加密存储。
+    after = store.load()
+    assert after == before
+    assert payload["ai"]["api_key"] != "sk-1234567890abcdef"
+
+
+def test_save_ui_migrates_flat_config_without_losing_ai(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(make_flat_legacy_payload()), encoding="utf-8")
+    store = ConfigStore(path)
+
+    store.save_ui(UiConfig(english_font="literata"))
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert "api_key" not in payload
+    assert payload["ui"]["english_font"] == "literata"
+    assert store.load() is not None and store.load().model == "deepseek-chat"

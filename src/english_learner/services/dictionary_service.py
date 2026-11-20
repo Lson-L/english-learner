@@ -27,9 +27,12 @@ from ..storage.repositories import StatsRepo, WordRepo
 from .ai_client import AIError
 from .ai_protocol import TextCompleter
 from .json_utils import JsonParseError, as_text, parse_json_object
+from .learner_memory import LearnerMemory, load_memory
 from .prompts import (
+    MEMORY_TASK_DICTIONARY,
     PROMPT_VERSION,
     build_dictionary_messages,
+    build_learner_memory_block,
     build_mnemonic_messages,
 )
 
@@ -109,11 +112,14 @@ class DictionaryService:
         word_repo: WordRepo,
         stats_repo: StatsRepo | None = None,
         today: Callable[[], str] = today_str,
+        *,
+        memory_provider: Callable[[], LearnerMemory] | None = None,
     ) -> None:
         self._client = client
         self._words = word_repo
         self._stats = stats_repo
         self._today = today
+        self._memory_provider = memory_provider
 
     # ------------------------------------------------------------------ 查词
     def lookup(
@@ -152,7 +158,13 @@ class DictionaryService:
                     context_mismatch=_context_mismatch(cached.context_sentence, sentence),
                 )
 
-        messages = build_dictionary_messages(raw_word.strip(), sentence.strip(), level)
+        memory = load_memory(self._memory_provider)
+        messages = build_dictionary_messages(
+            raw_word.strip(),
+            sentence.strip(),
+            level,
+            learner_memory=build_learner_memory_block(memory, MEMORY_TASK_DICTIONARY),
+        )
         logger.info("查词调用 AI prompt=%s word=%s", PROMPT_VERSION, surface)
         text = self._client.complete_json(messages, temperature=0.3, max_tokens=1500, task="查词")
         try:

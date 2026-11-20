@@ -26,16 +26,12 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from .readability import ReadabilityThresholds
 from .secret_store import SecretError, is_encrypted, protect, unprotect
 
 APP_DIR_NAME = "EnglishLearner"
 CONFIG_FILE_NAME = "config.json"
 CONFIG_VERSION = 1
-
-# 复习卡片模式：看词回忆（默认）/ 拼写回忆。
-REVIEW_MODE_RECOGNITION = "recognition"
-REVIEW_MODE_SPELLING = "spelling"
-REVIEW_MODES = (REVIEW_MODE_RECOGNITION, REVIEW_MODE_SPELLING)
 
 
 class ConfigError(RuntimeError):
@@ -162,12 +158,12 @@ class UiConfig:
     （`gui.fonts.DEFAULT_ENGLISH_FONT`）决定 —— services 层不依赖 PySide6，
     也不该知道有哪些可选字体。
 
-    `review_mode` 是复习卡片模式：`recognition`（看词回忆，默认）或
-    `spelling`（看释义拼写）。非法值一律回退默认，避免坏配置把复习页搞挂。
+    旧版本曾把复习模式（`review_mode`）存在这里；现在复习卡由
+    `services.review_plan` 按学习阶段自动编排，该字段已移除，
+    读到旧配置时直接忽略，不做迁移。
     """
 
     english_font: str = ""
-    review_mode: str = REVIEW_MODE_RECOGNITION
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -178,10 +174,7 @@ class UiConfig:
             return cls()
         # 兼容旧字段 reading_font：早期版本只把字体作用在正文上。
         raw = data.get("english_font") or data.get("reading_font") or ""
-        mode = str(data.get("review_mode") or REVIEW_MODE_RECOGNITION).strip().lower()
-        if mode not in REVIEW_MODES:
-            mode = REVIEW_MODE_RECOGNITION
-        return cls(english_font=str(raw).strip().lower(), review_mode=mode)
+        return cls(english_font=str(raw).strip().lower())
 
 
 class ConfigStore:
@@ -233,15 +226,14 @@ class ConfigStore:
         if errors:
             raise ConfigError("；".join(errors))
 
-        # 保留 ui 段：重新配置 AI 不应该把用户选的字体冲掉。
-        ui_data = self._read_payload().get("ui")
+        # 保留其它段（ui / readability 等）：重新配置 AI 不应该把用户偏好冲掉。
+        payload = self._strip_legacy_ai_fields(self._read_payload())
         ai_data = normalized.to_dict()
         # 调用方通常传明文；若已经是密文（例如原样回写），不要二次加密。
         if not is_encrypted(normalized.api_key):
             ai_data["api_key"] = protect(normalized.api_key)
-        payload: dict[str, Any] = {"version": CONFIG_VERSION, "ai": ai_data}
-        if isinstance(ui_data, dict):
-            payload["ui"] = ui_data
+        payload["version"] = CONFIG_VERSION
+        payload["ai"] = ai_data
         self._write_payload(payload)
         return normalized
 
@@ -250,14 +242,47 @@ class ConfigStore:
         return UiConfig.from_dict(self._read_payload().get("ui", {}))
 
     def save_ui(self, ui: UiConfig) -> UiConfig:
-        """只更新 `ui` 段，`ai` 段原样保留。"""
-        payload = self._read_payload()
+        """只更新 `ui` 段，其它段原样保留。"""
+        payload = self._strip_legacy_ai_fields(self._read_payload())
         payload.setdefault("version", CONFIG_VERSION)
         payload["ui"] = ui.to_dict()
         self._write_payload(payload)
         return ui
 
+    def load_readability(self) -> ReadabilityThresholds:
+        """读取本地可读性阈值；缺失或非法一律回退默认值。"""
+        return ReadabilityThresholds.from_dict(self._read_payload().get("readability", {}))
+
+    def save_readability(self, thresholds: ReadabilityThresholds) -> ReadabilityThresholds:
+        """只更新 `readability` 段，与 `save_ui` 一样保留其它配置。"""
+        payload = self._strip_legacy_ai_fields(self._read_payload())
+        payload.setdefault("version", CONFIG_VERSION)
+        payload["readability"] = thresholds.to_dict()
+        self._write_payload(payload)
+        return thresholds
+
     # ------------------------------------------------------------------ 内部
+    _LEGACY_AI_KEYS: tuple[str, ...] = ("base_url", "api_key", "model", "temperature")
+
+    @classmethod
+    def _strip_legacy_ai_fields(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        """把早期“扁平格式”的顶层 AI 字段迁移到 `ai` 段后删除。
+
+        `load()` 兼容顶层直接写 base_url/api_key/... 的旧文件，但 `save_ui()` /
+        `save_readability()` 只改自己那一段；如果直接删掉顶层字段，旧配置的 AI
+        信息就丢了，下次启动会变成“配置缺失”。所以这里先迁移（顺手把明文 Key
+        加密），再删顶层键。已有 `ai` 段时只做清理，不覆盖。
+        """
+        legacy = {key: payload[key] for key in cls._LEGACY_AI_KEYS if key in payload}
+        if legacy and not isinstance(payload.get("ai"), dict):
+            api_key = legacy.get("api_key")
+            if isinstance(api_key, str) and api_key and not is_encrypted(api_key):
+                legacy["api_key"] = protect(api_key)
+            payload["ai"] = legacy
+        for legacy_key in cls._LEGACY_AI_KEYS:
+            payload.pop(legacy_key, None)
+        return payload
+
     def _read_payload(self) -> dict[str, Any]:
         """读取原始 JSON（不做校验）：文件缺失、编码异常、内容损坏都返回空 dict。"""
         try:

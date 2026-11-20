@@ -82,6 +82,7 @@ def test_initialize_is_idempotent(tmp_path: Path) -> None:
         "review_logs",
         "daily_stats",
         "reading_quizzes",
+        "writing_attempts",
     } <= tables
     second.close()
 
@@ -1012,3 +1013,116 @@ def test_stats_bump_streak_and_due(db: Database) -> None:
     db.words.upsert(make_word(lemma="mastered", due_date="2026-11-01", status="mastered"))
     assert db.stats.count_due("2026-11-17") == 1
     assert [item.lemma for item in db.words.list_due("2026-11-17")] == ["due"]
+
+
+# --------------------------------------------------- M5.3 可读性指标（v8 增量）
+def test_article_metrics_json_roundtrip(db: Database) -> None:
+    metrics = {"word_total": 120, "unknown_count": 6, "wordlist_size": 3000}
+    article = db.articles.insert(make_article(metrics=metrics))
+
+    stored = db.articles.get_by_date(article.article_date)
+    assert stored is not None
+    assert stored.metrics == metrics
+
+    replaced = db.articles.replace_by_date(
+        make_article(article_date="2026-11-19", metrics={"word_total": 200})
+    )
+    assert replaced.metrics == {"word_total": 200}
+
+
+def test_article_without_metrics_reads_as_none(db: Database) -> None:
+    article = db.articles.insert(make_article())
+    stored = db.articles.get_by_id(int(article.id or 0))
+    assert stored is not None
+    assert stored.metrics is None
+
+
+def test_migrate_v8_database_adds_article_metrics_column(tmp_path: Path) -> None:
+    """M5.1 发布的 v8 旧库没有 articles.metrics_json，升级时幂等补列且旧文章不丢。"""
+    path = tmp_path / "v8.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE articles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            article_date TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            level TEXT NOT NULL,
+            topic TEXT NOT NULL DEFAULT '',
+            word_count INTEGER NOT NULL DEFAULT 0,
+            target_words_json TEXT NOT NULL DEFAULT '[]',
+            read_at TEXT,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO articles
+            (article_date, title, content, level, topic, word_count, target_words_json, created_at)
+            VALUES ('2026-11-19', '旧文章', 'Old content here.', 'B1', 'science', 3, '[]',
+                    '2026-11-19T08:00:00');
+        PRAGMA user_version = 8;
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    try:
+        columns = {str(row["name"]) for row in db.query_all("PRAGMA table_info(articles)")}
+        assert "metrics_json" in columns
+
+        legacy = db.articles.get_by_date("2026-11-19")
+        assert legacy is not None
+        assert legacy.title == "旧文章"
+        assert legacy.metrics is None
+
+        db.articles.insert(make_article(article_date="2026-11-20", metrics={"word_total": 9}))
+        added = db.articles.get_by_date("2026-11-20")
+        assert added is not None and added.metrics == {"word_total": 9}
+    finally:
+        db.close()
+
+
+def test_v8_database_without_writing_attempts_gets_new_table(tmp_path: Path) -> None:
+    """M5.4 在 v8 上新增 writing_attempts：旧库启动时由 CREATE IF NOT EXISTS 补齐。"""
+    path = tmp_path / "data.db"
+    db = Database(path)
+    db.execute("DROP TABLE writing_attempts")
+    db.close()
+
+    reopened = Database(path)
+
+    assert int(reopened.query_one("PRAGMA user_version")[0]) == SCHEMA_VERSION
+    tables = {
+        str(item["name"])
+        for item in reopened.query_all("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    assert "writing_attempts" in tables
+    reopened.close()
+
+
+def test_list_known_lemmas_uses_vocabulary_and_interval(db: Database) -> None:
+    db.words.upsert(make_word(lemma="added"))
+    db.words.upsert(make_word(lemma="mature", in_vocabulary=False, interval_days=45))
+    db.words.upsert(make_word(lemma="fresh", in_vocabulary=False, interval_days=3))
+
+    known = db.words.list_known_lemmas()
+    assert "added" in known
+    assert "mature" in known
+    assert "fresh" not in known
+
+
+def test_review_last_reviews_returns_latest_per_word(db: Database) -> None:
+    """复习页排卡要一次拿到每个词最近一次 (rating, verdict)，避免 N+1 查询。"""
+    alpha = db.words.upsert(make_word(lemma="alpha"))
+    beta = db.words.upsert(make_word(lemma="beta"))
+    assert alpha.id is not None and beta.id is not None
+
+    db.reviews.log(word_id=alpha.id, rating=2, prev_interval=0, next_interval=1, verdict="near")
+    db.reviews.log(word_id=alpha.id, rating=3, prev_interval=1, next_interval=6, verdict="correct")
+    db.reviews.log(word_id=beta.id, rating=4, prev_interval=6, next_interval=10)
+
+    assert db.reviews.last_reviews([alpha.id, beta.id, 999]) == {
+        alpha.id: (3, "correct"),
+        beta.id: (4, ""),
+    }
+    assert db.reviews.last_reviews([]) == {}

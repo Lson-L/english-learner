@@ -35,6 +35,7 @@ from english_learner.services.dictionary_service import (  # noqa: E402
     extract_sentence,
     normalize_lemma,
 )
+from english_learner.services.learner_memory import LearnerMemory  # noqa: E402
 from english_learner.storage.db import Database  # noqa: E402
 
 _APP: QApplication | None = None
@@ -51,9 +52,11 @@ class FakeCompleter:
     def __init__(self, *replies: str | Exception) -> None:
         self.replies = list(replies)
         self.calls = 0
+        self.messages: list[list[dict[str, str]]] = []
 
     def complete_json(self, messages, *, temperature=None, max_tokens=None, task="") -> str:
         self.calls += 1
+        self.messages.append(messages)
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
@@ -166,6 +169,32 @@ def test_lookup_new_word_calls_ai_and_stores(db: Database) -> None:
     assert stored is not None
     assert stored.due_date == today_str()
     assert stored.context_sentence == "Resilient people keep going."
+
+
+def test_lookup_injects_learner_memory(db: Database) -> None:
+    """M5.2：查词 prompt 带上学习者记忆，但空记忆时保持原 prompt。"""
+    payload = {
+        "lemma": "resilient",
+        "meaning_cn": "有韧性的",
+        "cefr_band": "B2",
+    }
+    fake = FakeCompleter(json.dumps(payload, ensure_ascii=False))
+    memory = LearnerMemory(level="B1", error_types=("vocabulary",))
+    service = DictionaryService(
+        fake,
+        db.words,
+        db.stats,
+        memory_provider=lambda: memory,
+    )
+
+    service.lookup("Resilient", "Resilient people keep going.", None, "B1")
+
+    prompt = fake.messages[0][-1]["content"]
+    assert "【学习者记忆】" in prompt
+    assert "近 7 天主要错因：语境词义" in prompt
+    # 查词任务不注入积压 / 上周计划。
+    assert "到期未复习" not in prompt
+    assert "上周计划重点" not in prompt
 
 
 def test_lookup_stores_cefr_band_and_tolerates_invalid(db: Database) -> None:
@@ -429,6 +458,23 @@ def test_reader_feedback_button_needs_profile_and_article(db: Database) -> None:
     assert page._feedback_button.isEnabled() is True
 
 
+def test_reader_back_translation_button_needs_only_article(db: Database) -> None:
+    """回译练习只依赖当天文章，不需要先完成测评。"""
+    get_app()
+    db.articles.insert(make_article())
+    context = AppContext(
+        AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
+        ConfigStore(Path("unused.json")),
+        db,
+    )
+
+    page = ReaderPage(context)
+    page.on_activated()
+
+    assert page._back_translation_button.isEnabled() is True
+    assert page._back_translation_button.text() == "回译练习"
+
+
 def test_reader_quiz_button_reflects_completion(db: Database) -> None:
     get_app()
     article = db.articles.insert(make_article())
@@ -551,3 +597,77 @@ def test_reader_page_without_profile_does_not_generate(db: Database) -> None:
     assert not page._generate_button.isHidden()
     assert page._quiz_button.isEnabled() is False
     assert "测评" in page._status.text()
+
+
+# ------------------------------------------------- M5.3 可读性指标展示
+def test_reader_shows_readability_metrics(db: Database) -> None:
+    get_app()
+    db.articles.insert(
+        make_article(
+            metrics={
+                "word_total": 100,
+                "unknown_count": 5,
+                "unknown_ratio": 0.05,
+                "avg_sentence_len": 12.0,
+                "max_sentence_len": 20,
+                "target_total": 2,
+                "target_found": 2,
+                "wordlist_size": 3000,
+            }
+        )
+    )
+    context = AppContext(
+        AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
+        ConfigStore(Path("unused.json")),
+        db,
+    )
+    page = ReaderPage(context)
+    page.on_activated()
+
+    meta = page._meta_label.text()
+    assert "生词 5.0%" in meta
+    assert "目标词 2 个" in meta
+    assert "偏难" not in meta
+
+
+def test_reader_marks_hard_article(db: Database) -> None:
+    get_app()
+    db.articles.insert(
+        make_article(
+            metrics={
+                "word_total": 100,
+                "unknown_count": 30,
+                "unknown_ratio": 0.3,
+                "avg_sentence_len": 12.0,
+                "max_sentence_len": 20,
+                "target_total": 0,
+                "target_found": 0,
+                "wordlist_size": 3000,
+            }
+        )
+    )
+    context = AppContext(
+        AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
+        ConfigStore(Path("unused.json")),
+        db,
+    )
+    page = ReaderPage(context)
+    page.on_activated()
+
+    assert "偏难" in page._meta_label.text()
+
+
+def test_reader_old_article_without_metrics_still_renders(db: Database) -> None:
+    get_app()
+    db.articles.insert(make_article())
+    context = AppContext(
+        AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
+        ConfigStore(Path("unused.json")),
+        db,
+    )
+    page = ReaderPage(context)
+    page.on_activated()
+
+    meta = page._meta_label.text()
+    assert "生词" not in meta
+    assert "偏难" not in meta

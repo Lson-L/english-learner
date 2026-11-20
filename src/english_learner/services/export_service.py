@@ -1,9 +1,9 @@
 """学习数据导出：JSON 全量备份 / CSV 分表。
 
-导出的数据来自 SQLite 的十一张表：
+导出的数据来自 SQLite 的十二张表：
 `profile` / `articles` / `words` / `word_forms` / `highlights` /
 `review_logs` / `daily_stats` / `reading_quizzes` / `level_evidence` /
-`weekly_reviews` / `ai_calls`。
+`weekly_reviews` / `ai_calls` / `writing_attempts`。
 
 设计：
 - 纯 Python，不依赖 PySide6；界面只负责选路径，导出本身可以放进 TaskWorker；
@@ -36,6 +36,7 @@ from ..storage.repositories import (
     StatsRepo,
     WeeklyReviewRepo,
     WordRepo,
+    WritingAttemptRepo,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ TABLE_LABELS: dict[str, str] = {
     "level_evidence": "等级证据",
     "weekly_reviews": "每周复盘",
     "ai_calls": "AI 调用记录",
+    "writing_attempts": "回译练习",
 }
 
 # 摘要展示顺序：先看学习内容，再看历史。
@@ -62,6 +64,7 @@ SUMMARY_ORDER: tuple[str, ...] = (
     "word_forms",
     "highlights",
     "reading_quizzes",
+    "writing_attempts",
     "level_evidence",
     "review_logs",
     "daily_stats",
@@ -93,6 +96,7 @@ CSV_COLUMNS: dict[str, tuple[str, ...]] = {
         "topic",
         "word_count",
         "target_words",
+        "metrics",
         "read_at",
         "created_at",
         "content",
@@ -228,6 +232,19 @@ CSV_COLUMNS: dict[str, tuple[str, ...]] = {
         "error_kind",
         "error_message",
     ),
+    "writing_attempts": (
+        "id",
+        "article_id",
+        "article_date",
+        "position",
+        "sentence_en",
+        "reference_cn",
+        "answer_en",
+        "verdict",
+        "score",
+        "created_at",
+        "graded_at",
+    ),
 }
 
 
@@ -257,6 +274,7 @@ class ExportService:
         evidence: LevelEvidenceRepo | None = None,
         weekly_reviews: WeeklyReviewRepo | None = None,
         ai_calls: AICallRepo | None = None,
+        writing_attempts: WritingAttemptRepo | None = None,
     ) -> None:
         self._profiles = profiles
         self._articles = articles
@@ -267,6 +285,7 @@ class ExportService:
         self._evidence = evidence
         self._weekly_reviews = weekly_reviews
         self._ai_calls = ai_calls
+        self._writing_attempts = writing_attempts
 
     # ------------------------------------------------------------------ 快照
     def snapshot(self) -> dict[str, object]:
@@ -296,6 +315,11 @@ class ExportService:
             "ai_calls": (
                 [asdict(item) for item in self._ai_calls.list_all()]
                 if self._ai_calls is not None
+                else []
+            ),
+            "writing_attempts": (
+                [asdict(item) for item in self._writing_attempts.list_all()]
+                if self._writing_attempts is not None
                 else []
             ),
         }

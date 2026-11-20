@@ -12,8 +12,8 @@ from __future__ import annotations
 import logging
 import random
 import re
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
 from datetime import date
 
 from ..models.entities import Article, Profile, now_iso, today_str
@@ -22,7 +22,21 @@ from ..storage.repositories import ArticleRepo, WordRepo
 from .ai_client import AIError
 from .ai_protocol import TextCompleter
 from .json_utils import JsonParseError, as_str_list, as_text, parse_json_object
-from .prompts import PROMPT_VERSION, build_article_messages
+from .learner_memory import LearnerMemory, load_memory
+from .prompts import (
+    MEMORY_TASK_ARTICLE,
+    PROMPT_VERSION,
+    build_article_messages,
+    build_learner_memory_block,
+)
+from .readability import (
+    KNOWN_INTERVAL_DAYS,
+    ReadabilityMetrics,
+    ReadabilityThresholds,
+    analyze,
+    default_wordlist,
+    threshold_warnings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +96,8 @@ class ArticleDraft:
     paragraphs: tuple[str, ...]
     target_words: tuple[str, ...] = ()
     glossary: tuple[tuple[str, str], ...] = ()
+    # M5.3 本地可读性指标；只在服务层计算，解析器本身不碰词表。
+    metrics: ReadabilityMetrics | None = None
 
     @property
     def content(self) -> str:
@@ -147,6 +163,11 @@ def _focus_from_profile(profile: Profile) -> str:
     """把画像里的薄弱点压成一行软提示（最多 3 条）。"""
     items = [item.strip() for item in profile.weaknesses if item and item.strip()]
     return "、".join(items[:3])
+
+
+def _plan_text(memory: LearnerMemory) -> str:
+    """上周复盘重点 → 文章 prompt 的一行软约束（M5.2 计划回流）。"""
+    return "、".join(item.strip() for item in memory.focus if item and item.strip())[:160]
 
 
 def _contains_word_form(content: str, word: str) -> bool:
@@ -215,10 +236,18 @@ class ArticleService:
         client: TextCompleter,
         article_repo: ArticleRepo,
         word_repo: WordRepo | None = None,
+        *,
+        memory_provider: Callable[[], LearnerMemory] | None = None,
+        readability: ReadabilityThresholds | None = None,
+        wordlist_provider: Callable[[], dict[str, str]] = default_wordlist,
     ) -> None:
         self._client = client
         self._articles = article_repo
         self._words = word_repo
+        self._memory_provider = memory_provider
+        # 可读性指标是“记录 / 告警 / 展示”用的增强信息，阈值可配、默认不强制重试。
+        self._readability = readability or ReadabilityThresholds()
+        self._wordlist_provider = wordlist_provider
 
     # ------------------------------------------------------------ 对外入口
     def get_or_create_today(self, profile: Profile, today: str | None = None) -> Article:
@@ -230,12 +259,16 @@ class ArticleService:
 
         target_words = self._pick_target_words(day)
         topic = self._pick_topic(day)
+        memory = load_memory(self._memory_provider)
         draft = self.generate_article(
             profile.cefr_level,
             target_words,
             topic,
             avoid_titles=self._avoid_titles(day),
-            learner_focus=_focus_from_profile(profile),
+            # 有记忆时用记忆块替代画像里的一行薄弱点；没有记忆时保持旧行为。
+            learner_focus="" if not memory.is_empty else _focus_from_profile(profile),
+            learner_memory=build_learner_memory_block(memory, MEMORY_TASK_ARTICLE),
+            learner_plan=_plan_text(memory),
         )
         return self._store(day, draft)
 
@@ -248,6 +281,8 @@ class ArticleService:
         strict_targets: bool = True,
         learner_feedback: str = "",
         learner_focus: str = "",
+        learner_memory: str = "",
+        learner_plan: str = "",
         angle: str | None = None,
         avoid_titles: list[str] | tuple[str, ...] = (),
         user_request: str = "",
@@ -257,7 +292,9 @@ class ArticleService:
 
         strict_targets=False 表示目标词是“尽量带上”的软约束（阅读反馈重写用）。
         learner_feedback 会一并传给模型，用来控制生词密度与句子长度；
-        learner_focus 是画像里的薄弱点，只作为软提示。
+        learner_focus 是画像里的薄弱点，只作为软提示；
+        learner_memory / learner_plan 是 M5.2 的学习者记忆与上周计划，
+        不传时 prompt 与旧版本完全一致。
         angle=None 时随机选一个切入角度，传空字符串表示不加角度；
         avoid_titles 列出“别再写”的历史标题，保证每次生成（尤其“换一篇”）
         的 prompt 本身就不一样；user_request 是用户在弹窗里写的具体要求。
@@ -266,6 +303,9 @@ class ArticleService:
         auto_angle = angle is None
         chosen_angle = self.pick_angle() if auto_angle else (angle or "").strip()
         last_reason = ""
+        # 可读性重试时先留好第一篇合法文章：第二次生成失败（校验不过 / 网络错误）
+        # 不能让用户当天没有文章。
+        fallback: ArticleDraft | None = None
         for attempt in range(2):
             if attempt > 0 and auto_angle:
                 # 重试时换一个切入角度：同一份 prompt 再发一次，模型多半还是给同样的结果。
@@ -277,6 +317,8 @@ class ArticleService:
                 soft_targets=not strict_targets,
                 learner_feedback=learner_feedback,
                 learner_focus=learner_focus,
+                learner_memory=learner_memory,
+                learner_plan=learner_plan,
                 angle=chosen_angle,
                 avoid_titles=avoid_titles,
                 user_request=user_request,
@@ -298,17 +340,54 @@ class ArticleService:
                 current_article is not None,
                 bool(last_reason),
             )
-            text = self._client.complete_json(
-                messages,
-                temperature=0.8,
-                max_tokens=ARTICLE_MAX_TOKENS,
-                task="每日文章",
-            )
             try:
-                return parse_article_draft(text, level, require_targets=strict_targets)
+                text = self._client.complete_json(
+                    messages,
+                    temperature=0.8,
+                    max_tokens=ARTICLE_MAX_TOKENS,
+                    task="每日文章",
+                )
+            except AIError:
+                if fallback is not None:
+                    logger.warning("可读性重试失败，保留第一次生成的文章", exc_info=True)
+                    return fallback
+                raise
+            try:
+                draft = parse_article_draft(text, level, require_targets=strict_targets)
             except InvalidArticleError as exc:
                 last_reason = str(exc)
                 logger.warning("文章未通过校验（第 %s 次）：%s", attempt + 1, exc)
+                continue
+
+            metrics = self._analyze(draft)
+            if metrics is not None:
+                logger.info(
+                    "文章可读性：词数=%s 生词=%s(%.1f%%) 平均句长=%.1f 目标词=%s/%s 词表=%s",
+                    metrics.word_total,
+                    metrics.unknown_count,
+                    metrics.unknown_ratio * 100,
+                    metrics.avg_sentence_len,
+                    metrics.target_found,
+                    metrics.target_total,
+                    metrics.wordlist_size,
+                )
+            # 默认只记录不重试；开启 retry_enabled 后走现有 repair_note 通道
+            # （复用本循环的第二次尝试，不新增调用类型）。
+            if attempt == 0 and metrics is not None and self._readability.retry_enabled:
+                warnings = threshold_warnings(metrics, self._readability)
+                if warnings:
+                    fallback = replace(draft, metrics=metrics)
+                    last_reason = (
+                        "文章对当前水平偏难（"
+                        + "；".join(warnings)
+                        + "），请换更简单的词和更短的句子重写"
+                    )
+                    logger.info("文章可读性超出阈值（第 1 次）：%s", last_reason)
+                    continue
+            return replace(draft, metrics=metrics)
+        if fallback is not None:
+            logger.warning("可读性重试未通过校验，保留第一次生成的文章")
+            return fallback
         raise AIError(
             "AI 生成的文章没有通过校验",
             f"最后一次原因：{last_reason}。可以点重试，或换一个更稳定的模型。",
@@ -352,12 +431,15 @@ class ArticleService:
             topic = self._pick_topic(day, avoid=avoid_topics)
             angle = None
 
+        memory = load_memory(self._memory_provider)
         draft = self.generate_article(
             profile.cefr_level,
             targets,
             topic,
             strict_targets=strict_targets,
-            learner_focus=_focus_from_profile(profile),
+            learner_focus="" if not memory.is_empty else _focus_from_profile(profile),
+            learner_memory=build_learner_memory_block(memory, MEMORY_TASK_ARTICLE),
+            learner_plan=_plan_text(memory),
             angle=angle,
             # 用户写明了要求时，不再把当前标题列进“禁止重复”：
             # 他可能就是要一篇同主题/同风格的文章，不能让两条指令互相打架。
@@ -382,6 +464,7 @@ class ArticleService:
             topic=draft.topic,
             word_count=draft.word_count,
             target_words=draft.target_words,
+            metrics=draft.metrics.to_dict() if draft.metrics is not None else None,
             created_at=now_iso(),
         )
         stored = self._articles.replace_by_date(article)
@@ -389,6 +472,26 @@ class ArticleService:
         return stored
 
     # -------------------------------------------------------------- 内部
+    def _analyze(self, draft: ArticleDraft) -> ReadabilityMetrics | None:
+        """计算本地可读性指标；关闭或计算失败时返回 None，不影响文章入库。"""
+        if not self._readability.enabled:
+            return None
+        try:
+            known = (
+                self._words.list_known_lemmas(KNOWN_INTERVAL_DAYS)
+                if self._words is not None
+                else ()
+            )
+            return analyze(
+                draft.content,
+                self._wordlist_provider(),
+                known_words=known,
+                target_words=draft.target_words,
+            )
+        except Exception:  # noqa: BLE001 - 指标是增强信息，失败不能拖垮生成
+            logger.warning("计算文章可读性指标失败，按无指标处理", exc_info=True)
+            return None
+
     def _store(self, day: str, draft: ArticleDraft) -> Article:
         article = Article(
             article_date=day,
@@ -398,6 +501,7 @@ class ArticleService:
             topic=draft.topic,
             word_count=draft.word_count,
             target_words=draft.target_words,
+            metrics=draft.metrics.to_dict() if draft.metrics is not None else None,
             created_at=now_iso(),
         )
         try:

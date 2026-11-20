@@ -27,7 +27,11 @@ Java 对照：
   旧检测结果不回填证据、不阻塞启动；
 - v6 → v7：新增 ai_calls（AI 调用记录），只记用量元数据，不保存提示词和回复；
 - v7 → v8：review_logs 增加 answer_text / verdict / distance（M5.1 复习证据），
-  只加列，旧记录保持空串 / 0，不参与统计。
+  只加列，旧记录保持空串 / 0，不参与统计；
+  articles 增加 metrics_json（M5.3 本地可读性指标，M5.1 发布时还没有这一列，
+  所以这一列不放在 `version < 8` 分支里，而是幂等补齐，见 `_apply_schema`）；
+- v8 内新增 writing_attempts（M5.4 回译练习）：新表由 `CREATE TABLE IF NOT EXISTS`
+  自动补齐，不需要再升版本号，旧库启动后即可用。
 """
 
 from __future__ import annotations
@@ -52,6 +56,7 @@ from .repositories import (
     StatsRepo,
     WeeklyReviewRepo,
     WordRepo,
+    WritingAttemptRepo,
 )
 
 SCHEMA_VERSION = 8
@@ -83,6 +88,8 @@ CREATE TABLE IF NOT EXISTS articles (
     topic            TEXT    NOT NULL DEFAULT '',
     word_count       INTEGER NOT NULL DEFAULT 0,
     target_words_json TEXT   NOT NULL DEFAULT '[]',
+    -- M5.3 本地可读性指标（生词比例 / 句长 / 目标词覆盖），空串表示旧文章没有指标
+    metrics_json     TEXT    NOT NULL DEFAULT '',
     read_at          TEXT,
     created_at       TEXT    NOT NULL
 );
@@ -177,6 +184,24 @@ CREATE TABLE IF NOT EXISTS reading_quizzes (
     completed_at      TEXT
 );
 
+-- 回译练习：一篇文章最多 3 句，首次打开写入题目，提交后回写答案与批改。
+-- 只作练习反馈，不参与等级与 SRS；文章被替换时级联删除。
+CREATE TABLE IF NOT EXISTS writing_attempts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    article_id    INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+    article_date  TEXT    NOT NULL,
+    position      INTEGER NOT NULL DEFAULT 0,
+    sentence_en   TEXT    NOT NULL,
+    reference_cn  TEXT    NOT NULL DEFAULT '',
+    answer_en     TEXT    NOT NULL DEFAULT '',
+    -- 单句批改 JSON：edited / reason / error_types
+    verdict_json  TEXT    NOT NULL DEFAULT '',
+    score         INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT    NOT NULL,
+    graded_at     TEXT,
+    UNIQUE (article_id, position)
+);
+
 -- 等级证据：每次检测的题目级观测 + 后验，供后续检测回放历史。
 -- quiz_id 允许为空并 SET NULL：文章被替换导致检测级联删除时，证据仍然保留。
 CREATE TABLE IF NOT EXISTS level_evidence (
@@ -248,6 +273,8 @@ CREATE INDEX IF NOT EXISTS idx_reading_quizzes_date ON reading_quizzes(article_d
 CREATE INDEX IF NOT EXISTS idx_reading_quizzes_completed ON reading_quizzes(completed_at);
 CREATE INDEX IF NOT EXISTS idx_level_evidence_time ON level_evidence(observed_at);
 CREATE INDEX IF NOT EXISTS idx_level_evidence_quiz ON level_evidence(quiz_id);
+CREATE INDEX IF NOT EXISTS idx_writing_attempts_article ON writing_attempts(article_id);
+CREATE INDEX IF NOT EXISTS idx_writing_attempts_time ON writing_attempts(created_at);
 CREATE INDEX IF NOT EXISTS idx_ai_calls_time ON ai_calls(called_at);
 CREATE INDEX IF NOT EXISTS idx_ai_calls_task ON ai_calls(task);
 """
@@ -277,6 +304,7 @@ class Database:
         self._evidence: LevelEvidenceRepo | None = None
         self._weekly: WeeklyReviewRepo | None = None
         self._ai_calls: AICallRepo | None = None
+        self._writing: WritingAttemptRepo | None = None
         if initialize:
             self.connect()
 
@@ -357,6 +385,11 @@ class Database:
             self._add_column(conn, "review_logs", "answer_text", "TEXT NOT NULL DEFAULT ''")
             self._add_column(conn, "review_logs", "verdict", "TEXT NOT NULL DEFAULT ''")
             self._add_column(conn, "review_logs", "distance", "INTEGER NOT NULL DEFAULT 0")
+
+        # articles.metrics_json 属于 v8 的 M5.3 增量，但 M5.1 已经把 v8 发布出去了
+        # （当时还没有这一列），所以不能放进 `version < 8` 分支，否则已经是 v8 的
+        # 旧库永远补不上。_add_column 自己用 PRAGMA table_info 判断，重复启动幂等。
+        self._add_column(conn, "articles", "metrics_json", "TEXT NOT NULL DEFAULT ''")
 
         # words.cefr_band 是 v6 才加的列，索引必须等 ALTER TABLE 之后再建。
         conn.execute("CREATE INDEX IF NOT EXISTS idx_words_band ON words(cefr_band)")
@@ -465,3 +498,9 @@ class Database:
         if self._ai_calls is None:
             self._ai_calls = AICallRepo(self)
         return self._ai_calls
+
+    @property
+    def writing_attempts(self) -> WritingAttemptRepo:
+        if self._writing is None:
+            self._writing = WritingAttemptRepo(self)
+        return self._writing

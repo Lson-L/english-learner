@@ -14,6 +14,7 @@ from english_learner.services.level_feedback_service import (
     LevelFeedbackService,
     clamp_reassessed_level,
 )
+from english_learner.services.readability import ReadabilityThresholds
 from english_learner.storage.db import Database
 
 TODAY = "2026-11-18"
@@ -309,3 +310,35 @@ def test_no_profile_data_is_lost_when_article_missing_words(
     outcome = make_service(db, fake).adjust("稍微有点难", today=TODAY)
     assert outcome.target_words == ()
     assert outcome.article.level == "A2"
+
+
+def test_rewrite_path_respects_readability_switch(
+    db: Database, profile: Profile, article: Article
+) -> None:
+    """P2 回归：阅读反馈重写文章也要遵守 config 的可读性开关。"""
+    fake = FakeCompleter(reassess_payload(), article_payload())
+    service = LevelFeedbackService(
+        fake,
+        db.profiles,
+        db.articles,
+        db.words,
+        readability=ReadabilityThresholds(enabled=False),
+    )
+
+    outcome = service.adjust("太难了", today=TODAY)
+
+    assert outcome.article.metrics is None
+    stored = db.articles.get_by_date(TODAY)
+    assert stored is not None and stored.metrics is None
+
+
+def test_rewrite_path_records_metrics_by_default(
+    db: Database, profile: Profile, article: Article
+) -> None:
+    fake = FakeCompleter(reassess_payload(), article_payload())
+    service = LevelFeedbackService(fake, db.profiles, db.articles, db.words)
+
+    outcome = service.adjust("太难了", today=TODAY)
+
+    assert outcome.article.metrics is not None
+    assert outcome.article.metrics["wordlist_size"] > 0

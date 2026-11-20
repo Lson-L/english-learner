@@ -79,6 +79,17 @@ class WeeklyReviewService:
         reviews = self._weekly.list_recent(limit=1)
         return reviews[0] if reviews else None
 
+    def _previous_focus(self, week_start: str) -> tuple[str, ...]:
+        """上一周复盘的“下周重点”，用于让本次复盘交代计划完成度。
+
+        只取严格早于本周的记录：本周记录如果已存在会命中缓存，
+        不会走到生成流程；这里再过滤一次，避免“未来周”或重复记录干扰。
+        """
+        for review in self._weekly.list_recent(limit=4):
+            if review.week_start < week_start:
+                return tuple(item for item in review.focus if item.strip())
+        return ()
+
     # -------------------------------------------------------------- 生成 / 缓存
     def get_or_generate(
         self,
@@ -130,6 +141,7 @@ class WeeklyReviewService:
             words_added=stats.get("words", 0),
             reviews_done=review_count,
             articles_read=stats.get("articles", 0),
+            previous_focus=self._previous_focus(start),
         )
         logger.info(
             "每周复盘 prompt=%s week=%s quizzes=%s reviews=%s",

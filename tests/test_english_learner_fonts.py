@@ -15,8 +15,6 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from english_learner.gui import fonts  # noqa: E402
 from english_learner.gui.theme import build_stylesheet  # noqa: E402
 from english_learner.services.config_store import (  # noqa: E402
-    REVIEW_MODE_RECOGNITION,
-    REVIEW_MODE_SPELLING,
     AIConfig,
     ConfigStore,
     UiConfig,
@@ -116,27 +114,24 @@ def test_ui_config_reads_legacy_key(tmp_path: Path) -> None:
 def test_load_ui_defaults_when_file_missing(tmp_path: Path) -> None:
     store = ConfigStore(tmp_path / "missing.json")
     assert store.load_ui().english_font == ""
-    assert store.load_ui().review_mode == REVIEW_MODE_RECOGNITION
 
 
-def test_ui_config_review_mode_roundtrip_and_invalid_fallback(tmp_path: Path) -> None:
+def test_ui_config_ignores_legacy_review_mode(tmp_path: Path) -> None:
+    """旧配置里的 review_mode 现在不再生效，但也不能把启动搞挂。"""
     store = ConfigStore(tmp_path / "config.json")
-
-    store.save_ui(UiConfig(review_mode=REVIEW_MODE_SPELLING))
-    assert store.load_ui().review_mode == REVIEW_MODE_SPELLING
-
+    store.save(make_config())
     payload = store._read_payload()
-    payload["ui"] = {"review_mode": "typing"}
+    payload["ui"] = {"english_font": "georgia", "review_mode": "spelling"}
     store._write_payload(payload)
-    assert store.load_ui().review_mode == REVIEW_MODE_RECOGNITION
+
+    assert store.load_ui().english_font == "georgia"
 
 
-def test_settings_font_change_preserves_review_mode(tmp_path: Path) -> None:
-    """改字体只改字体字段，不能把复习模式偏好冲掉。"""
+def test_settings_font_change_keeps_ai_config(tmp_path: Path) -> None:
+    """改字体只改 ui 段，不能把 AI 连接配置冲掉。"""
     get_app()
     store = ConfigStore(tmp_path / "config.json")
     store.save(make_config())
-    store.save_ui(UiConfig(review_mode=REVIEW_MODE_SPELLING))
 
     from english_learner.gui.pages.settings import SettingsPage
 
@@ -145,7 +140,7 @@ def test_settings_font_change_preserves_review_mode(tmp_path: Path) -> None:
 
     ui = store.load_ui()
     assert ui.english_font == fonts.ENGLISH_FONT_CHOICES[1].key
-    assert ui.review_mode == REVIEW_MODE_SPELLING
+    assert store.load() == make_config()
 
 
 def test_settings_page_switches_and_saves_english_font(tmp_path: Path) -> None:

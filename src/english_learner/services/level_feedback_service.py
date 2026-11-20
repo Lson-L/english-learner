@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from ..models.entities import (
@@ -37,6 +38,7 @@ from .article_service import ArticleService
 from .assessment_service import assessment_result_from_data
 from .json_utils import JsonParseError, parse_json_object
 from .prompts import PROMPT_VERSION, build_level_feedback_messages
+from .readability import ReadabilityThresholds, default_wordlist
 
 logger = logging.getLogger(__name__)
 
@@ -122,12 +124,22 @@ class LevelFeedbackService:
         profile_repo: ProfileRepo,
         article_repo: ArticleRepo,
         word_repo: WordRepo,
+        *,
+        readability: ReadabilityThresholds | None = None,
+        wordlist_provider: Callable[[], dict[str, str]] = default_wordlist,
     ) -> None:
         self._client = client
         self._profiles = profile_repo
         self._articles = article_repo
         self._words = word_repo
-        self._article_service = ArticleService(client, article_repo, word_repo)
+        # 重写文章也要遵守同一份可读性配置（关闭 / 阈值 / 是否重试）。
+        self._article_service = ArticleService(
+            client,
+            article_repo,
+            word_repo,
+            readability=readability,
+            wordlist_provider=wordlist_provider,
+        )
 
     # ------------------------------------------------------------------ 生词
     def collect_today_words(self, article_id: int | None, today: str | None = None) -> list[Word]:

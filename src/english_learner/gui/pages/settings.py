@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -27,11 +29,14 @@ from ...services.app_context import AppContext
 from ...services.config_store import AIConfig, ConfigError, ConfigStore
 from ...services.export_service import ExportResult
 from ...services.log_files import log_directory
+from ...services.metrics_service import MetricsSnapshot, PlanCompletion, RateMetric, RetryMetric
 from ..ai_usage_dialog import AIUsageDialog
 from ..fonts import ENGLISH_FONT_CHOICES, get_english_font
 from ..log_viewer_dialog import LogViewerDialog
 from ..workers import TaskWorker
 from .common import Card, PageHeader, set_status
+
+logger = logging.getLogger(__name__)
 
 
 class SettingsPage(QWidget):
@@ -70,9 +75,13 @@ class SettingsPage(QWidget):
         layout.setSpacing(16)
 
         layout.addWidget(
-            PageHeader("设置", "AI 服务配置、调用记录与运行日志、阅读外观、数据导出与备份。")
+            PageHeader(
+                "设置",
+                "AI 服务配置、学习效果、调用记录与运行日志、阅读外观、数据导出与备份。",
+            )
         )
         layout.addWidget(self._build_ai_card())
+        layout.addWidget(self._build_metrics_card())
         layout.addWidget(self._build_ai_usage_card())
         layout.addWidget(self._build_appearance_card())
         layout.addWidget(self._build_data_card())
@@ -128,6 +137,127 @@ class SettingsPage(QWidget):
 
         self.apply_config(self._config)
         return card
+
+    def _build_metrics_card(self) -> Card:
+        """M5.5 学习效果看板：只读本地数据，不产生 AI 调用。"""
+        card = Card()
+        title = QLabel("学习效果（近 30 天）")
+        title.setObjectName("cardTitle")
+        card.body.addWidget(title)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(20)
+        grid.setVerticalSpacing(8)
+        metrics = (
+            ("first_pass", "生词首次通过"),
+            ("relearn", "词回炉率"),
+            ("plan", "计划完成率"),
+            ("article_retry", "文章生成重试"),
+            ("quiz_retry", "阅读检测重试"),
+        )
+        self._metric_labels: dict[str, QLabel] = {}
+        for column, (key, caption) in enumerate(metrics):
+            grid.addWidget(self._build_metric(key, caption), 0, column)
+        for column in range(len(metrics)):
+            grid.setColumnStretch(column, 1)
+        card.body.addLayout(grid)
+
+        self._trend_label = QLabel("")
+        self._trend_label.setObjectName("muted")
+        self._trend_label.setWordWrap(True)
+        card.body.addWidget(self._trend_label)
+
+        note = QLabel(
+            "全部指标由本地记录计算，不消耗 token：首次通过率看每个词的第一次复习评分；"
+            "回炉率 = 复习过的词里出现过“忘记 / 模糊”的比例；计划完成率只跟踪上周复盘"
+            "给出、且本周能找到对应学习行为的重点；重试率 = 重试请求占该任务全部请求的比例；"
+            "趋势按文章等级对比最近 3 次与更早 3 次的检测得分。"
+        )
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        card.body.addWidget(note)
+
+        self._refresh_metrics()
+        return card
+
+    def _build_metric(self, key: str, caption: str) -> QWidget:
+        box = QWidget()
+        box.setMinimumHeight(52)
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        caption_label = QLabel(caption)
+        caption_label.setObjectName("muted")
+        layout.addWidget(caption_label)
+
+        value_label = QLabel("—")
+        value_label.setObjectName("usageValue")
+        layout.addWidget(value_label)
+        self._metric_labels[key] = value_label
+        return box
+
+    def _refresh_metrics(self) -> None:
+        if self._context is None:
+            for label in self._metric_labels.values():
+                label.setText("—")
+            self._trend_label.setText("（未连接数据库，无法计算学习效果）")
+            return
+        try:
+            snapshot = self._context.metrics_service().build()
+        except Exception:  # noqa: BLE001 - 只读统计失败不应影响设置页
+            logger.warning("计算学习效果指标失败", exc_info=True)
+            for label in self._metric_labels.values():
+                label.setText("—")
+            self._trend_label.setText("指标计算失败，可在下次进入设置页时重试。")
+            return
+
+        self._metric_labels["first_pass"].setText(self._rate_text(snapshot.first_pass))
+        self._metric_labels["relearn"].setText(self._rate_text(snapshot.relearn))
+        self._metric_labels["plan"].setText(self._plan_text(snapshot.plan))
+        self._metric_labels["article_retry"].setText(self._retry_text(snapshot.article_retry))
+        self._metric_labels["quiz_retry"].setText(self._retry_text(snapshot.quiz_retry))
+        self._trend_label.setText(self._trend_text(snapshot))
+
+    @staticmethod
+    def _rate_text(metric: RateMetric) -> str:
+        rate = metric.rate
+        if rate is None:
+            return "—"
+        return f"{metric.hit}/{metric.total} · {rate:.0%}"
+
+    @staticmethod
+    def _retry_text(metric: RetryMetric) -> str:
+        rate = metric.rate
+        if rate is None:
+            return "—"
+        return f"{metric.retries}/{metric.attempts} 次 · {rate:.0%}"
+
+    @staticmethod
+    def _plan_text(plan: PlanCompletion | None) -> str:
+        if plan is None or plan.planned == 0:
+            return "—"
+        rate = plan.rate or 0.0
+        return f"{plan.completed}/{plan.planned} · {rate:.0%}"
+
+    @staticmethod
+    def _trend_text(snapshot: MetricsSnapshot) -> str:
+        if not snapshot.quiz_trends:
+            return "同等级得分趋势：近 30 天还没有完成的阅读检测。"
+        arrows = {"up": "↑", "down": "↓", "flat": "→"}
+        lines = ["同等级得分趋势（同一文章等级，最近 3 次对比更早 3 次）："]
+        for trend in snapshot.quiz_trends:
+            base = f"{trend.level} · {len(trend.points)} 次 · 最近一次 {trend.latest_percent}%"
+            delta = trend.delta
+            if delta is None or trend.recent_avg is None:
+                lines.append(base + " · 样本不足，暂不判断趋势")
+                continue
+            arrow = arrows.get(trend.direction, "→")
+            lines.append(
+                f"{base} · 近 3 次均值 {trend.recent_avg:.0f}%"
+                f"（较之前 {delta:+.0f} 个百分点 {arrow}）"
+            )
+        return "\n".join(lines)
 
     def _build_ai_usage_card(self) -> Card:
         card = Card()
@@ -207,7 +337,7 @@ class SettingsPage(QWidget):
 
     def _on_english_font_changed(self, index: int) -> None:
         key = str(self._font_combo.itemData(index) or "")
-        # 用 replace 只改字体字段，保留 review_mode 等其他界面偏好。
+        # 用 replace 只改字体字段，保留 UiConfig 里其它界面偏好。
         self._ui = replace(self._ui, english_font=key)
         try:
             self._store.save_ui(self._ui)
@@ -260,7 +390,7 @@ class SettingsPage(QWidget):
         card.body.addWidget(title)
 
         desc = QLabel(
-            "导出全部学习数据：学习画像、文章、生词、高亮、复习记录与打卡统计。"
+            "导出全部学习数据：学习画像、文章、生词、高亮、复习记录、回译练习与打卡统计。"
             "JSON 适合整体备份，CSV 每张表一个文件（Excel 可直接打开）。"
         )
         desc.setObjectName("muted")
@@ -308,8 +438,9 @@ class SettingsPage(QWidget):
 
     # -------------------------------------------------------------- actions
     def on_activated(self) -> None:
-        """切回设置页时刷新用量摘要（连接测试、其他页面调用 AI 后都会变化）。"""
+        """切回设置页时刷新用量摘要与学习效果（复习、检测后会变化）。"""
         self._refresh_usage_summary()
+        self._refresh_metrics()
 
     def _refresh_usage_summary(self) -> None:
         if self._context is None:

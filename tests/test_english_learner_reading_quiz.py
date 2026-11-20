@@ -16,6 +16,7 @@ from english_learner.models.entities import (
     now_iso,
 )
 from english_learner.services.ai_client import AIError
+from english_learner.services.learner_memory import LearnerMemory
 from english_learner.services.prompts import build_quiz_grading_messages
 from english_learner.services.quiz_calibration import (
     difficulty_stats,
@@ -223,6 +224,7 @@ def make_service(
     fake: RoutingCompleter,
     *,
     shuffle_options: bool = False,
+    memory_provider=None,
 ) -> ReadingQuizService:
     # 默认关闭选项打乱，测试里可以稳定地用固定下标作答；
     # 打乱逻辑有独立的纯函数测试与开启后的映射测试。
@@ -233,6 +235,7 @@ def make_service(
         db.evidence,
         db.reviews,
         shuffle_options=shuffle_options,
+        memory_provider=memory_provider,
     )
 
 
@@ -977,6 +980,18 @@ def test_weak_skills_ignore_production_only_skills(db: Database) -> None:
     service = make_service(db, RoutingCompleter())
 
     assert service._weak_skills() == ("inference",)
+
+
+def test_weak_skills_merge_learner_memory_error_types(db: Database) -> None:
+    """检测样本很少时，学习者记忆里的近期错因也要并入出题薄弱技能。"""
+    memory = LearnerMemory(
+        level="B1",
+        error_types=("inference", "careless", "main_idea"),
+    )
+    service = make_service(db, RoutingCompleter(), memory_provider=lambda: memory)
+
+    # careless 不是选择题技能，被过滤；其余按记忆顺序并入。
+    assert service._weak_skills() == ("inference", "main_idea")
 
 
 def test_error_types_are_aligned_and_correct_is_none(db: Database, profile: Profile) -> None:
