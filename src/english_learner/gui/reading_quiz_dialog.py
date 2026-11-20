@@ -698,7 +698,11 @@ class ReadingQuizDialog(QDialog):
             parts.append(f"产出题 {quiz.production_score}/{quiz.short_total}")
             if quiz.unscored_production_count:
                 parts.append(f"{quiz.unscored_production_count} 道 AI 未评分（不计入等级）")
-        parts.append(f"正确率 {quiz.percent}%")
+        if quiz.unscored_production_count:
+            # 今日页的“答对 X/Y”会排除未评分题，这里标明口径，避免两个数字打架。
+            parts.append(f"正确率 {quiz.percent}%（含未评分题）")
+        else:
+            parts.append(f"正确率 {quiz.percent}%")
         parts.append(f"文章等级 {quiz.level}")
         meta = QLabel(" · ".join(parts))
         meta.setObjectName("muted")

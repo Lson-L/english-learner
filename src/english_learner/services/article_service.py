@@ -473,9 +473,11 @@ class ArticleService:
                         + "），请换更简单的词和更短的句子重写"
                     )
                     logger.info("文章可读性超出阈值（第 1 次）：%s", last_reason)
-                    # 重试指令本身就是“更简单”，撤掉 high；metrics 也随之记录为空。
-                    effective_within = ""
-                    effective_reason = ""
+                    # 重试指令本身就是“更简单”：撤掉 high（与指令相反）；
+                    # low 与指令同向，保留，metrics 继续记录真实来源。
+                    if effective_within == "high":
+                        effective_within = ""
+                        effective_reason = ""
                     continue
             return replace(draft, metrics=metrics)
         if fallback is not None:

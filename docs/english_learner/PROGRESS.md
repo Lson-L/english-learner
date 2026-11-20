@@ -5,7 +5,7 @@
   M6.1 ~ M6.5 全部完成
 - 下一阶段：**M6.6 强证据升级 + 主客观一致**（见 [AI_TASKS.md](AI_TASKS.md)
   第 7 节）；M6.7 随后，M5.6 暂缓，M4（深色模式 / 安装器 / 自动更新）排最后
-- 当前基线：**580 passed**（`uv run pytest`）；SQLite schema **v8**
+- 当前基线：**583 passed**（`uv run pytest`）；SQLite schema **v8**
 - 产品方向：[PRODUCT.md](PRODUCT.md)
 
 > **文档怎么读（重要，避免污染上下文）**

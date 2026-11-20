@@ -620,7 +620,11 @@ M6.4（档内进度仪表盘）完成（2026-11-20）：
 - **测试**：新增 `tests/test_english_learner_level_progress.py` 覆盖进度公式、
   pending 回退、练习模式、C1、窗口边界、趋势方向、不可信指标、词档阈值、
   题目摘要与未评分题；GUI 冒烟补无检测时进度条隐藏与 AppContext 接线。
-  全量 580 passed，`ruff check` 与 `ruff format --check` 通过。
+  外部验收 3 轮（同一子代理）：第 1 轮 2 条 P2 + 6 条 P3、第 2 轮 1 条 P2 +
+  4 条 P3 均已修复，第 3 轮通过、无 P0/P1/P2。关键回归：`practice_only` 必须
+  同时看含练习的最新一条检测，只传正式列表会让练习提示恒为 False（已修并加
+  AppContext 级用例）；报告存本地 `verification/`（不入库）。
+  全量 583 passed，`ruff check` 与 `ruff format --check` 通过。
 
 M6.5（档内难度浮动）完成（2026-11-20）：
 
@@ -644,7 +648,7 @@ M6.5（档内难度浮动）完成（2026-11-20）：
   优先于相反 hint；
 - **测试**：新增 prompt 逐字节、low/high 规则、hint 落库、readability 关闭仍落库、
   provider 异常、反馈优先、重试撤掉 high、窗口边界等用例。
-  全量 580 passed，`ruff check` 与 `ruff format --check` 通过。
+  全量 583 passed，`ruff check` 与 `ruff format --check` 通过。
 
 ## 5. 验证记录
 

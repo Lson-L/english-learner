@@ -260,9 +260,15 @@ class AppContext:
         profile = self.profile()
         if profile is None:
             return None
+        # 进度只用正式检测；但“最近一次是否只做了练习”要看含练习的最新一条。
+        quizzes = self.quiz_repo.list_recent_formal_completed(limit=8)
+        known_ids = {quiz.id for quiz in quizzes}
+        for quiz, _ in self.quiz_repo.list_recent_completed_with_titles(limit=1):
+            if quiz.id not in known_ids:
+                quizzes.append(quiz)
         return build_level_progress(
             profile,
-            self.quiz_repo.list_recent_formal_completed(limit=8),
+            quizzes,
             self.review_repo.list_band_stats(),
             self.article_repo.list_recent(limit=12),
         )

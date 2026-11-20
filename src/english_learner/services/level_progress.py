@@ -177,7 +177,7 @@ def summarize_quiz(quiz: ReadingQuiz, current_level: str) -> QuizProgressSummary
     """把一次检测折算成「答对 X/Y」与高难度题表现。
 
     - 选择题按作答下标本地判分；
-    - 产出题按 AI 给出的 0/1 分计入（未评分的题算作答但不算答对）；
+    - 产出题按 AI 给出的 0/1 分计入；AI 漏评分的题既不算对，也不进分母；
     - 难度使用题目自带的 `difficulty`，缺失时回退到本卷等级。
     """
     current = normalize_cefr_level(current_level) or normalize_cefr_level(quiz.level, "B1")

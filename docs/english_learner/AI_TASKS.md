@@ -3,7 +3,7 @@
 - 最后更新：2026-11-20
 - 状态：**M5.0 ~ M5.5 已完成；M6.1 ~ M6.5 已交付；M6.6 ~ M6.7 待开工**
 - 下一项：**M6.6 强证据升级 + 主客观一致**（第 7 节）；M5.6 可选 P2 与 M4 继续顺延
-- 基线：M6.5 完成，SQLite schema v8，580 passed
+- 基线：M6.5 完成，SQLite schema v8，583 passed
 - 执行顺序：M6.4 → M6.5 → M6.6 → M6.7；M5.6 按数据决定，M4 最后
 - 与 M4 的关系：**M5 / M6 优先**；M4（深色模式 / 安装器 / 自动更新）继续作为可选工程项排在最后
 - 来源：合并自两份 AI 能力提案（原 `AI_LEARNING_LOOP.md` 与 `AI_STRATEGY.md`，
@@ -412,7 +412,7 @@ M6.6 动的是判定策略，单独成期并默认关闭；M6.7 收尾文案与�
 pending）+ 最多 3 条证据，无检测 / C1 / 练习模式均有空状态；结果页补充本卷难度
 分布与「答对高两档题 N 道」；`QuizRepo.list_recent_formal_completed()` 在 SQL 层
 排除练习，避免练习行挤占最近窗口；`progress_source` 区分 posterior / pending，
-tooltip 按来源切换。580 passed，ruff 通过。
+tooltip 按来源切换；外部验收 3 轮通过（第 3 轮无 P0/P1/P2）。583 passed，ruff 通过。
 
 ### 7.2 M6.5 档内难度浮动（1 天，0 新增调用，无 schema）
 
@@ -459,7 +459,7 @@ C1 只要求句式更复杂；`ArticleService` 新增 `hint_provider` 与
 `within_level/hint_reason`，写入 `articles.metrics_json`（readability 关闭也写），
 provider 异常静默退化；`_thresholds_for()` 按 low 收紧 / high 放宽可读性阈值；
 可读性重试会撤掉 high，metrics 记录实际发送值；阅读反馈中“太难/太简单”优先于
-相反 hint。580 passed，ruff 通过。
+相反 hint。583 passed，ruff 通过。
 
 ### 7.3 M6.6 强证据升级 + 主客观一致（1 天，0 新增调用，无 schema）
 

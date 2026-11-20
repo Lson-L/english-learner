@@ -148,6 +148,99 @@ def test_context_exposes_level_progress_and_difficulty_hint(tmp_path: Path) -> N
     db.close()
 
 
+def test_context_practice_only_uses_latest_completed_quiz(tmp_path: Path) -> None:
+    """正式检测 + 当天练习检测：进度取正式，practice_only 必须为 True。"""
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(make_config())
+    db = Database(tmp_path / "data.db")
+    db.profiles.save(Profile(cefr_level="B1"))
+    # 相对日期：避免系统日期早于固定日期时“练习比正式晚”的前提失效。
+    formal_day = (date.today() - timedelta(days=2)).isoformat()
+    formal_article = db.articles.insert(
+        Article(
+            article_date=formal_day,
+            title="Formal",
+            content="text",
+            level="B1",
+            created_at=now_iso(),
+        )
+    )
+    formal = db.quizzes.insert(
+        ReadingQuiz(
+            article_id=int(formal_article.id or 0),
+            article_date=formal_day,
+            level="B1",
+            questions=(),
+            created_at=now_iso(),
+        )
+    )
+    db.quizzes.save_result(
+        int(formal.id or 0),
+        answers=(),
+        explanations=(),
+        score=0,
+        previous_level="B1",
+        result_level="B1",
+        feedback="",
+        completed_at=formal_day + "T10:00:00",
+        posterior=(0.10, 0.60, 0.30, 0.0),
+    )
+    practice_article = db.articles.insert(
+        Article(
+            article_date=today_str(),
+            title="Practice",
+            content="text",
+            level="B1",
+            created_at=now_iso(),
+        )
+    )
+    practice = db.quizzes.insert(
+        ReadingQuiz(
+            article_id=int(practice_article.id or 0),
+            article_date=today_str(),
+            level="B1",
+            questions=(),
+            created_at=now_iso(),
+        )
+    )
+    db.quizzes.save_result(
+        int(practice.id or 0),
+        answers=(),
+        explanations=(),
+        score=0,
+        previous_level="B1",
+        result_level="B1",
+        feedback="",
+        completed_at=today_str() + "T10:00:00",
+        practice_mode=True,
+        posterior=(0.0, 0.50, 0.50, 0.0),
+    )
+    context = AppContext(make_config(), store, db)
+
+    progress = context.level_progress()
+
+    assert progress is not None
+    assert progress.practice_only is True
+    # 进度来自正式检测（0.30 / 0.90），不是练习检测的 0.50。
+    assert progress.progress is not None
+    assert abs(progress.progress - 0.30 / 0.90) < 1e-6
+    db.close()
+
+
+def test_today_page_uses_pending_wording_without_posterior(tmp_path: Path) -> None:
+    get_app()
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(make_config())
+    db = Database(tmp_path / "data.db")
+    db.profiles.save(Profile(cefr_level="B1", pending_level="B2", pending_count=1))
+
+    window = MainWindow(make_config(), store, db)
+
+    assert "已积累 50%" in window._today_page._level_label.text()
+    assert "连续升级证据" in window._today_page._level_progress.toolTip()
+    window.close()
+
+
 def test_today_page_distinguishes_last_week_review(tmp_path: Path) -> None:
     get_app()
     store = ConfigStore(tmp_path / "config.json")

@@ -697,3 +697,23 @@ def test_mid_hint_is_stored_without_changing_prompt(db: Database, profile: Profi
         "within_level": "mid",
         "hint_reason": "暂无足够信号，保持档内中位",
     }
+
+
+def test_readability_retry_keeps_low_hint(db: Database, profile: Profile) -> None:
+    """low 与“换更简单”的重试指令同向，第二次仍应保留并落库。"""
+    fake = FakeCompleter(hard_payload_text(), payload_text())
+    service = ArticleService(
+        fake,
+        db.articles,
+        db.words,
+        hint_provider=lambda: DifficultyHint("low", "最近两篇生词比例偏高"),
+        readability=ReadabilityThresholds(retry_enabled=True),
+        wordlist_provider=lambda: READABILITY_WORDLIST,
+    )
+
+    article = service.get_or_create_today(profile, today="2026-11-20")
+
+    assert "在 CEFR B1 内偏易" in fake.messages[0][1]["content"]
+    assert "在 CEFR B1 内偏易" in fake.messages[1][1]["content"]
+    assert article.metrics is not None
+    assert article.metrics["within_level"] == "low"

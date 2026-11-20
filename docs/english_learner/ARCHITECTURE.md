@@ -894,6 +894,11 @@ tests/（共 522 个用例，全部 mock AI、无网络）
 - **正式检测不能先取 N 条再过滤**：练习模式行会挤占最近窗口，
   而“正式检测 → 换一篇 → 练习”会让旧正式行被级联删除。用
   `QuizRepo.list_recent_formal_completed()` 在 SQL 层过滤 `practice_mode = 0`。
+- **`practice_only` 必须单独看“最近一次已完成检测”**：进度只用正式检测，
+  但“今天是不是只做了练习”要看含练习的最新一条。`AppContext` 因此把
+  `list_recent_completed_with_titles(limit=1)` 追加进传入列表：
+  `_latest_formal` 负责过滤进度来源，`_latest_completed` 负责识别练习状态。
+  只传正式列表会让 `practice_only` 恒为 False（第 2 轮验收抓到的回归）。
 - **指标可信度**：生词比例只在 `word_total >= 40` 且 `wordlist_size >= 500` 时
   参与趋势；趋势窗口是 `today-6..today` 与 `today-9..today-7`，相邻不重叠，
   ±2 个百分点内为持平。

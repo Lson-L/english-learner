@@ -271,7 +271,7 @@ class TodayPage(QWidget):
                 f"已积累 {progress.pending_count}/2 次升级到 {progress.pending_level} 的证据"
             )
         if progress is not None and progress.practice_only:
-            meta.append("今天的检测为练习，未计入进度")
+            meta.append("最近一次检测为练习，未计入进度")
         self._level_meta.setText(" · ".join(meta))
 
         evidence = self._evidence_lines(progress)
@@ -300,7 +300,9 @@ class TodayPage(QWidget):
             return f"{current} · 已到最高档"
         if progress.progress_percent is None:
             return current
-        return f"{current} → {progress.next_level} · 把握 {progress.progress_percent}%"
+        if progress.progress_source == "posterior":
+            return f"{current} → {progress.next_level} · 把握 {progress.progress_percent}%"
+        return f"{current} → {progress.next_level} · 已积累 {progress.progress_percent}%"
 
     @staticmethod
     def _evidence_lines(progress: LevelProgress | None) -> list[str]:
