@@ -24,15 +24,25 @@ uv run ruff format src/english_learner tests
 - 配置 / 日志 /（M1 起）数据库都在 `%APPDATA%\EnglishLearner\`，**不在仓库内**。
 - 想重演首次启动：删除 `%APPDATA%\EnglishLearner\config.json`，或加 `--reconfigure`。
 
+## 会话开工协议
+
+当用户说「完成本次开工计划」「开工」「继续 M5」或类似短句时，**不要要求用户再贴长指令**：
+
+1. 读 `docs/english_learner/PROGRESS.md` 看板与 `docs/english_learner/AI_TASKS.md`；
+2. 取 AI_TASKS 中第一个未完成里程碑，按任务卡的改动点与验收执行；
+3. 默认一次只做一个里程碑：完成、跑测试、汇报后停下，等用户说「继续」再做下一个；
+4. 收尾更新 PROGRESS 看板，并在 HISTORY.md 追加交付记录；
+5. 任务卡与代码现状不符、或需要扩大范围时，先停下说明差异，不要静默改计划。
+
 ## 文档索引（按需阅读，避免污染上下文）
 
 - `docs/english_learner/PROGRESS.md`：**每个会话唯一必读**，当前看板（约 150 行：
-  里程碑状态、环境、快速开始、M4、下次开工指令）；
+  里程碑状态、环境、快速开始、M4/M5、下次开工指令）；
 - `docs/english_learner/ARCHITECTURE.md`：**按需**。文件地图 + 关键实现与踩坑说明；
   改 AI 客户端、存储、阅读检测、导出等模块前定向读对应小节；
 - `docs/english_learner/TECH_DEBT.md`：**按需**。已知问题与技术债完整表格；
-- `docs/english_learner/AI_STRATEGY.md`：**按需**。AI 能力规划提案（现状盘点、
-  三个缺口、P0/P1/P2 建议、成本与 schema 草案），排下一轮功能前读；
+- `docs/english_learner/AI_TASKS.md`：**按需**。AI 学习闭环排期（M5.0~M5.6 任务卡、
+  依赖、验收、schema v8 清单），开发 / 排期 AI 功能前读，**执行以本文为准**；
 - `docs/english_learner/HISTORY.md`：**默认不读**。已完成里程碑的交付记录、
   旧任务书与验证记录，只在排查历史决策时检索；
 - `docs/english_learner/PRODUCT.md`：产品定位、MVP 范围、已确认决策。

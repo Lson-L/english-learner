@@ -1,8 +1,10 @@
 # Daily English 开发进度（当前看板）
 
-- 最后更新：2026-11-19
-- 当前阶段：**M3.17 完成**（阅读检测产出题改为英译中）；M0 ~ M3.16 全部完成
-- 当前基线：**349 passed**（`uv run pytest`）；SQLite schema **v7**
+- 最后更新：2026-11-20
+- 当前阶段：**M3.17 完成**（阅读检测产出题改为英译中）；M0 ~ M3.17 全部完成
+- 下一阶段：**M5 AI 学习闭环已排期**（M5.0 文档与决策已完成，M5.1 待开工；
+  任务卡见 [AI_TASKS.md](AI_TASKS.md)）
+- 当前基线：**349 passed**（`uv run pytest`）；SQLite schema **v7**（M5.1 起升 v8）
 - 产品方向：[PRODUCT.md](PRODUCT.md)
 
 > **文档怎么读（重要，避免污染上下文）**
@@ -11,8 +13,9 @@
 >   [ARCHITECTURE.md](ARCHITECTURE.md) 的对应小节；
 > - 历史交付、旧任务书与验证记录在 [HISTORY.md](HISTORY.md)，
 >   只在排查“以前为什么这么改”时检索，**不要默认加载**；
-> - 重构 / 修 bug / 规划 M4 前扫一遍 [TECH_DEBT.md](TECH_DEBT.md)；
-> - 规划下一轮功能（AI 该用在哪、优先级、成本）读 [AI_STRATEGY.md](AI_STRATEGY.md)；
+> - 重构 / 修 bug / 规划 M5 或 M4 前扫一遍 [TECH_DEBT.md](TECH_DEBT.md)；
+> - 规划 / 开发下一轮 AI 功能（M5 里程碑、任务卡、依赖、验收）读
+>   [AI_TASKS.md](AI_TASKS.md)，**执行以排期为准**；
 > - 完成里程碑：更新本文件看板，并在 HISTORY.md 追加交付记录，
 >   **不要再把细节堆回本文件**。
 
@@ -38,7 +41,8 @@
 | M3.15 | AI 调用记录落库（任务 / token / 耗时 / 错误，不存 prompt 与回复）、设置页用量摘要、调用记录弹窗、应用内日志查看器 | ✅ 2026-11-19 |
 | M3.16 | 复习拼写回忆：看释义输入英文、本地判分与建议评分、模式偏好持久化 | ✅ 2026-11-19 |
 | M3.17 | 阅读检测产出题改为英译中：从原文选句翻译成中文、按理解准确评分，不再要求写英文 | ✅ 2026-11-19 |
-| M4 | 深色模式、安装器 / 自动更新（可选，未排期） | ⬜ 未开始 |
+| M5 | AI 学习闭环：复习证据、学习者记忆、本地 i+1、回译练习、效果度量（M5.0~M5.6） | 🟡 M5.0 已完成，M5.1 待开工（2026-11-20） |
+| M4 | 深色模式、安装器 / 自动更新（可选，排在 M5 之后） | ⬜ 未开始 |
 
 当前能力（M3.17 后）：配置 AI → 测评 → 每日文章 → 双击查词 / 悬浮释义卡 →
 加入生词本 → 阅读检测（两轮自适应 + 盲评 + 本地后验 + 英译中产出题）→ 每周复盘；
@@ -90,7 +94,7 @@ uv run pyinstaller --noconfirm --clean DailyEnglish.spec
 > 可尝试 `uv run pytest -q -p no:cacheprovider`。这是本机 Qt 清理与 pytest 的
 > 兼容问题，与业务代码无关；判断结果看用例输出，不要只看退出码。
 
-## 4. M4 可选任务（未排期）
+## 4. M4 可选任务（未排期，排在 M5 之后）
 
 - **深色模式**：把 `gui/theme.py` 的颜色抽成两套 palette，`config.json` 的
   `ui.theme` 存偏好；QSS 模板用占位符替换颜色，字体链不变；
@@ -98,25 +102,16 @@ uv run pyinstaller --noconfirm --clean DailyEnglish.spec
   稳定的发布源（当前网络环境下 GitHub 不通，需先确定分发方式）；
 - **真实环境调优**：根据实际使用调整 `srs.py` 系数、文章校验区间、复习每日上限。
 
-## 5. 下次会话开工指令
+## 5. 下次会话开工
 
-把下面这段直接发给 Claude：
+新会话不需要复制长指令，直接说 **「完成本次开工计划」**（或「开工」「继续 M5」）。
+AI 按以下固定协议执行，规则细节以 `CLAUDE.md` 与 `AI_TASKS.md` 为准：
 
-```text
-继续 py-learn 的 english_learner。先读 CLAUDE.md 与 docs/english_learner/PROGRESS.md
-（当前看板，约 150 行），确认 M3.17 已完成、基线 349 passed。需要改 AI 客户端 /
-存储 / 阅读检测 / 导出时，再定向读 ARCHITECTURE.md 对应小节；HISTORY.md 只在查
-“以前为什么这么改”时看，不要默认加载；技术债见 TECH_DEBT.md。下一步优先做真实
-环境调优：混合难度与自适应出题质量、置信度阈值校准、每周复盘文案、真实网关的
-usage 覆盖度；可选 M4（深色模式、安装器 / 自动更新）继续保留。每完成一块：补测试，
-更新本看板，并在 HISTORY.md 追加交付记录。不要引入 ORM，不要跳过 TaskWorker 直接
-调 AI，services/storage 不得 import PySide6。
-```
+1. 读本文件看板，确认当前基线与下一项；
+2. 读 [AI_TASKS.md](AI_TASKS.md)，取**第一个未完成里程碑**，按任务卡的改动点与验收执行；
+3. 默认一次只完成一个里程碑；完成、验证并汇报后停下，等用户说「继续」再做下一个；
+4. 收尾三件事：补测试并通过 → 更新本文件看板状态 → 在 `HISTORY.md` 追加交付记录；
+5. 任务卡与代码现状不符、或需要超出任务卡范围时，先停下说明差异，不要静默改计划。
 
-开工前先自检：
-
-```bash
-uv sync
-uv run pytest -q
-uv run ruff check src/english_learner tests
-```
+开工前如需确认基线，可运行 `uv run pytest -q` 与
+`uv run ruff check src/english_learner tests`；用户未要求时不主动跑打包 / 构建。

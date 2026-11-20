@@ -4,7 +4,7 @@
 > 当前状态见 [PROGRESS.md](PROGRESS.md)，历史记录见 [HISTORY.md](HISTORY.md)，
 > 已知问题见 [TECH_DEBT.md](TECH_DEBT.md)。章节编号沿用拆分前的 PROGRESS。
 
-## 4. 文件地图（M3.15 完成后的现状）
+## 4. 文件地图（M3.17 完成后的现状）
 
 ```
 src/english_learner/
@@ -28,7 +28,7 @@ src/english_learner/
 │   ├── config_store.py         AIConfig、JSON 配置读写、URL 规范化、Key 脱敏
 │   ├── provider_presets.py     服务商预设
 │   ├── json_utils.py           parse_json_object 三档兜底 + 字段类型转换
-│   ├── prompts.py              全部提示词 + PROMPT_VERSION = "m3-14"
+│   ├── prompts.py              全部提示词 + PROMPT_VERSION = "m3-17"
 │   ├── assessment_bank.py      3 套固定题（A2/B1/B2），默认 B1
 │   ├── assessment_service.py   本地计分、AI 评分、CEFR 回退、手动选级、落库
 │   ├── article_service.py      文章生成、JSON 校验、重试一次、当天缓存、换一篇
@@ -39,6 +39,7 @@ src/english_learner/
 │   ├── quiz_calibration.py     难度/技能正确率与逐题对错统计
 │   ├── weekly_review_service.py 每周复盘：汇总数据 + AI 建议 + 用户确认
 │   ├── srs.py                  简化 SM-2 调度 + ReviewService（纯本地，不依赖 AI）
+│   ├── recall.py               拼写回忆判分与挖空题面（纯函数，不调 AI）
 │   ├── secret_store.py         API Key 的 Windows DPAPI 加解密（非 Windows 回退明文）
 │   ├── log_files.py            日志尾部读取 / 轮转文件排序 / 关键字筛选（纯 Python）
 │   ├── export_service.py       JSON / CSV 数据导出（十一张表，含 AI 调用记录）
@@ -64,10 +65,10 @@ src/english_learner/
         ├── today.py            今日页：连续天数/到期复习/累计生词/文章状态/测评入口
         ├── reader.py           阅读页：正文全宽 + 悬浮释义卡、换一篇、调整难度、阅读完成
         ├── vocabulary.py       生词本页：筛选/搜索/排序/编辑/批量删除/脏检查/求助记录回显
-        ├── review.py           复习页：卡片翻面、1~4 评分、会话统计（M2）
+        ├── review.py           复习页：看词/拼写两种卡片、本地判分建议、会话统计（M3.16）
         └── settings.py         配置、调用记录摘要与入口、字体、数据位置、JSON/CSV 导出
 
-tests/（共 313 个用例，全部 mock AI、无网络）
+tests/（共 349 个用例，全部 mock AI、无网络）
 ├── test_english_learner_config.py        配置读写/校验/脱敏
 ├── test_english_learner_ai_client.py     连接测试与错误翻译
 ├── test_english_learner_ai_usage.py      AI 调用仓库汇总/筛选、客户端埋点与重试、AppContext 注入
@@ -80,11 +81,15 @@ tests/（共 313 个用例，全部 mock AI、无网络）
 ├── test_english_learner_feedback.py      反馈调级/软约束重写/失败不改旧数据
 ├── test_english_learner_reading_quiz.py  混合难度/短答/证据评分/连续调级/失败兜底
 ├── test_english_learner_reading_quiz_dialog.py 弹窗：缓存/答题/短答/自评/结果/全屏
+├── test_english_learner_level_estimator.py 后验估计：先验/证据/置信度/跳档
+├── test_english_learner_weekly_review.py 复盘汇总/缓存/建议应用/无数据跳过
+├── test_english_learner_weekly_review_dialog.py 复盘弹窗：展示/确认改级/取消
 ├── test_english_learner_reader.py        lemma/句子提取/查词缓存/高亮/阅读页
 ├── test_english_learner_srs.py           SM-2 四档调度/易度边界/间隔上限/复习服务落库
 ├── test_english_learner_review_help.py   复习求助：建议解析/记忆方法落库/失败兜底
 ├── test_english_learner_review_help_dialog.py 求助弹窗：快捷原因/AI 建议/跳过
 ├── test_english_learner_review_page.py   复习页状态机/翻面/评分/会话统计/队列上限
+├── test_english_learner_recall.py        拼写归一化/编辑距离/判分与建议评分
 ├── test_english_learner_vocabulary_page.py 生词本筛选/搜索/排序/编辑/批量删除/脏检查/求助记录回显
 ├── test_english_learner_secret_store.py   DPAPI 往返/明文兼容/损坏密文
 ├── test_english_learner_export.py        JSON 快照/CSV 分表/空库/原子写入
