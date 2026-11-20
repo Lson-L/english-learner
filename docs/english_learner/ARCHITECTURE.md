@@ -50,11 +50,14 @@ src/english_learner/
 │   ├── back_translation_service.py 回译出题缓存 + 批量批改（M5.4，两次 AI 调用）
 │   ├── metrics_service.py      学习效果度量：通过率 / 回炉率 / 计划完成 / 重试 / 趋势（M5.5，纯本地）
 │   ├── export_service.py       JSON / CSV 数据导出（十二张表，含 AI 调用记录与回译）
+│   ├── backup_service.py       启动时每日备份 data.db（SQLite backup API，保留 7 份）
+│   ├── database_transfer.py    整库导出 / 导入（校验 + 暂存 + 启动时替换，导入前备份）
 │   └── review_help_service.py  复习“忘记/模糊”求助：AI 建议 + 更新记忆方法
 └── gui/
     ├── fonts.py                内置字体注册 + 全局英文字体（默认 Lexend，可选 Literata/Georgia/Inter）
     ├── theme.py                全局 QSS（含阅读器/释义卡/测评短文样式）
     ├── workers.py              TaskWorker(QThread)：AI 调用必须走这里；支持协作式取消
+    ├── app_restart.py          重启应用（导入数据库后立即生效；开发环境用 -m，打包后拉起 exe）
     ├── onboarding.py           3 步配置向导
     ├── assessment_dialog.py     摸底测评弹窗（答题 → 评分 → 结果/手动选级）
     ├── level_feedback_dialog.py 阅读感受弹窗（快捷选项 + 文本 → 调级并换文章）

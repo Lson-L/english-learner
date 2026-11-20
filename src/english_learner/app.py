@@ -25,7 +25,9 @@ from .gui.fonts import load_application_fonts
 from .gui.main_window import MainWindow
 from .gui.onboarding import OnboardingDialog
 from .gui.theme import build_stylesheet
+from .services.backup_service import run_startup_backup
 from .services.config_store import AIConfig, ConfigError, ConfigStore, log_dir
+from .services.database_transfer import apply_pending_import
 from .storage.db import Database
 
 logger = logging.getLogger(__name__)
@@ -134,9 +136,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         config = dialog.saved_config
 
+    # 迁移前先备份：即使新版本迁移出问题，也有启动前的完整数据可回退。
+    # 备份失败只记日志，不能影响启动（见 backup_service.run_startup_backup）。
+    run_startup_backup()
+
+    # 设置页的「导入数据库」只做暂存；真正替换放在这里——此时还没有任何连接，
+    # 不会出现运行中替换 SQLite 文件的问题。
+    try:
+        imported = apply_pending_import()
+    except Exception as exc:  # noqa: BLE001 - 导入失败必须保留原数据并继续启动
+        logger.exception("启动时应用待导入数据库失败")
+        QMessageBox.warning(None, "导入数据库失败", f"{exc}\n\n已保留原有数据。")
+    else:
+        if imported is not None:
+            logger.info("启动时已导入数据库；导入前备份：%s", imported.safety_backup)
+
     db = Database()
     window = MainWindow(config, store, db)
     window.show()
     # 首次使用（profile 为空）时弹测评；用户取消也不影响进入主界面。
     window.maybe_show_assessment()
-    return app.exec()
+    exit_code = app.exec()
+    # 正常退出时显式释放连接，WAL 能干净合并，下次启动的备份/导入不受影响。
+    db.close()
+    return exit_code

@@ -11,6 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -28,6 +30,7 @@ from PySide6.QtWidgets import (
 from ...models.entities import today_str
 from ...services.ai_client import AIClient, ConnectionResult
 from ...services.app_context import AppContext
+from ...services.backup_service import BACKUP_DIR_NAME, BACKUP_KEEP, backup_directory
 from ...services.config_store import (
     MAX_DAILY_REVIEW_LIMIT,
     MIN_DAILY_REVIEW_LIMIT,
@@ -35,10 +38,17 @@ from ...services.config_store import (
     ConfigError,
     ConfigStore,
 )
+from ...services.database_transfer import (
+    DatabaseTransferError,
+    discard_pending_import,
+    export_database,
+    stage_import,
+)
 from ...services.export_service import ExportResult
 from ...services.log_files import log_directory
 from ...services.metrics_service import MetricsSnapshot, PlanCompletion, RateMetric, RetryMetric
 from ..ai_usage_dialog import AIUsageDialog
+from ..app_restart import restart_application
 from ..fonts import ENGLISH_FONT_CHOICES, get_english_font
 from ..log_viewer_dialog import LogViewerDialog
 from ..workers import TaskWorker
@@ -283,12 +293,12 @@ class SettingsPage(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(10)
-        self._usage_button = QPushButton("查看调用记录…")
+        self._usage_button = QPushButton("查看调用记录")
         self._usage_button.setObjectName("secondaryButton")
         self._usage_button.clicked.connect(self._open_usage)
         row.addWidget(self._usage_button)
 
-        self._logs_button = QPushButton("查看运行日志…")
+        self._logs_button = QPushButton("查看运行日志")
         self._logs_button.setObjectName("secondaryButton")
         self._logs_button.clicked.connect(self._open_logs)
         row.addWidget(self._logs_button)
@@ -490,13 +500,17 @@ class SettingsPage(QWidget):
 
     def _build_export_card(self) -> Card:
         card = Card()
-        title = QLabel("数据导出")
+        title = QLabel("数据导出与备份")
         title.setObjectName("cardTitle")
         card.body.addWidget(title)
 
         desc = QLabel(
             "导出全部学习数据：学习画像、文章、生词、高亮、复习记录、回译练习与打卡统计。"
             "JSON 适合整体备份，CSV 每张表一个文件（Excel 可直接打开）。"
+            f"应用每次启动会自动把数据库备份到 {BACKUP_DIR_NAME}/，保留最近 "
+            f"{BACKUP_KEEP} 份。"
+            "换电脑时用「导出数据库 / 导入数据库」整体搬运（导入覆盖本机数据、"
+            "重启后生效）。"
         )
         desc.setObjectName("muted")
         desc.setWordWrap(True)
@@ -504,17 +518,40 @@ class SettingsPage(QWidget):
 
         buttons = QHBoxLayout()
         buttons.setSpacing(10)
-        self._export_json_button = QPushButton("导出 JSON…")
+        self._export_json_button = QPushButton("导出 JSON")
         self._export_json_button.setObjectName("primaryButton")
         self._export_json_button.clicked.connect(self._export_json)
         buttons.addWidget(self._export_json_button)
 
-        self._export_csv_button = QPushButton("导出 CSV…")
+        self._export_csv_button = QPushButton("导出 CSV")
         self._export_csv_button.setObjectName("secondaryButton")
         self._export_csv_button.clicked.connect(self._export_csv)
         buttons.addWidget(self._export_csv_button)
+
+        self._backup_button = QPushButton("打开备份目录")
+        self._backup_button.setObjectName("secondaryButton")
+        self._backup_button.setToolTip(str(self._backup_directory()))
+        self._backup_button.clicked.connect(self._open_backup_directory)
+        buttons.addWidget(self._backup_button)
         buttons.addStretch(1)
         card.body.addLayout(buttons)
+
+        # 整库搬运单独一行：导出是可直接导入的 SQLite 快照，导入在下次启动时覆盖本机。
+        db_row = QHBoxLayout()
+        db_row.setSpacing(10)
+        self._export_db_button = QPushButton("导出数据库")
+        self._export_db_button.setObjectName("secondaryButton")
+        self._export_db_button.setToolTip("保存一个可直接在另一台电脑导入的 .db 快照")
+        self._export_db_button.clicked.connect(self._export_database)
+        db_row.addWidget(self._export_db_button)
+
+        self._import_db_button = QPushButton("导入数据库")
+        self._import_db_button.setObjectName("secondaryButton")
+        self._import_db_button.setToolTip("覆盖本机数据：先校验，重启应用后生效，导入前自动备份")
+        self._import_db_button.clicked.connect(self._import_database)
+        db_row.addWidget(self._import_db_button)
+        db_row.addStretch(1)
+        card.body.addLayout(db_row)
 
         self._export_status = QLabel("")
         self._export_status.setObjectName("muted")
@@ -524,8 +561,120 @@ class SettingsPage(QWidget):
         if self._context is None:
             self._export_json_button.setEnabled(False)
             self._export_csv_button.setEnabled(False)
+            self._export_db_button.setEnabled(False)
+            self._import_db_button.setEnabled(False)
             set_status(self._export_status, "当前页面未连接数据库，导出不可用。", "hint")
         return card
+
+    def _export_database(self) -> None:
+        if self._context is None:
+            return
+        default_path = Path.home() / f"daily-english-{today_str()}.db"
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "导出数据库", str(default_path), "SQLite 数据库 (*.db);;所有文件 (*)"
+        )
+        if not filename:
+            return
+        try:
+            target = export_database(filename, self._context.db.path)
+        except (DatabaseTransferError, OSError) as exc:
+            set_status(self._export_status, f"导出数据库失败：{exc}", "error")
+            return
+        set_status(self._export_status, f"已导出数据库：{target}", "success")
+
+    def _import_database(self) -> None:
+        if self._context is None:
+            return
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "导入数据库", str(Path.home()), "SQLite 数据库 (*.db);;所有文件 (*)"
+        )
+        if not filename:
+            return
+        answer = QMessageBox.question(
+            self,
+            "导入数据库",
+            "导入会覆盖本机全部学习数据，并在重启应用后生效。\n"
+            "替换前会自动把当前数据库备份到 backups/。\n\n继续吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        db_path = self._context.db.path
+        try:
+            staging = stage_import(filename, db_path)
+        except (DatabaseTransferError, OSError) as exc:
+            set_status(self._export_status, f"导入数据库失败：{exc}", "error")
+            return
+
+        action = self._prompt_import_ready(staging)
+        if action == "restart":
+            self._restart_after_import()
+        elif action == "rollback":
+            discard_pending_import(db_path)
+            set_status(
+                self._export_status,
+                "已回退：本次导入取消，本机数据保持原样。",
+                "hint",
+            )
+        else:
+            set_status(
+                self._export_status,
+                "数据库已暂存：下次启动应用时生效（重启前的新数据会被覆盖）。",
+                "success",
+            )
+
+    def _prompt_import_ready(self, staging: Path) -> str:
+        """导入校验通过后的选择：立即重启 / 回退 / 稍后。返回动作标识。"""
+        box = QMessageBox(self)
+        box.setWindowTitle("导入数据库")
+        box.setText("数据库已校验并暂存，重启应用后生效。")
+        box.setInformativeText(
+            f"暂存位置：{staging}\n"
+            "重启时会先把当前数据备份到 backups/，再替换成导入的数据库。\n"
+            "选择「回退」将放弃本次导入，本机数据保持不变。"
+        )
+        restart_button = box.addButton("立即重启", QMessageBox.ButtonRole.AcceptRole)
+        rollback_button = box.addButton("回退", QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(restart_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is restart_button:
+            return "restart"
+        if clicked is rollback_button:
+            return "rollback"
+        return "later"
+
+    def _restart_after_import(self) -> None:
+        # 先释放数据库句柄：Windows 上文件被占用时，新进程无法替换 data.db。
+        if self._context is not None:
+            try:
+                self._context.db.close()
+            except Exception:  # noqa: BLE001 - 关闭失败也要继续尝试重启
+                logger.debug("重启前关闭数据库失败", exc_info=True)
+        if restart_application():
+            # 新进程会在启动阶段应用暂存的数据库，本进程正常退出。
+            QApplication.instance().quit()
+        else:
+            set_status(
+                self._export_status,
+                "无法自动重启：请手动关闭并重新打开应用，导入才会生效。",
+                "error",
+            )
+
+    def _backup_directory(self) -> Path:
+        """备份目录与数据库同级；没有上下文时按默认数据目录推算。"""
+        db_path = self._context.db.path if self._context is not None else None
+        return backup_directory(db_path)
+
+    def _open_backup_directory(self) -> None:
+        directory = self._backup_directory()
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            set_status(self._export_status, f"打开备份目录失败：{exc}", "error")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
 
     @staticmethod
     def _form_label(text: str) -> QLabel:
