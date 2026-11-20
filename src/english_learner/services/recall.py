@@ -22,11 +22,19 @@ import re
 from dataclasses import dataclass
 
 from ..models.entities import Word
-from .srs import RATING_FORGOT, RATING_KNOWN, RATING_VAGUE
+from .srs import (
+    RATING_FORGOT,
+    RATING_KNOWN,
+    RATING_VAGUE,
+    VERDICT_CORRECT,
+    VERDICT_NEAR,
+    VERDICT_WRONG,
+)
 
-STATUS_CORRECT = "correct"
-STATUS_NEAR = "near"
-STATUS_WRONG = "wrong"
+# 拼写判定的三种结论与 review_logs.verdict 共用同一套字符串，避免统计口径漂移。
+STATUS_CORRECT = VERDICT_CORRECT
+STATUS_NEAR = VERDICT_NEAR
+STATUS_WRONG = VERDICT_WRONG
 
 # 挖空占位符：长度固定，避免不同词形导致题面抖动。
 MASK = "____"

@@ -17,7 +17,7 @@ src/english_learner/
 │   └── entities.py             Profile / Article / Word / Highlight / DailyStats /
 │                               ReadingQuiz / AICall / AIUsageSummary 等 frozen dataclass
 ├── storage/
-│   ├── db.py                   SQLite 连接、PRAGMA、建表迁移（schema v7）、事务、仓库入口
+│   ├── db.py                   SQLite 连接、PRAGMA、建表迁移（schema v8）、事务、仓库入口
 │   └── repositories.py         Profile / Article / Word / Review / Stats / Quiz / Evidence /
 │                               WeeklyReview / AICall 仓库（纯 SQL）
 ├── services/
@@ -68,7 +68,7 @@ src/english_learner/
         ├── review.py           复习页：看词/拼写两种卡片、本地判分建议、会话统计（M3.16）
         └── settings.py         配置、调用记录摘要与入口、字体、数据位置、JSON/CSV 导出
 
-tests/（共 349 个用例，全部 mock AI、无网络）
+tests/（共 352 个用例，全部 mock AI、无网络）
 ├── test_english_learner_config.py        配置读写/校验/脱敏
 ├── test_english_learner_ai_client.py     连接测试与错误翻译
 ├── test_english_learner_ai_usage.py      AI 调用仓库汇总/筛选、客户端埋点与重试、AppContext 注入
@@ -270,8 +270,9 @@ tests/（共 349 个用例，全部 mock AI、无网络）
   加密失败（非 Windows / API 失败）回退明文并写日志 —— 宁可降级也不能让用户
   存不了配置。跨用户复制配置会在 `ConfigStore.load()` 抛 `ConfigError`，
   应用走“配置损坏 → 重新配置”的既有路径。
-- **导出格式**：JSON 是 `{app, version, exported_at, counts, profile, articles,
-  words, highlights, review_logs, daily_stats}`；CSV 每表一个文件，编码
+- **导出格式**：JSON 是 `{app, version, exported_at, counts, ...}`，`...` 为
+  `export_service.TABLE_LABELS` 里的全部表（M3.15 起含 `ai_calls`，M5.1 起
+  `review_logs` 含拼写证据列）；CSV 每表一个文件，编码
   `utf-8-sig`（Excel 中文），列表字段用 `"; "` 连接。导出服务只读仓库，
   新增的 `list_all*` 方法不要写业务判断。UI 侧 JSON 选文件、CSV 选目录后
   自动建 `daily-english-export-<时间戳>/` 子目录，避免覆盖旧导出。
@@ -538,8 +539,8 @@ tests/（共 349 个用例，全部 mock AI、无网络）
   回车提交走 `QLineEdit.returnPressed`，不走 Return 快捷键；
 - **偏好**：`ui.review_mode`（`recognition` / `spelling`）由复习页直接保存；
   设置页改字体必须用 `dataclasses.replace` 只改 `english_font`，否则会冲掉模式；
-- **不做的事**：不落新表、不调 AI、不自动改调度。想统计拼写正确率时再考虑给
-  `review_logs` 加列（需要 schema 升级 + 导出列同步）。
+- **不做的事**：不落新表、不调 AI、不自动改调度。拼写正确率统计已在 M5.1
+  通过 `review_logs` 新增列落地（见 6.26）。
 
 ### 6.25 M3.17：阅读检测产出题改为英译中
 
@@ -571,3 +572,18 @@ tests/（共 349 个用例，全部 mock AI、无网络）
 - **摸底测评同步**：`assessment_bank.SET_A` 原来那道中译英改成英译中；
   `build_assessment_messages()` 明确说明“重点看理解准确度，不要求英文写作”。
   B1/B2 套本来就是英译中，改完后全应用没有要求写英文的输入题。
+
+### 6.26 M5.1：复习证据落库（schema v8）
+
+- **表结构**：`review_logs` 增加 `answer_text / verdict / distance`，只加列，
+  旧记录默认空串 / 0，不回填、不参与统计；旧库升级走 `_apply_schema()` 的
+  `version < 8` 分支，`export_service.CSV_COLUMNS` 已同步三列；
+- **verdict 只有一个来源**：四个值 `correct / near / wrong / skipped` 在
+  `services/srs.py` 用 `VERDICT_*` 常量集中定义，`services/recall.py` 的
+  `STATUS_*` 直接复用同一套字符串，新增判定时先改常量，不要散落字面量；
+- **写入语义**：拼写模式真正提交过答案才写 `correct / near / wrong` 与用户输入、
+  编辑距离；看词回忆、拼写跳过、短语回退都写 `skipped`；
+- **校验顺序**：`ReviewService.review()` 先校验 verdict 合法性，再写调度和日志，
+  非法值直接 `ValueError`，避免留下“词条已更新、日志没写”的半截状态；
+- **边界**：证据只用于统计与后续学习者记忆（M5.2），**不参与 `schedule()`**；
+  调度结果与改动前完全一致，有对照单测。

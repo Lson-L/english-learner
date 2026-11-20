@@ -15,7 +15,7 @@ from english_learner.services import ai_client as ai_module
 from english_learner.services.ai_client import AIClient, AIError
 from english_learner.services.app_context import AppContext
 from english_learner.services.config_store import AIConfig, ConfigStore
-from english_learner.storage.db import Database
+from english_learner.storage.db import SCHEMA_VERSION, Database
 
 
 def make_config() -> AIConfig:
@@ -178,7 +178,7 @@ def test_v6_database_gains_ai_calls_table(tmp_path: Path) -> None:
     db = Database(path)
 
     assert db.query_one("SELECT COUNT(*) AS n FROM ai_calls")["n"] == 0
-    assert int(db.query_one("PRAGMA user_version")[0]) == 7
+    assert int(db.query_one("PRAGMA user_version")[0]) == SCHEMA_VERSION
     db.close()
 
 

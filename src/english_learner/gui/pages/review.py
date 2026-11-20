@@ -50,6 +50,7 @@ from ...services.srs import (
     RATING_KNOWN,
     RATING_LABELS,
     RATING_VAGUE,
+    VERDICT_SKIPPED,
 )
 from .common import PageHeader, set_status
 
@@ -640,12 +641,26 @@ class ReviewPage(QWidget):
                 return
             note, advice = help_result
 
+        # 拼写证据：只有真正提交过答案才有；看词回忆、拼写跳过、短语回退
+        # 都没有用户输入，统一记 skipped（M5.1）。
+        answer_text = ""
+        verdict = VERDICT_SKIPPED
+        distance = 0
+        result = self._recall_result
+        if self._spelling_active and result is not None:
+            answer_text = result.answer
+            verdict = result.status
+            distance = result.distance
+
         try:
             self._context.review_service().review(
                 self._current,
                 rating,
                 note=note,
                 advice=advice,
+                answer_text=answer_text,
+                verdict=verdict,
+                distance=distance,
             )
         except Exception as exc:  # noqa: BLE001 - 本地写库失败不能让界面崩掉
             logger.exception("复习评分失败")

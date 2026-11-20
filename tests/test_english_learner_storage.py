@@ -140,7 +140,7 @@ def test_migrate_v1_database_adds_new_columns(tmp_path: Path) -> None:
         }
         assert "mnemonic" in word_columns
         assert "in_vocabulary" in word_columns
-        assert {"note", "advice"} <= log_columns
+        assert {"note", "advice", "answer_text", "verdict", "distance"} <= log_columns
         assert {"pending_level", "pending_count"} <= profile_columns
         assert {
             "error_types_json",
@@ -402,6 +402,61 @@ def test_migrate_v5_database_adds_phase2_columns(tmp_path: Path) -> None:
         assert {"level_evidence", "weekly_reviews"} <= tables
         # 旧检测不回填证据，避免把 M3.9 的旧结果当成新观测。
         assert db.evidence.count() == 0
+    finally:
+        db.close()
+
+
+def test_migrate_v7_database_adds_review_evidence_columns(tmp_path: Path) -> None:
+    """v7 旧库升级到 v8：review_logs 加证据列，旧复习记录不丢、不回填。"""
+    path = tmp_path / "v7.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE review_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            word_id INTEGER NOT NULL,
+            rating INTEGER NOT NULL,
+            prev_interval INTEGER NOT NULL,
+            next_interval INTEGER NOT NULL,
+            reviewed_at TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            advice TEXT NOT NULL DEFAULT ''
+        );
+        INSERT INTO review_logs (word_id, rating, prev_interval, next_interval, reviewed_at, note)
+            VALUES (1, 2, 0, 1, '2026-11-19T10:00:00', '旧记录');
+        PRAGMA user_version = 7;
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    try:
+        version_row = db.query_one("PRAGMA user_version")
+        assert version_row is not None and int(version_row[0]) == SCHEMA_VERSION
+        columns = {str(row["name"]) for row in db.query_all("PRAGMA table_info(review_logs)")}
+        assert {"answer_text", "verdict", "distance"} <= columns
+
+        word = db.words.upsert(make_word())
+        assert word.id is not None
+        legacy = db.reviews.list_for_word(1)
+        assert len(legacy) == 1
+        assert legacy[0].note == "旧记录"
+        assert (legacy[0].answer_text, legacy[0].verdict, legacy[0].distance) == ("", "", 0)
+
+        logged = db.reviews.log(
+            word_id=word.id,
+            rating=2,
+            prev_interval=0,
+            next_interval=1,
+            answer_text="resilent",
+            verdict="near",
+            distance=1,
+        )
+        assert logged.answer_text == "resilent"
+        assert logged.verdict == "near"
+        assert logged.distance == 1
+        assert db.reviews.list_for_word(word.id)[0].verdict == "near"
     finally:
         db.close()
 

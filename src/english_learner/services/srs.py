@@ -52,6 +52,21 @@ RATING_LABELS: dict[int, str] = {
     RATING_EASY: "太简单",
 }
 
+# 复习证据判定（M5.1）：review_logs.verdict 只允许这四个值。
+# correct / near / wrong 来自拼写判分（recall.STATUS_* 复用同一套字符串），
+# skipped 表示看词回忆、拼写跳过或短语回退——没有可记录的用户输入。
+# 空串只出现在 v8 之前的旧数据里，表示“当时还没有证据字段”。
+VERDICT_CORRECT = "correct"
+VERDICT_NEAR = "near"
+VERDICT_WRONG = "wrong"
+VERDICT_SKIPPED = "skipped"
+VALID_VERDICTS: tuple[str, ...] = (
+    VERDICT_CORRECT,
+    VERDICT_NEAR,
+    VERDICT_WRONG,
+    VERDICT_SKIPPED,
+)
+
 MIN_EASE = 1.3
 DEFAULT_EASE = 2.5
 # 间隔达到这个天数就认为“已掌握”，不再排进每日队列。
@@ -159,14 +174,22 @@ class ReviewService:
         *,
         note: str = "",
         advice: str = "",
+        answer_text: str = "",
+        verdict: str = "",
+        distance: int = 0,
     ) -> ReviewOutcome:
         """应用评分：写回调度字段 → 记一条复习历史 → 今日复习数 +1。
 
-        `note` 是用户对“为什么没记住”的说明，`advice` 是 AI 给出的记忆建议，
-        两者只进 review_logs，不影响调度。
+        `note` 是用户对“为什么没记住”的说明，`advice` 是 AI 给出的记忆建议；
+        `answer_text / verdict / distance` 是拼写回忆的客观证据（用户写了什么、
+        判成什么、差几个字母）。这五项只进 review_logs，**不参与 schedule()**，
+        调度结果仍只由用户确认的 rating 决定。
         """
         if word.id is None:
             raise ValueError("review() 需要已落库的词条（word.id 不能为空）")
+        # 先校验再写调度，避免非法 verdict 留下“词条已更新、日志没写”的半截状态。
+        if verdict and verdict not in VALID_VERDICTS:
+            raise ValueError(f"verdict 必须是 {VALID_VERDICTS} 之一或空串，收到 {verdict!r}")
 
         updated = schedule(word, rating, on=date.fromisoformat(self._today()))
         saved = self._words.save_schedule(updated)
@@ -179,6 +202,9 @@ class ReviewService:
                 next_interval=int(saved.interval_days),
                 note=note[:500],
                 advice=advice[:1000],
+                answer_text=answer_text[:500],
+                verdict=verdict,
+                distance=int(distance),
             )
         if self._stats is not None:
             self._stats.bump(self._today(), reviews_done=1)

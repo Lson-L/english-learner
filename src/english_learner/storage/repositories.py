@@ -471,13 +471,17 @@ class ReviewRepo(_BaseRepo):
         reviewed_at: str | None = None,
         note: str = "",
         advice: str = "",
+        answer_text: str = "",
+        verdict: str = "",
+        distance: int = 0,
     ) -> ReviewLog:
         timestamp = reviewed_at or now_iso()
         cursor = self._db.execute(
             """
             INSERT INTO review_logs
-                (word_id, rating, prev_interval, next_interval, reviewed_at, note, advice)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (word_id, rating, prev_interval, next_interval, reviewed_at, note, advice,
+                 answer_text, verdict, distance)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 int(word_id),
@@ -487,6 +491,9 @@ class ReviewRepo(_BaseRepo):
                 timestamp,
                 note.strip(),
                 advice.strip(),
+                answer_text.strip(),
+                verdict.strip(),
+                max(0, int(distance)),
             ),
         )
         return ReviewLog(
@@ -498,6 +505,9 @@ class ReviewRepo(_BaseRepo):
             reviewed_at=timestamp,
             note=note.strip(),
             advice=advice.strip(),
+            answer_text=answer_text.strip(),
+            verdict=verdict.strip(),
+            distance=max(0, int(distance)),
         )
 
     def list_for_word(self, word_id: int, limit: int = 20) -> list[ReviewLog]:

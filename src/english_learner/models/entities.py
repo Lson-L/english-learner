@@ -337,7 +337,12 @@ class Highlight:
 # ------------------------------------------------------------------- 复习
 @dataclass(frozen=True)
 class ReviewLog:
-    """一次复习记录：评分前后的间隔天数，用于统计与回溯。"""
+    """一次复习记录：评分前后的间隔天数 + 拼写证据，用于统计与回溯。
+
+    `answer_text / verdict / distance` 是 M5.1 新增的客观证据：
+    拼写模式下用户写了什么、本地判成什么、差几个字母；看词回忆与跳过写
+    `verdict="skipped"`。旧数据这三列为空，不参与统计。
+    """
 
     word_id: int
     rating: int
@@ -346,6 +351,9 @@ class ReviewLog:
     reviewed_at: str = ""
     note: str = ""
     advice: str = ""
+    answer_text: str = ""
+    verdict: str = ""
+    distance: int = 0
     id: int | None = None
 
     @classmethod
@@ -359,6 +367,9 @@ class ReviewLog:
             reviewed_at=str(row["reviewed_at"] or ""),
             note=str(row["note"] or ""),
             advice=str(row["advice"] or ""),
+            answer_text=str(row["answer_text"] or ""),
+            verdict=str(row["verdict"] or ""),
+            distance=int(row["distance"] or 0),
         )
 
     def to_params(self) -> dict[str, Any]:
@@ -370,6 +381,9 @@ class ReviewLog:
             "reviewed_at": self.reviewed_at,
             "note": self.note,
             "advice": self.advice,
+            "answer_text": self.answer_text,
+            "verdict": self.verdict,
+            "distance": int(self.distance),
         }
 
 

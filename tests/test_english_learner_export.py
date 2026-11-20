@@ -98,6 +98,9 @@ def seed(db: Database) -> None:
         next_interval=1,
         note="和 resilient / resistant 混淆",
         advice="resilient 里有 sil，像弹簧",
+        answer_text="resilent",
+        verdict="near",
+        distance=1,
     )
     db.stats.bump("2026-11-18", article_read=1)
     db.stats.bump("2026-11-19", words_added=1, reviews_done=1)
@@ -237,6 +240,9 @@ def test_export_json_contains_all_tables(db: Database, tmp_path: Path) -> None:
     assert data["review_logs"][0]["rating"] == 3
     assert data["review_logs"][0]["note"] == "和 resilient / resistant 混淆"
     assert data["review_logs"][0]["advice"].startswith("resilient 里有 sil")
+    assert data["review_logs"][0]["answer_text"] == "resilent"
+    assert data["review_logs"][0]["verdict"] == "near"
+    assert data["review_logs"][0]["distance"] == 1
     assert data["daily_stats"][0]["stat_date"] == "2026-11-18"
     assert data["reading_quizzes"][0]["score"] == 3
     assert data["reading_quizzes"][0]["total"] == 4
@@ -301,6 +307,9 @@ def test_export_csv_writes_one_file_per_table(db: Database, tmp_path: Path) -> N
     )
     assert reviews_rows[0]["note"] == "和 resilient / resistant 混淆"
     assert reviews_rows[0]["advice"].startswith("resilient 里有 sil")
+    assert reviews_rows[0]["answer_text"] == "resilent"
+    assert reviews_rows[0]["verdict"] == "near"
+    assert reviews_rows[0]["distance"] == "1"
 
     articles_rows = list(
         csv.DictReader(io.StringIO((target / "articles.csv").read_text(encoding="utf-8-sig")))

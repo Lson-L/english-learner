@@ -27,6 +27,7 @@ from english_learner.services.recall import (  # noqa: E402
 from english_learner.services.srs import (  # noqa: E402
     RATING_FORGOT,
     RATING_KNOWN,
+    VERDICT_SKIPPED,
 )
 from english_learner.storage.db import Database  # noqa: E402
 
@@ -153,6 +154,12 @@ def test_session_reveal_rate_and_finish(db: Database, tmp_path: Path) -> None:
     assert reloaded_alpha is not None and reloaded_alpha.interval_days == 1
     assert reloaded_beta is not None and reloaded_beta.repetitions == 0
     assert db.reviews.count_for_date(today_str()) == 2
+
+    # 看词回忆没有用户输入，证据统一记 skipped（M5.1）。
+    alpha_log = db.reviews.list_for_word(alpha.id)[0]
+    assert alpha_log.verdict == VERDICT_SKIPPED
+    assert alpha_log.answer_text == ""
+    assert alpha_log.distance == 0
 
 
 def test_no_due_words_disables_start(db: Database, tmp_path: Path) -> None:
@@ -294,10 +301,16 @@ def test_spelling_correct_suggests_known_and_rates(db: Database, tmp_path: Path)
     assert page._stack.currentWidget() is page._summary_page
     assert db.stats.get().reviews_done == 1
 
+    log = db.reviews.list_for_word(stored.id)[0]
+    assert log.answer_text == "ALPHA"
+    assert log.verdict == STATUS_CORRECT
+    assert log.distance == 0
+
 
 def test_spelling_near_miss_suggests_vague(db: Database, tmp_path: Path) -> None:
     get_app()
-    db.words.upsert(make_spelling_word())
+    stored = db.words.upsert(make_spelling_word())
+    assert stored.id is not None
 
     page = ReviewPage(make_context(db, tmp_path))
     page.on_activated()
@@ -312,10 +325,17 @@ def test_spelling_near_miss_suggests_vague(db: Database, tmp_path: Path) -> None
     assert "差一点" in page._spelling_result.text()
     assert "建议评分：模糊（2）" in page._rating_hint.text()
 
+    page._rate(RATING_KNOWN)
+    log = db.reviews.list_for_word(stored.id)[0]
+    assert log.answer_text == "alphx"
+    assert log.verdict == STATUS_NEAR
+    assert log.distance == 1
+
 
 def test_spelling_wrong_suggests_forgot(db: Database, tmp_path: Path) -> None:
     get_app()
-    db.words.upsert(make_spelling_word())
+    stored = db.words.upsert(make_spelling_word())
+    assert stored.id is not None
 
     page = ReviewPage(make_context(db, tmp_path))
     page.on_activated()
@@ -329,6 +349,12 @@ def test_spelling_wrong_suggests_forgot(db: Database, tmp_path: Path) -> None:
     assert page._recall_result.status == STATUS_WRONG
     assert "不对" in page._spelling_result.text()
     assert "建议评分：忘记（1）" in page._rating_hint.text()
+
+    page._rate(RATING_KNOWN)
+    log = db.reviews.list_for_word(stored.id)[0]
+    assert log.answer_text == "beta"
+    assert log.verdict == STATUS_WRONG
+    assert log.distance > 0
 
 
 def test_spelling_empty_answer_keeps_card(db: Database, tmp_path: Path) -> None:
@@ -349,7 +375,8 @@ def test_spelling_empty_answer_keeps_card(db: Database, tmp_path: Path) -> None:
 
 def test_spelling_skip_reveals_without_suggestion(db: Database, tmp_path: Path) -> None:
     get_app()
-    db.words.upsert(make_spelling_word())
+    stored = db.words.upsert(make_spelling_word())
+    assert stored.id is not None
 
     page = ReviewPage(make_context(db, tmp_path))
     page.on_activated()
@@ -363,6 +390,12 @@ def test_spelling_skip_reveals_without_suggestion(db: Database, tmp_path: Path) 
     assert "已跳过" in page._spelling_result.text()
     assert page._rating_hint.text() == "按 1~4 或点击按钮：忘记 / 模糊 / 认识 / 太简单"
     assert page._answer_box.isHidden() is False
+
+    page._rate(RATING_KNOWN)
+    log = db.reviews.list_for_word(stored.id)[0]
+    assert log.verdict == VERDICT_SKIPPED
+    assert log.answer_text == ""
+    assert log.distance == 0
 
 
 def test_spelling_mode_disables_shortcuts_until_reveal(db: Database, tmp_path: Path) -> None:

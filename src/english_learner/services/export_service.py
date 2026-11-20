@@ -142,6 +142,9 @@ CSV_COLUMNS: dict[str, tuple[str, ...]] = {
         "reviewed_at",
         "note",
         "advice",
+        "answer_text",
+        "verdict",
+        "distance",
     ),
     "daily_stats": (
         "stat_date",

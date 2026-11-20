@@ -282,6 +282,29 @@ M3.17（阅读检测产出题改为英译中）完成（2026-11-19）：
   薄弱技能过滤、弹窗中英译中占位符与旧题兼容等用例），
   `ruff check` 与 `ruff format --check` 通过。
 
+M5.1（复习证据落库）完成（2026-11-20）：
+
+- **目标**：让 `review_logs` 记录“用户写了什么、判得对不对”，为拼写正确率统计与
+  M5.2 学习者记忆提供数据源，关闭 `TECH_DEBT` 第 57 条；
+- **schema v8**：`review_logs` 增加 `answer_text / verdict / distance`，只加列；
+  旧库在 `_apply_schema()` 的 `version < 8` 分支原地升级，旧记录保持空串 / 0；
+- **实体与仓库**：`ReviewLog` 增三个字段与 `from_row` / `to_params` 映射；
+  `ReviewRepo.log()` 增参数与 INSERT 列，`distance` 负数归零；
+- **服务**：`ReviewService.review()` 透传三个参数，**不参与 `schedule()`**；
+  verdict 只允许 `correct / near / wrong / skipped`，常量 `VERDICT_*` 集中在
+  `services/srs.py`，`recall.STATUS_*` 复用同一套字符串；非法值先抛
+  `ValueError`，不会留下半截写入；
+- **界面**：复习页只在拼写模式真正提交答案时写入 `correct / near / wrong`、
+  用户原始输入与编辑距离；看词回忆、拼写跳过、短语回退统一写 `skipped`；
+- **导出**：CSV 列同步三列，JSON 自动包含；旧文章 / 旧复习记录不受影响；
+- **测试**：352 passed（新增 v7→v8 无损升级、证据落库不改调度、非法 verdict
+  拒绝写入、看词 / 拼写正确 / 差一点 / 错误 / 跳过五条路径的证据断言、
+  导出 JSON/CSV 新列断言），`ruff check` 与 `ruff format --check` 通过。
+  另修正一处依赖真实日期的既有用例（`count_for_date` 改用 `today_str()`）；
+- **外部验收**：静态审查第 1 轮通过，无 P0/P1/P2，仅 2 条 P3 观察
+  （Repo 层 verdict 校验、`answer_text` 截断一致性）；报告保存在本地
+  `verification/VERIFICATION_M5.1.md`，该目录已加入 `.gitignore`、不入库。
+
 ## 5. 验证记录
 
 ### 5.1 M0（2026-11-18）

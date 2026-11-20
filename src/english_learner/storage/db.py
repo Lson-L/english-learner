@@ -11,7 +11,7 @@ Java 对照：
 - 自动提交模式（isolation_level=None），需要原子性时用 `transaction()` 显式包一层。
 
 迁移：
-- 版本号存在 `PRAGMA user_version` 里，当前 SCHEMA_VERSION = 6；
+- 版本号存在 `PRAGMA user_version` 里，当前 SCHEMA_VERSION = 8；
 - 建表语句全部是 `CREATE ... IF NOT EXISTS`，重复初始化不会报错；
 - v1 → v2：words 增加 mnemonic，review_logs 增加 note/advice，新增 word_forms
   词形缓存表；用 `ALTER TABLE ... ADD COLUMN` 原地升级，旧数据不丢；
@@ -25,7 +25,9 @@ Java 对照：
   reading_quizzes 增加多道产出题、后验、置信度、练习模式与阶段；
   新增 level_evidence（历史证据回放）与 weekly_reviews（每周复盘）两张表。
   旧检测结果不回填证据、不阻塞启动；
-- v6 → v7：新增 ai_calls（AI 调用记录），只记用量元数据，不保存提示词和回复。
+- v6 → v7：新增 ai_calls（AI 调用记录），只记用量元数据，不保存提示词和回复；
+- v7 → v8：review_logs 增加 answer_text / verdict / distance（M5.1 复习证据），
+  只加列，旧记录保持空串 / 0，不参与统计。
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ from .repositories import (
     WordRepo,
 )
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS profile (
@@ -129,7 +131,11 @@ CREATE TABLE IF NOT EXISTS review_logs (
     next_interval INTEGER NOT NULL,
     reviewed_at   TEXT    NOT NULL,
     note          TEXT    NOT NULL DEFAULT '',
-    advice        TEXT    NOT NULL DEFAULT ''
+    advice        TEXT    NOT NULL DEFAULT '',
+    -- M5.1 拼写证据：用户输入、判定（correct/near/wrong/skipped）、编辑距离
+    answer_text   TEXT    NOT NULL DEFAULT '',
+    verdict       TEXT    NOT NULL DEFAULT '',
+    distance      INTEGER NOT NULL DEFAULT 0
 );
 
 -- 词形缓存：went → go。查询命中这里就不用再调用 AI 判断原形。
@@ -346,6 +352,11 @@ class Database:
             )
             self._add_column(conn, "reading_quizzes", "practice_mode", "INTEGER NOT NULL DEFAULT 0")
             self._add_column(conn, "reading_quizzes", "stage", "INTEGER NOT NULL DEFAULT 2")
+
+        if version < 8:
+            self._add_column(conn, "review_logs", "answer_text", "TEXT NOT NULL DEFAULT ''")
+            self._add_column(conn, "review_logs", "verdict", "TEXT NOT NULL DEFAULT ''")
+            self._add_column(conn, "review_logs", "distance", "INTEGER NOT NULL DEFAULT 0")
 
         # words.cefr_band 是 v6 才加的列，索引必须等 ALTER TABLE 之后再建。
         conn.execute("CREATE INDEX IF NOT EXISTS idx_words_band ON words(cefr_band)")

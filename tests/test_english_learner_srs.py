@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from english_learner.models.entities import Word, now_iso
+from english_learner.models.entities import Word, now_iso, today_str
 from english_learner.services.srs import (
     MASTERED_INTERVAL_DAYS,
     MAX_INTERVAL_DAYS,
@@ -161,7 +161,8 @@ def test_review_persists_schedule_logs_and_stats(db: Database) -> None:
     assert logs[0].rating == RATING_KNOWN
     assert logs[0].prev_interval == 0
     assert logs[0].next_interval == 1
-    assert db.reviews.count_for_date("2026-11-19") == 1
+    # reviewed_at 用真实时钟（now_iso），这里不能写死日期；调度用的“今天”才是注入值。
+    assert db.reviews.count_for_date(today_str()) == 1
 
     assert db.stats.get("2026-11-19").reviews_done == 1
     # 复习后这个词不再出现在到期队列
@@ -183,6 +184,44 @@ def test_review_logs_user_reason_and_ai_advice(db: Database) -> None:
     logs = db.reviews.list_for_word(stored.id)
     assert logs[0].note == "总是和 resistant 混淆"
     assert logs[0].advice == "resilient 强调恢复力"
+
+
+def test_review_persists_spelling_evidence_without_changing_schedule(db: Database) -> None:
+    """证据只落库，调度必须仍然只由 rating 决定（与不带证据时一致）。"""
+    stored = db.words.upsert(make_word())
+    assert stored.id is not None
+    service = ReviewService(db.words, db.reviews, db.stats, today=lambda: "2026-11-19")
+
+    outcome = service.review(
+        stored,
+        RATING_VAGUE,
+        answer_text="resilent",
+        verdict="near",
+        distance=1,
+    )
+
+    expected = schedule(stored, RATING_VAGUE, on=DAY)
+    assert outcome.next_interval == expected.interval_days
+    assert outcome.word.repetitions == expected.repetitions
+    assert outcome.word.due_date == expected.due_date
+
+    log = db.reviews.list_for_word(stored.id)[0]
+    assert log.answer_text == "resilent"
+    assert log.verdict == "near"
+    assert log.distance == 1
+
+
+def test_review_rejects_unknown_verdict_before_writing(db: Database) -> None:
+    stored = db.words.upsert(make_word())
+    assert stored.id is not None
+    service = ReviewService(db.words, db.reviews, db.stats, today=lambda: "2026-11-19")
+
+    with pytest.raises(ValueError):
+        service.review(stored, RATING_KNOWN, verdict="guessed")
+
+    assert db.reviews.list_for_word(stored.id) == []
+    reloaded = db.words.get_by_id(stored.id)
+    assert reloaded is not None and reloaded.interval_days == 0
 
 
 def test_review_rejects_unsaved_word(db: Database) -> None:
