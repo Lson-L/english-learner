@@ -164,6 +164,13 @@ class ReviewService:
         return self._words.list_due(self._today(), limit=limit)
 
     def count_due(self) -> int:
+        """今天到期数（精确 COUNT）。
+
+        `due_words()` 默认只取 200 条，直接 len() 会把积压数截断到 200；
+        有统计仓库时走 COUNT，界面上的「今天到期 N 词」才是真实值。
+        """
+        if self._stats is not None:
+            return self._stats.count_due(self._today())
         return len(self.due_words())
 
     # ------------------------------------------------------------------ 评分

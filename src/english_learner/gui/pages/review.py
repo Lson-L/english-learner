@@ -5,7 +5,9 @@
 - 拼写回忆：正面只给中文释义和挖空例句，输入英文后回车判分；
 - 看词 + 拼写（双阶段）：先看词回忆，翻面后遮住词形再默写一次，
   同一张卡只评分一次、只调度一次；
-- 一轮复习取今天所有到期词（最多 200 个），结束后显示本轮统计；
+- 拼写输入是设置里的总开关，默认关闭，关闭时全部降级为看词回忆；
+- 每天只取「目标 - 今日已完成」个词，默认目标 20；剩下的留在积压里，可加练；
+- 每 10 张卡一个检查点，也可以随时「结束本轮」，已评分的卡片都已落库；
 - 复习只做本地 SQLite 读写，不走 TaskWorker、不依赖网络。
 """
 
@@ -30,6 +32,7 @@ from PySide6.QtWidgets import (
 
 from ...models.entities import Word
 from ...services.app_context import AppContext
+from ...services.config_store import ReviewConfig
 from ...services.recall import (
     STATUS_CORRECT,
     STATUS_NEAR,
@@ -60,6 +63,9 @@ logger = logging.getLogger(__name__)
 
 # 一轮最多复习多少个词：防止积压太久时一次性加载过多。剩下的下一轮继续。
 SESSION_LIMIT = 200
+
+# 每复习这么多张卡停一次，给用户一个「继续 / 到此为止」的节点。
+ROUND_SIZE = 10
 
 _RATING_SPECS: tuple[tuple[int, str, str], ...] = (
     (RATING_FORGOT, "忘记 (1)", "ratingForgot"),
@@ -94,6 +100,13 @@ class ReviewPage(QWidget):
         self._reviewed = 0
         self._recalled = 0
         self._mode_counts = {CARD_RECOGNITION: 0, CARD_SPELLING: 0, CARD_DUAL: 0}
+
+        # 分批关卡：_round_start 是本轮第一张卡的下标，_round_* 只统计本轮。
+        self._round_start = 0
+        self._round_no = 1
+        self._round_reviewed = 0
+        self._round_recalled = 0
+        self._at_checkpoint = False
 
         # 拼写输入状态：题面、判分结果、输入框是否可编辑。
         self._prompt: SpellingPrompt | None = None
@@ -197,6 +210,12 @@ class ReviewPage(QWidget):
         self._progress_label.setObjectName("muted")
         progress_row.addWidget(self._progress_label)
         progress_row.addStretch(1)
+        # 随时收工：已评分的卡片都已落库，不需要硬撑到整轮结束。
+        self._end_button = QPushButton("结束本轮")
+        self._end_button.setObjectName("linkButton")
+        self._end_button.setToolTip("已复习的卡片都已保存，随时可以回来继续")
+        self._end_button.clicked.connect(self._end_session_early)
+        progress_row.addWidget(self._end_button)
         self._mode_label = QLabel("")
         self._mode_label.setObjectName("muted")
         progress_row.addWidget(self._mode_label)
@@ -365,11 +384,22 @@ class ReviewPage(QWidget):
         box.addWidget(self._summary_detail)
 
         button_row = QHBoxLayout()
+        button_row.setSpacing(10)
         button_row.addStretch(1)
-        self._again_button = QPushButton("再检查一次到期词")
-        self._again_button.setObjectName("secondaryButton")
-        self._again_button.clicked.connect(self._start_session)
-        button_row.addWidget(self._again_button)
+        # 检查点：继续下一轮；总结页：继续复习 / 加练一轮。同一个按钮按状态分支。
+        self._continue_button = QPushButton("继续")
+        self._continue_button.setObjectName("primaryButton")
+        self._continue_button.clicked.connect(self._continue_from_summary)
+        button_row.addWidget(self._continue_button)
+        # 只在检查点出现：结束本轮，直接看部分总结。
+        self._finish_button = QPushButton("今天到此为止")
+        self._finish_button.setObjectName("secondaryButton")
+        self._finish_button.clicked.connect(self._finish_session)
+        button_row.addWidget(self._finish_button)
+        self._overview_button = QPushButton("回到概览")
+        self._overview_button.setObjectName("secondaryButton")
+        self._overview_button.clicked.connect(self.refresh)
+        button_row.addWidget(self._overview_button)
         button_row.addStretch(1)
         box.addLayout(button_row)
 
@@ -410,24 +440,66 @@ class ReviewPage(QWidget):
 
     # -------------------------------------------------------------- 生命周期
     def on_activated(self) -> None:
-        """主窗口切到本页时刷新；会话进行中切走再回来不打断。"""
-        if self._is_session_active():
+        """主窗口切到本页时刷新；会话进行中或停在检查点时切走再回来不打断。"""
+        if self._is_session_active() or self._at_checkpoint:
             return
         self.refresh()
 
+    def _review_config(self) -> ReviewConfig:
+        """读取复习偏好；文件损坏时 ConfigStore 已经回退默认值。"""
+        return self._context.store.load_review()
+
     def refresh(self) -> None:
-        """回到概览态：显示到期数量与今日已复习数。"""
+        """回到概览态：显示今日目标与到期数量。"""
+        review_config = self._review_config()
+        goal = review_config.daily_limit
         due_count = self._context.review_service().count_due()
         reviews_done = self._context.stats_repo.get().reviews_done
-        self._due_label.setText(f"今天到期 {due_count} 词 · 今日已复习 {reviews_done} 词")
+        self._due_label.setText(
+            f"今天到期 {due_count} 词 · 今日已复习 {reviews_done} / 目标 {goal}"
+        )
 
         if due_count == 0:
             self._idle_title.setText("今天没有到期的词")
             self._idle_hint.setText("读完今天的文章、标几个新词，明天它们就会出现在这里。")
+            self._start_button.setText("开始复习")
             self._start_button.setEnabled(False)
+        elif reviews_done >= goal:
+            batch = min(due_count, goal, SESSION_LIMIT)
+            self._idle_title.setText("今日目标已完成")
+            self._idle_hint.setText(
+                f"还有 {due_count} 个到期词，可以加练一轮（{batch} 个）；不练也不会影响明天的安排。"
+            )
+            self._start_button.setText(f"加练一轮（{batch} 个）")
+            self._start_button.setEnabled(True)
         else:
-            self._idle_title.setText(f"今天有 {due_count} 个词到期")
-            self._idle_hint.setText(_IDLE_HINT)
+            remaining_goal = goal - reviews_done
+            batch = min(due_count, remaining_goal, SESSION_LIMIT)
+            self._idle_title.setText(f"今天先复习 {batch} 个词")
+            base_hint = (
+                _IDLE_HINT
+                if review_config.spelling_enabled
+                else "系统按到期顺序安排看词回忆：先想意思，翻面后按 1~4 评分；"
+                "忘记或模糊的词会更早再次出现。"
+            )
+            if due_count > batch:
+                hint = (
+                    f"{base_hint}\n今天到期 {due_count} 个，本轮先做 {batch} 个；"
+                    f"完成每日目标还差 {remaining_goal} 个，剩下的会留在积压里。"
+                )
+            elif due_count < remaining_goal:
+                hint = (
+                    f"{base_hint}\n今天到期 {due_count} 个，全部做完即可；"
+                    f"距离每日目标还差 {remaining_goal} 个（暂时没有更多到期词）。"
+                )
+            else:
+                hint = (
+                    f"{base_hint}\n今天到期 {due_count} 个，完成每日目标还差 {remaining_goal} 个。"
+                )
+            if not review_config.spelling_enabled:
+                hint += "\n当前只做看词回忆；需要默写可在「设置 → 复习」里打开拼写输入。"
+            self._idle_hint.setText(hint)
+            self._start_button.setText("开始复习")
             self._start_button.setEnabled(True)
 
         self._current = None
@@ -436,6 +508,10 @@ class ReviewPage(QWidget):
         self._prompt = None
         self._recall_result = None
         self._spell_input_active = False
+        # 回到概览等于放弃本轮内存状态；已评分的卡片早已落库，不受影响。
+        self._session = []
+        self._index = 0
+        self._at_checkpoint = False
         self._stack.setCurrentWidget(self._idle_page)
 
     # ------------------------------------------------------------------ 会话
@@ -447,7 +523,13 @@ class ReviewPage(QWidget):
         )
 
     def _start_session(self) -> None:
-        words = self._context.review_service().due_words(limit=SESSION_LIMIT)
+        review_config = self._review_config()
+        goal = review_config.daily_limit
+        reviews_done = self._context.stats_repo.get().reviews_done
+        remaining_goal = max(0, goal - reviews_done)
+        # 目标内按「还差多少」取词；目标已完成时点按钮表示加练，再取一轮目标数。
+        batch = remaining_goal if remaining_goal > 0 else goal
+        words = self._context.review_service().due_words(limit=min(batch, SESSION_LIMIT))
         if not words:
             self.refresh()
             set_status(self._status, "今天没有到期的词，读一篇文章再回来吧。", "hint")
@@ -457,11 +539,18 @@ class ReviewPage(QWidget):
         history = self._context.review_repo.last_reviews(
             [word.id for word in words if word.id is not None]
         )
-        self._session = build_session_plan(words, history)
+        self._session = build_session_plan(
+            words, history, spelling_enabled=review_config.spelling_enabled
+        )
         self._index = 0
         self._reviewed = 0
         self._recalled = 0
         self._mode_counts = {CARD_RECOGNITION: 0, CARD_SPELLING: 0, CARD_DUAL: 0}
+        self._round_start = 0
+        self._round_no = 1
+        self._round_reviewed = 0
+        self._round_recalled = 0
+        self._at_checkpoint = False
         self._current = None
         self._revealed = False
         set_status(self._status, "", "hint")
@@ -800,13 +889,17 @@ class ReviewPage(QWidget):
             return
 
         self._reviewed += 1
+        self._round_reviewed += 1
         self._mode_counts[self._current_mode] = self._mode_counts.get(self._current_mode, 0) + 1
         if rating >= RATING_KNOWN:
             self._recalled += 1
+            self._round_recalled += 1
 
         self._index += 1
         if self._index >= len(self._session):
             self._finish_session()
+        elif self._index - self._round_start >= ROUND_SIZE:
+            self._show_checkpoint()
         else:
             self._show_current()
 
@@ -839,7 +932,66 @@ class ReviewPage(QWidget):
             return None
         return dialog.result_reason, dialog.result_advice
 
+    def _show_checkpoint(self) -> None:
+        """每 ROUND_SIZE 张卡暂停一次，给「继续 / 到此为止」的选择。"""
+        self._at_checkpoint = True
+        self._current = None
+        self._revealed = False
+        self._prompt = None
+        self._recall_result = None
+        self._spell_input_active = False
+
+        done = self._context.stats_repo.get().reviews_done
+        goal = self._review_config().daily_limit
+        total = self._round_reviewed
+        recalled = self._round_recalled
+        percent = round(recalled * 100 / total) if total else 0
+        remaining = len(self._session) - self._index
+
+        self._summary_title.setText(f"第 {self._round_no} 轮完成")
+        self._summary_detail.setText(
+            f"本轮复习 {total} 个词，其中 {recalled} 个记得（{percent}%）。\n"
+            f"今日已完成 {done} / 目标 {goal}。"
+        )
+        self._continue_button.setText(f"继续下一轮（还剩 {remaining} 个）")
+        self._continue_button.setVisible(True)
+        self._finish_button.setVisible(True)
+        self._overview_button.setVisible(True)
+        self._stack.setCurrentWidget(self._summary_page)
+        self._refresh_due_label()
+        set_status(self._status, "进度已保存，可以继续，也可以先停在这里。", "hint")
+
+    def _continue_from_summary(self) -> None:
+        """检查点继续本轮；总结页重新取「还差的目标」或加练一轮。"""
+        if self._at_checkpoint:
+            self._continue_round()
+        else:
+            self._start_session()
+
+    def _continue_round(self) -> None:
+        if self._index >= len(self._session):
+            self._start_session()
+            return
+        self._round_no += 1
+        self._round_start = self._index
+        self._round_reviewed = 0
+        self._round_recalled = 0
+        self._at_checkpoint = False
+        self._stack.setCurrentWidget(self._card_page)
+        self._show_current()
+
+    def _end_session_early(self) -> None:
+        """随时收工：已评分的卡片都已落库，直接展示部分总结。"""
+        if self._stack.currentWidget() is not self._card_page:
+            return
+        if self._reviewed == 0:
+            self.refresh()
+            set_status(self._status, "还没有复习任何词，进度没有变化。", "hint")
+            return
+        self._finish_session()
+
     def _finish_session(self) -> None:
+        self._at_checkpoint = False
         self._current = None
         self._revealed = False
         self._prompt = None
@@ -856,16 +1008,56 @@ class ReviewPage(QWidget):
                 parts.append(f"{_MODE_TITLES[mode]} {count} 个")
         breakdown = f"（{'、'.join(parts)}）" if parts else ""
 
-        self._summary_title.setText("本轮复习完成")
-        self._summary_detail.setText(
-            f"复习了 {total} 个词{breakdown}，其中 {recalled} 个记得（{percent}%）。\n"
-            "「忘记」和「模糊」的词会更早再次出现。"
-        )
+        done = self._context.stats_repo.get().reviews_done
+        goal = self._review_config().daily_limit
+        due_count = self._context.review_service().count_due()
+
+        if due_count == 0:
+            self._summary_title.setText("今天的复习已完成")
+            self._summary_detail.setText(
+                f"本轮复习了 {total} 个词{breakdown}，其中 {recalled} 个记得（{percent}%）。\n"
+                "今天到期的词已全部复习完。"
+            )
+            self._continue_button.setVisible(False)
+        elif done >= goal:
+            self._summary_title.setText("今日目标已完成")
+            self._summary_detail.setText(
+                f"本轮复习了 {total} 个词{breakdown}，其中 {recalled} 个记得（{percent}%）。\n"
+                f"今日已完成 {done} / {goal}；还有 {due_count} 个到期词，可以加练一轮。"
+            )
+            self._continue_button.setText(f"加练一轮（{min(due_count, goal, SESSION_LIMIT)} 个）")
+            self._continue_button.setVisible(True)
+        else:
+            remaining = goal - done
+            self._summary_title.setText("本轮已结束")
+            self._summary_detail.setText(
+                f"本轮复习了 {total} 个词{breakdown}，其中 {recalled} 个记得（{percent}%）。\n"
+                f"今日已完成 {done} / {goal}，还差 {remaining} 个；进度已保存，随时可以继续。"
+            )
+            self._continue_button.setText(
+                f"继续复习（还差 {min(due_count, remaining, SESSION_LIMIT)} 个）"
+            )
+            self._continue_button.setVisible(True)
+
+        self._finish_button.setVisible(False)
+        self._overview_button.setVisible(True)
         self._stack.setCurrentWidget(self._summary_page)
         self._refresh_due_label()
-        set_status(self._status, "复习进度已保存，今日打卡 +1。", "success")
+        if due_count == 0:
+            set_status(self._status, "复习进度已保存，今天到期的词已全部复习完。", "success")
+        elif done >= goal:
+            set_status(self._status, "复习进度已保存，今日复习目标完成。", "success")
+        else:
+            set_status(
+                self._status,
+                f"复习进度已保存，今日已完成 {done} / {goal}。",
+                "hint",
+            )
 
     def _refresh_due_label(self) -> None:
         due_count = self._context.review_service().count_due()
         reviews_done = self._context.stats_repo.get().reviews_done
-        self._due_label.setText(f"今天到期 {due_count} 词 · 今日已复习 {reviews_done} 词")
+        goal = self._review_config().daily_limit
+        self._due_label.setText(
+            f"今天到期 {due_count} 词 · 今日已复习 {reviews_done} / 目标 {goal}"
+        )

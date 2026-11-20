@@ -27,7 +27,7 @@ from ..storage.repositories import (
     WordRepo,
     WritingAttemptRepo,
 )
-from .ai_client import AIClient
+from .ai_client import BUSINESS_TIMEOUT, AIClient
 from .article_service import ArticleService
 from .assessment_service import AssessmentService
 from .back_translation_service import BackTranslationService
@@ -70,10 +70,17 @@ class AppContext:
 
         客户端注入调用记录仓库：每次 AI 请求的 token / 耗时 / 错误都落库，
         设置页用它展示用量。记录失败不会影响业务请求。
+
+        业务调用使用 `BUSINESS_TIMEOUT`（读 300s）：带 thinking 的模型生成
+        长文章 / 讲评时经常超过 30s；连接测试仍由调用方用默认的 30s 快速失败。
         """
         with self._client_lock:
             if self._client is None:
-                self._client = AIClient(self.config, recorder=self.db.ai_calls)
+                self._client = AIClient(
+                    self.config,
+                    timeout=BUSINESS_TIMEOUT,
+                    recorder=self.db.ai_calls,
+                )
             return self._client
 
     def close(self) -> None:

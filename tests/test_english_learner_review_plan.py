@@ -102,6 +102,20 @@ def test_empty_plan() -> None:
     assert build_session_plan([]) == []
 
 
+def test_spelling_disabled_forces_recognition() -> None:
+    """拼写开关关闭时，即使词已经熟悉也只排看词回忆，并保持原到期顺序。"""
+    words = [
+        make_word("fresh", repetitions=0),
+        make_word("second", repetitions=1),
+        make_word("mature", repetitions=5),
+    ]
+
+    cards = build_session_plan(words, spelling_enabled=False)
+
+    assert [card.mode for card in cards] == [CARD_RECOGNITION] * 3
+    assert [card.word.lemma for card in cards] == ["fresh", "second", "mature"]
+
+
 def _front(mode: str) -> str:
     return CARD_SPELLING if mode == CARD_SPELLING else CARD_RECOGNITION
 

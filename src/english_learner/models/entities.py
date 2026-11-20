@@ -600,6 +600,8 @@ class ReadingQuiz:
     level: str
     questions: tuple[QuizQuestion, ...]
     answers: tuple[int, ...] = ()
+    # 与选择题一一对应：用户选「不知道」时填写的补充说明，其余位置为空串。
+    choice_notes: tuple[str, ...] = ()
     explanations: tuple[str, ...] = ()
     error_types: tuple[str, ...] = ()
     short_answer_text: str = ""
@@ -727,6 +729,13 @@ class ReadingQuiz:
             str(item).strip() for item in _load_json_list(row["explanations_json"])
         )
         error_types = tuple(str(item).strip() for item in _load_json_list(row["error_types_json"]))
+        # 旧库 / 旧行可能没有该列：按“没有补充说明”处理，不影响其它字段。
+        choice_notes = tuple(
+            str(item).strip()
+            for item in _load_json_list(
+                row["choice_notes_json"] if "choice_notes_json" in row.keys() else "[]"
+            )
+        )
         productions = tuple(
             production
             for production in (
@@ -742,6 +751,7 @@ class ReadingQuiz:
             level=str(row["level"]),
             questions=questions,
             answers=answers,
+            choice_notes=choice_notes,
             explanations=explanations,
             error_types=error_types,
             short_answer_text=str(row["short_answer_text"] or ""),
@@ -774,6 +784,7 @@ class ReadingQuiz:
                 [question.to_dict() for question in self.questions], ensure_ascii=False
             ),
             "answers_json": json.dumps(list(self.answers), ensure_ascii=False),
+            "choice_notes_json": json.dumps(list(self.choice_notes), ensure_ascii=False),
             "explanations_json": json.dumps(list(self.explanations), ensure_ascii=False),
             "error_types_json": json.dumps(list(self.error_types), ensure_ascii=False),
             "short_answer_text": self.short_answer_text,

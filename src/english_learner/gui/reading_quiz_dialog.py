@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -36,6 +37,8 @@ from PySide6.QtWidgets import (
 from ..models.entities import CEFR_LEVELS, Article, QuizQuestion, ReadingQuiz
 from ..services.app_context import AppContext
 from ..services.reading_quiz_service import (
+    UNKNOWN_ANSWER,
+    UNKNOWN_LABEL,
     UPGRADE_EVIDENCE_REQUIRED,
     QuizOutcome,
     ReadingQuizService,
@@ -97,6 +100,8 @@ class ReadingQuizDialog(QDialog):
         self._quiz: ReadingQuiz | None = None
         self._outcome: QuizOutcome | None = None
         self._groups: list[QButtonGroup] = []
+        # 与 _groups 一一对应：选「不知道」时才显示 / 提交的补充说明输入框。
+        self._choice_notes: list[QLineEdit] = []
         self._production_edits: list[QPlainTextEdit] = []
         self._stage_one_answers: tuple[int, ...] = ()
         self._practice_hint = False
@@ -284,6 +289,7 @@ class ReadingQuizDialog(QDialog):
         self._quiz = quiz
         self._clear_layout(self._quiz_layout)
         self._groups = []
+        self._choice_notes = []
         self._production_edits = []
 
         stage = 1 if int(quiz.stage or 1) < 2 else 2
@@ -303,6 +309,7 @@ class ReadingQuizDialog(QDialog):
             hint = (
                 "先做 3 道当前等级的选择题。提交后系统会按正确率决定第二轮"
                 "往上一档还是往下一档探测，并补 2 道英译中题。"
+                f"不会的题可以选「{UNKNOWN_LABEL}」，并写明哪里没看懂。"
             )
         else:
             production_label = "英译中" if all_translation else "产出题"
@@ -312,11 +319,13 @@ class ReadingQuizDialog(QDialog):
             if all_translation:
                 hint = (
                     "第一轮的答案已锁定；请完成边界选择题，并把英文句子翻译成中文。"
+                    "不会的选择题可以选「不知道」并写明原因；"
                     "AI 会逐题讲评，等级由本地后验综合决定。"
                 )
             else:
                 hint = (
                     "第一轮的答案已锁定；请完成边界选择题和产出题。"
+                    "不会的选择题可以选「不知道」并写明原因；"
                     "AI 会逐题讲评，等级由本地后验综合决定。"
                 )
         title.setObjectName("cardTitle")
@@ -360,6 +369,7 @@ class ReadingQuizDialog(QDialog):
             choice_position += 1
             is_locked = stage == 2 and position < len(chosen_stage_one)
             saved = chosen_stage_one[position] if position < len(chosen_stage_one) else -1
+            saved_note = quiz.choice_notes[position] if position < len(quiz.choice_notes) else ""
             self._quiz_layout.addWidget(
                 self._build_choice_card(
                     index,
@@ -367,7 +377,8 @@ class ReadingQuizDialog(QDialog):
                     quiz.level,
                     position=position,
                     initial_value=saved,
-                    locked_value=saved if is_locked else -1,
+                    initial_note=saved_note,
+                    locked=is_locked,
                 )
             )
 
@@ -397,7 +408,8 @@ class ReadingQuizDialog(QDialog):
         *,
         position: int,
         initial_value: int = -1,
-        locked_value: int = -1,
+        initial_note: str = "",
+        locked: bool = False,
     ) -> QWidget:
         card = Card()
         prompt = QLabel(f"{index}. {question.prompt}")
@@ -408,7 +420,7 @@ class ReadingQuizDialog(QDialog):
         meta_text = (
             f"题型：{question.skill or 'unknown'} · 难度：{question.difficulty or default_level}"
         )
-        if locked_value >= 0:
+        if locked:
             meta_text += " · 第一轮已作答"
         meta = QLabel(meta_text)
         meta.setObjectName("muted")
@@ -422,10 +434,37 @@ class ReadingQuizDialog(QDialog):
             group.addButton(radio, option_index)
             if option_index == initial_value:
                 radio.setChecked(True)
-            if locked_value >= 0:
+            if locked:
                 radio.setEnabled(False)
             card.body.addWidget(radio)
+
+        # 与测评一致：选项之后的字母作为「不知道」，-1 仍保留给未作答。
+        unknown_letter = chr(ord("A") + len(question.options))
+        unknown = QRadioButton(f"{unknown_letter}. {UNKNOWN_LABEL}")
+        unknown.setToolTip("不会就选这个；下面的补充说明会交给 AI 参考")
+        group.addButton(unknown, UNKNOWN_ANSWER)
+        if initial_value == UNKNOWN_ANSWER:
+            unknown.setChecked(True)
+        if locked:
+            unknown.setEnabled(False)
+        card.body.addWidget(unknown)
+
+        note = QLineEdit()
+        note.setPlaceholderText("选填：这题哪里没看懂？会交给 AI 参考，例如“单词不认识 / 句子太长”")
+        note.setText(initial_note)
+        note.setClearButtonEnabled(True)
+        note.setVisible(initial_value == UNKNOWN_ANSWER)
+        note.setEnabled(not locked)
+        # 只在选中「不知道」时显示，避免每道题都多一行输入框。
+        group.idToggled.connect(
+            lambda option_id, checked, edit=note: edit.setVisible(
+                bool(checked) and option_id == UNKNOWN_ANSWER
+            )
+        )
+        card.body.addWidget(note)
+
         self._groups.append(group)
+        self._choice_notes.append(note)
         return card
 
     def _build_production_input_card(self, index: int, question: QuizQuestion) -> QWidget:
@@ -473,6 +512,13 @@ class ReadingQuizDialog(QDialog):
     def _collect_answers(self) -> tuple[int, ...]:
         return tuple(group.checkedId() for group in self._groups)
 
+    def _collect_choice_notes(self) -> tuple[str, ...]:
+        """只收集「不知道」题的补充说明；其它题的输入框内容不提交。"""
+        return tuple(
+            edit.text().strip() if group.checkedId() == UNKNOWN_ANSWER else ""
+            for group, edit in zip(self._groups, self._choice_notes, strict=False)
+        )
+
     def _collect_productions(self) -> tuple[str, ...]:
         return tuple(edit.toPlainText().strip() for edit in self._production_edits)
 
@@ -483,16 +529,23 @@ class ReadingQuizDialog(QDialog):
         if quiz is None:
             return
         answers = self._collect_answers()
-        if any(index < 0 for index in answers):
-            set_status(self._quiz_status, "还有选择题没有作答，请把第一轮题目都选完。", "error")
+        if any(index == -1 for index in answers):
+            set_status(
+                self._quiz_status,
+                f"还有选择题没有作答；不会的题可以选「{UNKNOWN_LABEL}」。",
+                "error",
+            )
             return
 
+        notes = self._collect_choice_notes()
         self._stage_one_answers = answers
         article = self._article
         service = self._service
         set_status(self._quiz_status, "正在根据第一轮表现生成边界题，请稍候…", "loading")
         self._set_busy(True)
-        worker = TaskWorker(lambda: service.advance_stage(article, quiz, answers))
+        worker = TaskWorker(
+            lambda: service.advance_stage(article, quiz, answers, choice_notes=notes)
+        )
         worker.succeeded.connect(self._on_stage_two_ready)
         worker.failed.connect(self._on_stage_failed)
         worker.cancelled.connect(self._on_worker_finished)
@@ -525,9 +578,14 @@ class ReadingQuizDialog(QDialog):
             return
 
         answers = self._collect_answers()
-        if any(index < 0 for index in answers):
-            set_status(self._quiz_status, "还有选择题没有作答，请把每道题都选完。", "error")
+        if any(index == -1 for index in answers):
+            set_status(
+                self._quiz_status,
+                f"还有选择题没有作答；不会的题可以选「{UNKNOWN_LABEL}」。",
+                "error",
+            )
             return
+        notes = self._collect_choice_notes()
 
         productions = self._collect_productions()
         if quiz.short_total and any(not text for text in productions):
@@ -564,6 +622,7 @@ class ReadingQuizDialog(QDialog):
                 profile,
                 self_report=self_report,
                 production_texts=productions,
+                choice_notes=notes,
             )
         )
         worker.succeeded.connect(self._on_graded)
@@ -610,9 +669,10 @@ class ReadingQuizDialog(QDialog):
                 )
                 continue
             chosen = quiz.answers[choice_position] if choice_position < len(quiz.answers) else -1
+            position = choice_position
             choice_position += 1
             self._result_layout.addWidget(
-                self._build_choice_result_card(index, question, quiz, chosen)
+                self._build_choice_result_card(index, question, quiz, chosen, position)
             )
 
         self._result_layout.addStretch(1)
@@ -740,10 +800,15 @@ class ReadingQuizDialog(QDialog):
         question: QuizQuestion,
         quiz: ReadingQuiz,
         chosen: int,
+        position: int,
     ) -> Card:
         correct = chosen == question.answer_index
+        if chosen == UNKNOWN_ANSWER:
+            heading_text = "主动表示不会"
+        else:
+            heading_text = "回答正确" if correct else "回答错误"
         card = Card()
-        heading = QLabel(f"第 {index} 题 · {'回答正确' if correct else '回答错误'}")
+        heading = QLabel(f"第 {index} 题 · {heading_text}")
         heading.setObjectName("cardTitle")
         card.body.addWidget(heading)
 
@@ -759,15 +824,23 @@ class ReadingQuizDialog(QDialog):
         prompt.setWordWrap(True)
         card.body.addWidget(prompt)
 
-        chosen_text = (
-            f"{question.letter(chosen)}. {question.options[chosen]}"
-            if 0 <= chosen < len(question.options)
-            else "未作答"
-        )
+        if chosen == UNKNOWN_ANSWER:
+            chosen_text = UNKNOWN_LABEL
+        elif 0 <= chosen < len(question.options):
+            chosen_text = f"{question.letter(chosen)}. {question.options[chosen]}"
+        else:
+            chosen_text = "未作答"
         answer_label = QLabel(f"你的答案：{chosen_text}")
         answer_label.setObjectName("muted")
         answer_label.setWordWrap(True)
         card.body.addWidget(answer_label)
+
+        note = quiz.choice_notes[position] if position < len(quiz.choice_notes) else ""
+        if note:
+            note_label = QLabel(f"补充说明：{note}")
+            note_label.setObjectName("muted")
+            note_label.setWordWrap(True)
+            card.body.addWidget(note_label)
 
         if not correct:
             correct_text = (

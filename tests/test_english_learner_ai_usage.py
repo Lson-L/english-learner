@@ -316,3 +316,20 @@ def test_app_context_injects_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert rows[0].total_tokens == 50
     context.close()
     db.close()
+
+
+def test_app_context_uses_business_timeout(tmp_path: Path) -> None:
+    """业务调用放宽读超时：thinking 模型生成文章经常超过 30s。"""
+    db = Database(tmp_path / "data.db")
+    store = ConfigStore(tmp_path / "config.json")
+    context = AppContext(make_config(), store, db)
+
+    client = context.client()
+
+    assert client.timeout is ai_module.BUSINESS_TIMEOUT
+    # 具体秒数可能随模型 / 网关调优（120s → 300s）；这里只保证“确实放宽了”。
+    assert client.timeout.read >= 120.0
+    # 连接 / 连接池仍要快速失败，断网时不能干等两分钟。
+    assert client.timeout.connect == 10.0
+    context.close()
+    db.close()

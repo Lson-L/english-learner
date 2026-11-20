@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import date
 
-from ..models.entities import Article, Profile, now_iso, today_str
+from ..models.entities import Article, Profile, Word, now_iso, today_str
 from ..storage.db import DuplicateError
 from ..storage.repositories import ArticleRepo, WordRepo
 from .ai_client import AIError
@@ -47,8 +47,13 @@ MIN_PARAGRAPHS = 3
 MAX_TARGET_WORDS = 6
 DUE_WORDS_PER_ARTICLE = 5
 
-# 文章 JSON 的输出额度：正文 250~350 词 + 字段，给宽一点避免被截断。
-ARTICLE_MAX_TOKENS = 4000
+# 文章 JSON 的输出额度：正文 250~350 词 + 目标词 + 难词表（8~15 条），
+# 正常只需 1200~1800 token；但带 thinking 的模型会把 reasoning token 也算进
+# 输出额度（实测同一模型单次 3000~5000，偶发飙到 5000 直接截断），
+# 所以留足 15000 的余量。max_tokens 只是上限，不生成就不计费；
+# 网关实测接受 15000（64000 也能接受）。真正的兜底是 300s 读超时，
+# 超时后由用户在界面上点「重试生成」，不会自动重试。
+ARTICLE_MAX_TOKENS = 15000
 
 # 每天按日期轮换主题，既稳定又不至于天天同一个话题。
 TOPICS: tuple[str, ...] = (
@@ -87,6 +92,22 @@ class InvalidArticleError(ValueError):
 
 
 @dataclass(frozen=True)
+class GlossaryEntry:
+    """文章自带的难词释义：只写入查词缓存，不直接进生词本。"""
+
+    word: str  # 正文中的形态
+    meaning_cn: str
+    lemma: str = ""
+    pos: str = ""
+    phonetic: str = ""
+
+    @property
+    def base(self) -> str:
+        """词典原形；模型没给时退回正文词形。"""
+        return (self.lemma or self.word).strip().lower()
+
+
+@dataclass(frozen=True)
 class ArticleDraft:
     """通过校验、尚未入库的文章草稿。"""
 
@@ -95,7 +116,7 @@ class ArticleDraft:
     topic: str
     paragraphs: tuple[str, ...]
     target_words: tuple[str, ...] = ()
-    glossary: tuple[tuple[str, str], ...] = ()
+    glossary: tuple[GlossaryEntry, ...] = ()
     # M5.3 本地可读性指标；只在服务层计算，解析器本身不碰词表。
     metrics: ReadabilityMetrics | None = None
 
@@ -155,7 +176,7 @@ def parse_article_draft(
         topic=as_text(data.get("topic")),
         paragraphs=paragraphs,
         target_words=target_words,
-        glossary=_parse_glossary(data.get("glossary")),
+        glossary=_parse_glossary(data.get("glossary"), content),
     )
 
 
@@ -214,17 +235,50 @@ def _parse_paragraphs(value: object) -> tuple[str, ...]:
     return tuple(text for text in (as_text(item) for item in raw_items) if text)
 
 
-def _parse_glossary(value: object) -> tuple[tuple[str, str], ...]:
+_GLOSSARY_WORD_RE = re.compile(r"[a-z][a-z'\-]*")
+MAX_GLOSSARY_ENTRIES = 20
+
+
+def _parse_glossary(value: object, content: str = "") -> tuple[GlossaryEntry, ...]:
+    """解析文章自带的难词表。
+
+    容错优先：`glossary` 缺失、格式混乱、或词没有真正出现在正文里，都只是
+    少缓存几个词，**绝不触发文章重试**。只接受单词（不含空格、数字、中文），
+    同词形去重，最多保留 20 条。
+    """
     if not isinstance(value, list):
         return ()
-    items: list[tuple[str, str]] = []
+
+    lowered = (content or "").lower()
+    seen: set[str] = set()
+    items: list[GlossaryEntry] = []
     for entry in value:
         if not isinstance(entry, dict):
             continue
-        word = as_text(entry.get("word")).lower()
+        word = as_text(entry.get("word")).strip().strip("\"'“”‘’()[]{}.,;:!?").lower()
         meaning = as_text(entry.get("meaning_cn"))
-        if word and meaning:
-            items.append((word, meaning))
+        if not word or not meaning or not _GLOSSARY_WORD_RE.fullmatch(word):
+            continue
+        if word in seen:
+            continue
+        # 模型偶尔会编造正文里没有的词；只缓存真实出现过的，避免污染查词缓存。
+        if lowered and not re.search(rf"\b{re.escape(word)}\b", lowered):
+            continue
+        lemma = as_text(entry.get("lemma")).strip().strip("\"'“”‘’()[]{}.,;:!?").lower()
+        if lemma and not _GLOSSARY_WORD_RE.fullmatch(lemma):
+            lemma = ""
+        seen.add(word)
+        items.append(
+            GlossaryEntry(
+                word=word,
+                meaning_cn=meaning[:200],
+                lemma=lemma or word,
+                pos=as_text(entry.get("pos"))[:20],
+                phonetic=as_text(entry.get("phonetic"))[:60],
+            )
+        )
+        if len(items) >= MAX_GLOSSARY_ENTRIES:
+            break
     return tuple(items)
 
 
@@ -468,6 +522,7 @@ class ArticleService:
             created_at=now_iso(),
         )
         stored = self._articles.replace_by_date(article)
+        self._seed_glossary(stored, draft)
         logger.info("文章已替换：%s《%s》%s 词", day, stored.title, stored.word_count)
         return stored
 
@@ -512,8 +567,45 @@ class ArticleService:
             if existing is None:
                 raise
             stored = existing
+        self._seed_glossary(stored, draft)
         logger.info("文章已入库：%s《%s》%s 词", day, stored.title, stored.word_count)
         return stored
+
+    def _seed_glossary(self, article: Article, draft: ArticleDraft) -> None:
+        """把文章自带的难词释义写入查词缓存（`in_vocabulary=0`，不占生词本）。
+
+        这是查词提速的第一层：生成文章时顺带产出的 glossary 已经包含学习者
+        大概率会双击的词，双击时直接命中缓存，不再等 AI。
+        缓存失败只记日志，不能影响文章生成结果。
+        """
+        if self._words is None or article.id is None or not draft.glossary:
+            return
+        timestamp = now_iso()
+        seeded = 0
+        try:
+            for entry in draft.glossary:
+                word = Word(
+                    lemma=entry.base,
+                    display_form=entry.word if entry.word != entry.base else "",
+                    phonetic=entry.phonetic,
+                    pos=entry.pos,
+                    meaning_cn=entry.meaning_cn,
+                    article_id=article.id,
+                    status="new",
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+                stored = self._words.seed_cache(word)
+                if stored is None or stored.id is None:
+                    continue
+                # 正文词形和原形都记住，下一次查同一词形直接命中。
+                self._words.remember_form(entry.word, stored.id)
+                self._words.remember_form(entry.base, stored.id)
+                seeded += 1
+        except Exception:  # noqa: BLE001 - 缓存是增强信息，失败不能拖垮生成
+            logger.warning("写入文章难词缓存失败，忽略", exc_info=True)
+            return
+        logger.info("文章难词已写入查词缓存：%s 个（《%s》）", seeded, article.title)
 
     def _pick_target_words(self, day: str) -> list[str]:
         if self._words is None:
@@ -565,6 +657,7 @@ class ArticleService:
 __all__ = [
     "ArticleDraft",
     "ArticleService",
+    "GlossaryEntry",
     "InvalidArticleError",
     "parse_article_draft",
 ]

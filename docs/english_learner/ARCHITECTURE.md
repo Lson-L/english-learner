@@ -33,7 +33,7 @@ src/english_learner/
 │   ├── assessment_bank.py      3 套固定题（A2/B1/B2），默认 B1
 │   ├── assessment_service.py   本地计分、AI 评分、CEFR 回退、手动选级、落库
 │   ├── article_service.py      文章生成、JSON 校验、重试一次、当天缓存、换一篇
-│   ├── dictionary_service.py   lemma 规范化、句子提取、查词缓存、加入生词本
+│   ├── dictionary_service.py   lemma 规范化、句子提取、查词缓存、加入生词本、后台补全
 │   ├── level_feedback_service.py 阅读反馈调级：AI 重新定级 + 软约束重写今日文章
 │   ├── reading_quiz_service.py 阅读检测：自适应两阶段、盲评、产出题、本地后验与调级
 │   ├── level_estimator.py      纯函数后验估计器（逻辑斯蒂 + 先验 + 历史衰减）
@@ -73,10 +73,10 @@ src/english_learner/
         ├── today.py            今日页：连续天数/到期复习/累计生词/文章状态/测评入口
         ├── reader.py           阅读页：正文全宽 + 悬浮释义卡、换一篇、调整难度、阅读完成、回译练习
         ├── vocabulary.py       生词本页：筛选/搜索/排序/编辑/批量删除/脏检查/求助记录回显
-        ├── review.py           复习页：自动编排看词/拼写/双阶段卡、本地判分建议、会话统计（M3.18）
+        ├── review.py           复习页：自动编排卡片、每日目标、分批检查点、随时结束（M3.18/M3.19）
         └── settings.py         配置、学习效果、调用记录摘要与入口、字体、数据位置、JSON/CSV 导出
 
-tests/（共 499 个用例，全部 mock AI、无网络）
+tests/（共 522 个用例，全部 mock AI、无网络）
 ├── test_english_learner_config.py        配置读写/校验/脱敏
 ├── test_english_learner_ai_client.py     连接测试与错误翻译
 ├── test_english_learner_ai_usage.py      AI 调用仓库汇总/筛选、客户端埋点与重试、AppContext 注入
@@ -96,7 +96,7 @@ tests/（共 499 个用例，全部 mock AI、无网络）
 ├── test_english_learner_srs.py           SM-2 四档调度/易度边界/间隔上限/复习服务落库
 ├── test_english_learner_review_help.py   复习求助：建议解析/记忆方法落库/失败兜底
 ├── test_english_learner_review_help_dialog.py 求助弹窗：快捷原因/AI 建议/跳过
-├── test_english_learner_review_page.py   复习页状态机/翻面/评分/自动出卡/双阶段/会话统计/队列上限
+├── test_english_learner_review_page.py   复习页状态机/翻面/评分/自动出卡/每日目标/检查点/提前结束
 ├── test_english_learner_review_plan.py   卡片编排：阶段判定/历史覆盖/穿插规则/不丢卡不重复
 ├── test_english_learner_recall.py        拼写归一化/编辑距离/判分与建议评分
 ├── test_english_learner_learner_memory.py 记忆汇总口径/任务过滤/截断/空数据 prompt 快照
@@ -129,7 +129,8 @@ tests/（共 499 个用例，全部 mock AI、无网络）
 - 调用方必须持有 worker 引用（`self._worker`），否则 QThread 被 GC 会丢信号；
 - M3 起 `cancel()` 是协作式取消：任务返回后若已取消就丢弃结果；
   长循环可调用 `workers.is_cancellation_requested()`；HTTP 请求本身无法中断，
-  靠 30s 超时兜底，关闭窗口时页面 `shutdown()` 先等 3 秒，主窗口再兜底等待。
+  靠超时兜底（业务调用 `BUSINESS_TIMEOUT`：连接 10s / 读 300s，连接测试 30s），
+  关闭窗口时页面 `shutdown()` 先等 3 秒，主窗口再兜底等待。
 
 ### 6.3 配置向导状态机
 
@@ -142,7 +143,9 @@ tests/（共 499 个用例，全部 mock AI、无网络）
 
 - 异常类（`AuthenticationError`、`APIConnectionError` 等）仍从 `openai` 顶层导入；
 - SDK 内部用 `httpx2`，测试构造响应请 `import httpx2`，**不要 import httpx**；
-- `OpenAI(..., timeout=30, max_retries=0)` 仍可用；
+- `OpenAI(..., timeout=30, max_retries=0)` 仍可用；`timeout` 也可传
+  `httpx2.Timeout(connect=10, read=300, write=30, pool=10)`，业务调用走
+  `ai_client.BUSINESS_TIMEOUT`，避免 thinking 模型生成长文时被 30s 误杀；
 - 若升级 SDK，先跑 `test_english_learner_ai_client.py`。
 
 ### 6.5 页面导航索引
@@ -750,3 +753,131 @@ tests/（共 499 个用例，全部 mock AI、无网络）
   `answer_text / verdict / distance`，与 M5.1 口径一致；
 - **配置清理**：`ui.review_mode` 与 `UiConfig.review_mode` 已删除，
   旧 `config.json` 里的该键被忽略，不做迁移；复习页不再有模式下拉框。
+
+### 6.32 M3.19：复习节奏（每日目标 / 分批检查点 / 拼写开关）
+
+- **复习偏好**：`config.json` 新增 `review` 段，由 `ReviewConfig` 读写：
+  `daily_limit` 默认 20（夹取到 5~200），`spelling_enabled` 默认 `False`。
+  `ConfigStore.save_review()` 只改这一段，与 `save_ui/save_readability` 一样
+  保留 ai / ui / readability；设置页先设值再连信号，构造期间不会误保存；
+- **每日目标**：开始一轮只取
+  `min(到期数, max(0, daily_limit - 今日 reviews_done))`；今日已完成达到目标后
+  再点按钮属于「加练」，取 `min(到期数, daily_limit, SESSION_LIMIT)`。
+  未做完的到期词留在积压里，不丢数据。今日完成数统一读
+  `daily_stats.reviews_done`，跨多次会话累加；
+- **精确到期数**：`ReviewService.count_due()` 优先走 `StatsRepo.count_due()` 的
+  `COUNT(*)`；`due_words()` 默认 `limit=200`，直接用 `len()` 会把积压数截断；
+- **分批检查点**：`ROUND_SIZE = 10`。`_rate()` **先判断是否最后一张，再判断是否
+  到达轮次**，最后一张直接进总结，不能多弹一次「还剩 0 个」的空检查点；
+  检查点只暂停展示，`_session/_index` 不重新查库，继续时从 `_index` 接着展示；
+- **提前结束**：卡片页常驻「结束本轮」，已评分卡片此前已逐张
+  `ReviewService.review()` 落库；`_reviewed == 0` 时只回概览，不产生空总结。
+  `refresh()` 会清空 `_session/_index/_at_checkpoint`，避免「回到概览」后残留
+  检查点状态；`on_activated()` 在活动会话或检查点时直接返回，切页不打断；
+- **拼写开关**：`build_session_plan(..., spelling_enabled=...)` 关闭时全部
+  `CARD_RECOGNITION` 且跳过穿插，开启时保持 6.31 的全部规则；复习页每次开始
+  会话都重新 `load_review()`，因此设置页修改后下一次开始生效；
+- **新词首次到期日**：`DictionaryService.add_to_vocabulary()` 把第一次入本的
+  `due_date` 设为「今天 + 1 天」；`WordRepo.mark_in_vocabulary(first_due_date=...)`
+  用 `get_by_id()` 先看当前 `in_vocabulary`，只在 0 → 1 时写 `due_date`，
+  重复加入不重置已有 SRS 排期。`lookup()` 缓存词仍写当天，缓存放几天后
+  再加入也不会一入本即逾期；`schedule()` 本身不读旧 `due_date`，排期不受影响；
+
+### 6.33 M6.1：文章难词缓存与阅读后台预取（查词 0 等待）
+
+- **问题**：查词是一个未命中就发一次完整 AI 请求（`max_tokens=1500`、读超时 300s），
+  而且阅读页同一时刻只允许一个 `_worker`——上一个词在查时点下一个词会被直接忽略。
+  生词一多，等待时间线性累加；
+- **第一层：文章自带 glossary**。`build_article_messages()` 要求模型在同一个
+  JSON 里顺带返回 8~15 个“对当前等级可能陌生、且真实出现在正文里”的词及语境义。
+  文章落库后 `ArticleService._seed_glossary()` 用 `WordRepo.seed_cache()` 写入
+  `words`（`in_vocabulary=0`，不占生词本），并 `remember_form()` 记住正文词形。
+  `_parse_glossary()` 会丢弃正文里没出现过的词、多词短语和非法词形，**解析失败
+  绝不触发文章重试**；glossary 只要求核心释义（不含例句/记忆法），
+  `ARTICLE_MAX_TOKENS` 从 4000 提到 5000，后因 deepseek-v4.1-flash 的
+  reasoning token 也计入输出额度、偶发把 5000 吃满（`finish_reason=length`），
+  再提到 15000；
+- **第二层：打开文章后后台批量预取**。`ReaderPage._load_article()` 成功后启动
+  **独立的** `_prefetch_worker`（不占查词/生成的 `_worker` 槽位），调用
+  `DictionaryService.prefetch()`：`readability.select_lookup_words()` 用内置词表
+  在本地筛候选词——用户已掌握（`list_known_lemmas`）或已有缓存
+  （`WordRepo.cached_forms()`）的词排除，词表里不存在或词档高于用户等级的优先，
+  句中大写视为专有名词跳过；最多 10 个词合并成一次请求（`task="查词预取"`），
+  返回后同样走 `seed_cache()`，并带上词所在句作为 `context_sentence`；
+- **失败即静默**：预取超时/网络/解析/落库失败都只记日志、返回 0，不影响正文展示；
+  请求显式传 `timeout=35s`（`AIClient.complete_json(..., timeout=...)`），
+  且略大于 30s 的自动重试阈值，保证超时后不再自动重试，关闭窗口最多等 35s；
+- **缓存语义**：`seed_cache` 是 `ON CONFLICT(lemma) DO NOTHING`，只补空缺：
+  已有词条的完整释义、SRS 进度与 `in_vocabulary=1` 一律不被预生成内容覆盖。
+  预取词双击时命中缓存并显示 `context_sentence`；如果用户在某一句里看到它、
+  而预取记录的是另一句，仍会提示「按本句重查」；
+- **开关与生命周期**：`config.json` 的 `ui.prefetch_enabled` 默认开启，设置页
+  「阅读」卡片可关；每篇文章只预取一次（按 `article.id` 去重），换文章后
+  `_on_prefetch_finished()` 会为当前文章补一次；`shutdown()` 同时等待
+  `_worker` 与 `_prefetch_worker`；
+- **测试注意**：阅读器测试模块用 autouse fixture 停用 `_start_prefetch`（不联网），
+  预取接线与失败路径在 `test_english_learner_prefetch.py` 里用假 service 验证。
+
+### 6.34 M6.2：阅读检测选择题「不知道 + 补充说明」
+
+- **复用测评的作答常量**：`assessment_bank.UNKNOWN_ANSWER = -2` 表示用户主动
+  放弃作答，`-1` 仍保留给“未作答”。`ReadingQuizService` 直接导入并 re-export
+  这两个常量，避免两套流程对 -2/-1 的语义漂移；
+- **判分口径**：`_normalize_answers()` 放行 -2，其余越界值仍归并为 -1；
+  `submit()` / `advance_stage()` 只拦 -1。正确率、`score_quiz_evidence()` 与
+  `observations_from_quiz()` 都按 `chosen == answer_index` 判断，因此 -2 自然
+  按答错计入等级证据——**不要**为「不知道」单独加权或跳过观测；
+- **说明的归一化**：`_normalize_choice_notes()` 生成与选择题等长的元组，
+  只保留选中 -2 的题的说明（截断 200 字），其它位置强制空串，
+  避免用户改了选项后残留的文本进入 prompt；
+- **存储**：`reading_quizzes.choice_notes_json`（`TEXT NOT NULL DEFAULT '[]'`）。
+  新库在 `SCHEMA_SQL` 建表时直接带列；旧库在 `_apply_schema()` 里用幂等
+  `_add_column` 补列，**不升 schema 版本**（与 `articles.metrics_json` 同一模式）。
+  第一轮作答通过 `save_stage_answers(quiz_id, answers, choice_notes)` 一起落库，
+  最终结果通过 `save_result(..., choice_notes=...)` 写入；导出 CSV 新增
+  `choice_notes` 列；
+- **prompt**：讲评与盲评统一把 -2 渲染成「不知道（主动表示不会）」，
+  再附一行「补充说明：…」；讲评规则明确要求按答错处理并结合说明归因
+  （词汇不认识 → vocabulary、句子结构 → grammar、没找到依据 → detail/inference），
+  不能当成跳过。`PROMPT_VERSION` 随之为 `m6-2`；
+- **界面**：`_build_choice_card()` 在选项后追加 `E. 不知道`（字母按选项数顺延），
+  用 `QButtonGroup.idToggled` 控制补充说明 `QLineEdit` 的显隐；第一轮锁定
+  （`locked=True`）时单选框和输入框一起禁用。结果页对 -2 显示
+  「主动表示不会」+「你的答案：不知道」+ 说明；
+- **测试注意**：弹窗测试的 `StubQuizService.advance_stage/submit` 必须接受
+  `choice_notes` 关键字；offscreen 下判断输入框显隐用 `isHidden()`
+  （父窗口未 show 时 `isVisible()` 恒为 False）。
+
+### 6.35 M6.3：加入生词本后后台补全简释
+
+- **问题**：文章 glossary 与后台预取只写“短释义”（无例句、无记忆方法），
+  而真正双击查词会得到完整词条。用户把简释词加入生词本后，生词本里会长期
+  只有一行短释义，复习与回译都缺素材；手动再查一次又要等 AI；
+- **触发**：`ReaderPage._on_add_requested()` 在加入生词本成功后调用
+  `_start_enrich(word.id, sentence)`，**不阻塞界面**：不设置 `_set_busy()`、
+  不占用查词/生成的 `_worker`，用户仍可继续双击查下一个词；
+- **独立槽位与队列**：`_enrich_worker` + `_enrich_queue`（FIFO，按 word_id
+  去重），同一时刻只跑一个后台补全，`finished` 后自动取下一个。加入多个词时
+  不会并发打满 AI 请求；
+- **是否值得补**：`DictionaryService.needs_definition()` 只看“例句与记忆方法
+  是否都为空”——完整查词的 prompt 必然要求这两个字段，都为空说明该条来自
+  glossary / 预取。检查放在**子线程执行时**（`enrich_definition()` 内部读库），
+  完整词条直接返回 `None`，不花 token，也天然避免重复补全；
+- **与双击一致**：`lookup()` 与 `enrich_definition()` 共用
+  `_request_definition()`（同一份 `build_dictionary_messages`、同一套字段），
+  补全请求用 `task="查词补全"`、`timeout=45s`（大于 30s 自动重试阈值，
+  超时直接放弃，关窗口最多等 45s）；
+- **落库语义**：`WordRepo.update_definition(word_id, ...)` 只更新释义类字段
+  （音标 / 词性 / 释义 / 例句 / 记忆法 / 词档 / 上下文），**不改** lemma、
+  display_form、in_vocabulary、article_id 与 SRS 排期；记忆方法只在原本为空时
+  写入，避免覆盖用户手动生成的内容。AI 如果给出不同原形也不新建词条
+  （高亮与 `word_forms` 仍指向原 id）；
+- **界面更新**：完成时只有当卡片仍停在同一个词（`_pending` 非空且
+  `_current_word_id` 相同）才调 `WordPanel.update_definition()` 原地重绘，
+  只换字段、不动按钮与状态；页面状态改为「已加入生词本，释义已在后台补全」。
+  用户已经收起卡片 / 点了别的词时只更新库里的词条，不打扰阅读；
+- **失败静默**：`worker.failed` 只记日志，保留原简释，不影响已加入生词本与高亮；
+  `shutdown()` 与预取一样等待 `_enrich_worker` 退出（请求自带 45s 上限）；
+- **测试**：`test_english_learner_enrich.py` 覆盖简释判定、补全字段与 SRS/
+  词条身份不变、prompt 与双击逐字节一致、完整词条跳过不调 AI、AI 原形不一致
+  不新建词条、AI 失败保留简释，以及阅读页加入生词本后自动起后台补全的接线。

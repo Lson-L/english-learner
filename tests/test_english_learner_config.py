@@ -9,9 +9,13 @@ from pathlib import Path
 import pytest
 
 from english_learner.services.config_store import (
+    DEFAULT_DAILY_REVIEW_LIMIT,
+    MAX_DAILY_REVIEW_LIMIT,
+    MIN_DAILY_REVIEW_LIMIT,
     AIConfig,
     ConfigError,
     ConfigStore,
+    ReviewConfig,
     UiConfig,
     config_dir,
     normalize_base_url,
@@ -197,6 +201,48 @@ def test_readability_thresholds_fall_back_to_defaults(tmp_path: Path) -> None:
 
     store.path.write_text('{"readability": "broken"}', encoding="utf-8")
     assert store.load_readability() == ReadabilityThresholds()
+
+
+def test_review_config_roundtrip_and_is_preserved(tmp_path: Path) -> None:
+    """review 段可读写，且保存 AI / UI / readability 不会把它冲掉。"""
+    store = ConfigStore(tmp_path / "config.json")
+    review = ReviewConfig(daily_limit=35, spelling_enabled=True)
+
+    store.save_review(review)
+    assert store.load_review() == review
+
+    store.save(make_config())
+    store.save_ui(UiConfig(english_font="literata"))
+    store.save_readability(ReadabilityThresholds(enabled=True))
+    assert store.load_review() == review
+
+    # 反向：只改 review 段时，ai / ui / readability 也不能被冲掉。
+    updated = ReviewConfig(daily_limit=40, spelling_enabled=False)
+    store.save_review(updated)
+    assert store.load() is not None
+    assert store.load_ui().english_font == "literata"
+    assert store.load_readability().enabled is True
+
+
+def test_review_config_falls_back_and_clamps(tmp_path: Path) -> None:
+    store = ConfigStore(tmp_path / "missing.json")
+    assert store.load_review() == ReviewConfig()
+
+    store.path.write_text('{"review": "broken"}', encoding="utf-8")
+    assert store.load_review() == ReviewConfig()
+
+    store.path.write_text(
+        json.dumps({"review": {"daily_limit": 0, "spelling_enabled": "false"}}),
+        encoding="utf-8",
+    )
+    loaded = store.load_review()
+    assert loaded.daily_limit == MIN_DAILY_REVIEW_LIMIT
+    assert loaded.spelling_enabled is False
+
+    store.save_review(ReviewConfig(daily_limit=9999))
+    assert store.load_review().daily_limit == MAX_DAILY_REVIEW_LIMIT
+
+    assert ReviewConfig().daily_limit == DEFAULT_DAILY_REVIEW_LIMIT
 
 
 def test_save_removes_legacy_flat_ai_fields(tmp_path: Path) -> None:

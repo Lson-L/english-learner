@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
+import httpx2
 from openai import (
     APIConnectionError,
     APIStatusError,
@@ -41,6 +42,24 @@ logger = logging.getLogger(__name__)
 
 # 瞬时错误重试间隔（秒）：429 / 超时 / 5xx 最多再试两次。
 _RETRY_DELAYS: tuple[float, ...] = (0.6, 1.4)
+
+# 读超时不超过这个值时，超时仍按瞬时错误自动重试（连接测试等快速调用）。
+# 超过它（业务调用的 300s）说明服务端确实慢或卡住，再自动重试两轮会让
+# 用户干等十几分钟；这种场景交给界面上的“重试生成”由用户决定。
+_MAX_AUTO_RETRY_READ_TIMEOUT = 30.0
+
+# 业务调用的超时组合。
+#
+# openai 3.x 底层是 httpx2，`timeout` 既可以是单个秒数，也可以是分阶段的
+# httpx2.Timeout。这里刻意把“读”放宽到 300s：带 thinking 的模型单次就可能
+# 生成 5000+ token（实测约 66 token/s，5000 token 要 75s），文章任务的输出
+# 额度又提到 15000，120s 会把“正常但偏慢”的请求误判成超时。300s 给足余量，
+# 真正的卡死由用户点「重试生成」或关窗口结束。
+# 连接 / 连接池仍保持 10s：地址写错、断网、代理不可用时能快速失败，
+# 不至于让界面干等五分钟。
+#
+# 连接测试与 onboarding 仍用 AIClient 默认的 30s，保持“快速验证”的语义。
+BUSINESS_TIMEOUT = httpx2.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
 
 # 某些兼容网关不支持 response_format={"type": "json_object"}。
 # 成功探测一次后按 (base_url, model) 记住，避免每次查词都先失败一次再降级。
@@ -116,7 +135,7 @@ class AIClient:
     def __init__(
         self,
         config: AIConfig,
-        timeout: float = 30.0,
+        timeout: float | httpx2.Timeout = 30.0,
         recorder: AICallRecorder | None = None,
     ) -> None:
         self.config = config.normalized()
@@ -249,12 +268,15 @@ class AIClient:
         temperature: float | None = None,
         json_mode: bool = False,
         max_tokens: int | None = None,
+        timeout: float | None = None,
         task: str = "",
     ) -> str:
         """通用补全接口，供测评/文章/查词复用。
 
         json_mode=True 时要求服务端返回 JSON 对象（OpenAI 的 response_format）。
         注意：部分兼容网关不支持该参数，业务层需要自己做兜底解析。
+        `timeout` 非空时覆盖本次请求的默认超时（秒）——后台预取这类
+        “失败也无所谓”的调用用它把窗口关闭时的等待上限压短。
         `task` 只用于调用记录（例如“查词”“每周复盘”），不影响请求内容。
 
         对 429 / 超时 / 5xx 这类瞬时错误会做 1~2 次退避重试；格式错误和
@@ -265,6 +287,7 @@ class AIClient:
             temperature=temperature,
             json_mode=json_mode,
             max_tokens=max_tokens,
+            timeout=timeout,
             task=task,
         )
 
@@ -274,6 +297,7 @@ class AIClient:
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        timeout: float | None = None,
         task: str = "",
     ) -> str:
         """要求服务端返回 JSON；不支持 response_format 时降级并记住能力。
@@ -290,6 +314,7 @@ class AIClient:
                 temperature=temperature,
                 json_mode=False,
                 max_tokens=max_tokens,
+                timeout=timeout,
                 task=task,
             )
         try:
@@ -298,6 +323,7 @@ class AIClient:
                 temperature=temperature,
                 json_mode=True,
                 max_tokens=max_tokens,
+                timeout=timeout,
                 task=task,
             )
         except AIError as exc:
@@ -310,6 +336,7 @@ class AIClient:
                 temperature=temperature,
                 json_mode=False,
                 max_tokens=max_tokens,
+                timeout=timeout,
                 task=task,
             )
 
@@ -321,6 +348,7 @@ class AIClient:
         temperature: float | None,
         json_mode: bool,
         max_tokens: int | None,
+        timeout: float | None = None,
         task: str = "",
     ) -> str:
         retry_index = 0
@@ -331,12 +359,24 @@ class AIClient:
                     temperature=temperature,
                     json_mode=json_mode,
                     max_tokens=max_tokens,
+                    timeout=timeout,
                     task=task,
                     attempt=retry_index + 1,
                 )
             except AIError as exc:
                 if not exc.retryable or retry_index >= len(_RETRY_DELAYS):
                     raise
+                if exc.kind == "timeout":
+                    # 本次调用显式指定了超时（如后台预取）时按它判断，
+                    # 而不是客户端默认的 300s 业务超时。
+                    read_timeout = timeout or self._read_timeout_seconds()
+                    if read_timeout is not None and read_timeout > _MAX_AUTO_RETRY_READ_TIMEOUT:
+                        logger.info(
+                            "读超时为 %.0fs，超时后不再自动重试：%s",
+                            read_timeout,
+                            exc.message,
+                        )
+                        raise
                 delay = _RETRY_DELAYS[retry_index]
                 retry_index += 1
                 logger.info(
@@ -348,6 +388,14 @@ class AIClient:
                 )
                 time.sleep(delay)
 
+    def _read_timeout_seconds(self) -> float | None:
+        """当前客户端配置的读超时（秒）；分阶段 Timeout 取 `.read`。"""
+        timeout = self.timeout
+        if isinstance(timeout, (int, float)):
+            return float(timeout)
+        read = getattr(timeout, "read", None)
+        return float(read) if read is not None else None
+
     def _complete_once(
         self,
         messages: list[dict[str, str]],
@@ -355,6 +403,7 @@ class AIClient:
         temperature: float | None,
         json_mode: bool,
         max_tokens: int | None,
+        timeout: float | None = None,
         task: str = "",
         attempt: int = 1,
     ) -> str:
@@ -368,6 +417,8 @@ class AIClient:
             kwargs["max_tokens"] = max_tokens
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
 
         started_at = time.perf_counter()
         try:

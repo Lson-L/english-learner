@@ -7,6 +7,11 @@
 状态约定：
 - 页面只有一份 `_article`；进入页面时如果当天没有文章会自动生成；
 - 查词与生成共用同一个 `_worker` 槽位，同一时刻只允许一个后台任务；
+- 预取（`_prefetch_worker`）是独立槽位：加载文章后在后台批量查词、只写缓存，
+  不阻塞查词与生成；失败静默，切换文章时自动为当前文章重新发起；
+- 补全（`_enrich_worker`）也是独立槽位：加入生词本后，若该词只有预生成简释，
+  在后台按完整查词 prompt 补一次释义（M6.3），完成后原地刷新词条与卡片；
+  同样不阻塞阅读，失败静默；
 - “换一篇”先弹窗收集方向（可留空），确认后会连带删除当天正文里的高亮。
 """
 
@@ -26,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...models.entities import Article, Highlight, now_iso, today_str
+from ...models.entities import Article, Highlight, Word, now_iso, today_str
 from ...services.app_context import AppContext
 from ...services.back_translation import SCORE_PER_SENTENCE
 from ...services.dictionary_service import LookupResult, normalize_lemma
@@ -52,22 +57,32 @@ class ReaderPage(QWidget):
         self._pending: tuple[str, int, int, str] | None = None
         self._current_word_id: int | None = None
         self._worker: TaskWorker | None = None
+        # 预取是独立线程：加载文章后批量查词写缓存，不能占用查词/生成的槽位。
+        self._prefetch_worker: TaskWorker | None = None
+        self._prefetched_article_id: int | None = None
+        # 后台补全：加入生词本后把预生成简释补成完整查词，串行执行。
+        self._enrich_worker: TaskWorker | None = None
+        self._enrich_queue: list[tuple[int, str]] = []
+        # 本次会话里自动生成失败过：切页回来不再自动重发，等用户点“重试生成”。
+        self._generation_failed = False
 
         self._build_ui()
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 28, 32, 24)
-        layout.setSpacing(12)
+        # 页头压缩：阅读页的主体是正文，标题区只留必要高度。
+        layout.setContentsMargins(32, 18, 32, 18)
+        layout.setSpacing(10)
 
         header_row = QHBoxLayout()
         header_row.setSpacing(12)
         header_row.addWidget(
             PageHeader(
-                "阅读",
-                "双击任意英文单词查看语境释义；读完后点「阅读完成」做几道题，"
-                "AI 会讲评并动态调整等级。",
+                # 页面名已在侧边栏高亮，这里不再重复大标题，避免白占一行高度。
+                "",
+                "双击单词查看语境释义；读完后点「阅读完成」做几道题，AI 会讲评并动态调整等级。",
+                compact=True,
             ),
             1,
         )
@@ -105,11 +120,11 @@ class ReaderPage(QWidget):
         layout.addLayout(header_row)
 
         self._title_label = QLabel("今日文章")
-        self._title_label.setObjectName("cardTitle")
+        self._title_label.setObjectName("articleTitle")
         layout.addWidget(self._title_label)
 
         self._meta_label = QLabel("")
-        self._meta_label.setObjectName("muted")
+        self._meta_label.setObjectName("mutedCompact")
         layout.addWidget(self._meta_label)
 
         self._status = QLabel("")
@@ -170,13 +185,21 @@ class ReaderPage(QWidget):
             self._quiz_button.setEnabled(False)
             self._back_translation_button.setEnabled(False)
             self._feedback_button.setEnabled(False)
-            self._start_generation(regenerate=False)
+            if self._generation_failed:
+                # 自动生成失败过：只把按钮亮出来，等用户主动重试。
+                # 否则每次切回阅读页都会再发一轮请求（超时时一轮要等好几分钟）。
+                self._generate_button.setText("重试生成")
+                self._generate_button.setVisible(True)
+                self._generate_button.setEnabled(True)
+            else:
+                self._start_generation(regenerate=False)
             return
         self._load_article(article)
 
     # ------------------------------------------------------------------ 文章
     def _load_article(self, article: Article) -> None:
         self._article = article
+        self._generation_failed = False
         self._view.set_article(article)
         self._reload_highlights()
         self._hide_word_card()
@@ -207,6 +230,87 @@ class ReaderPage(QWidget):
 
         if article.id is not None and self._context.article_repo.mark_read(article.id, now_iso()):
             self._context.stats_repo.bump(article.article_date, article_read=1)
+
+        self._start_prefetch(article)
+
+    # ------------------------------------------------------------------ 预取
+    def _start_prefetch(self, article: Article) -> None:
+        """后台批量预查文章生词，写入查词缓存（双击时 0 等待）。
+
+        只查“用户大概率不认识、且还没缓存”的词，一次批量请求；失败不弹错，
+        用户仍然可以双击后走正常查词。每篇文章只预取一次。
+        """
+        if article.id is None or article.id == self._prefetched_article_id:
+            return
+        # 只要上一个预取 worker 还在（包括已跑完、finished 信号尚未处理的情况），
+        # 就不新建：等 _on_prefetch_finished 回收后，它会为当前文章补一次。
+        if self._prefetch_worker is not None:
+            return
+        if not self._context.store.load_ui().prefetch_enabled:
+            return
+
+        self._prefetched_article_id = article.id
+        content = article.content
+        level = self._context.level()
+        article_id = article.id
+        service = self._context.dictionary_service()
+        worker = TaskWorker(lambda: service.prefetch(content, level=level, article_id=article_id))
+        # 预取没有界面状态：失败信号不连接，成功也无需回填界面。
+        worker.finished.connect(self._on_prefetch_finished)
+        self._prefetch_worker = worker
+        worker.start()
+
+    def _on_prefetch_finished(self) -> None:
+        self._prefetch_worker = None
+        # 预取期间换了文章（换一篇 / 调整难度）：为当前文章补一次预取。
+        if self._article is not None and self._article.id != self._prefetched_article_id:
+            self._start_prefetch(self._article)
+
+    # ------------------------------------------------------------------ 补全
+    def _start_enrich(self, word_id: int | None, sentence: str) -> None:
+        """加入生词本后，后台把预生成简释补成与双击查词一致的完整词条。
+
+        不检查词条是否真的需要补全：`DictionaryService.enrich_definition()`
+        会在子线程里按最新数据判断（完整词条直接返回 None，不花 token），
+        这样也天然避免了“用户先补全、队列里的旧任务再跑一遍”。
+        """
+        if word_id is None:
+            return
+        if any(item_id == word_id for item_id, _ in self._enrich_queue):
+            return
+        self._enrich_queue.append((int(word_id), sentence))
+        self._pump_enrich()
+
+    def _pump_enrich(self) -> None:
+        if self._enrich_worker is not None or not self._enrich_queue:
+            return
+        word_id, sentence = self._enrich_queue.pop(0)
+        level = self._context.level()
+        service = self._context.dictionary_service()
+        worker = TaskWorker(lambda: service.enrich_definition(word_id, sentence, level))
+        worker.succeeded.connect(self._on_enrich_ready)
+        # 补全是增强信息：失败只记日志，卡片与词条保留原来的简释。
+        worker.failed.connect(self._on_enrich_failed)
+        worker.finished.connect(self._on_enrich_finished)
+        self._enrich_worker = worker
+        worker.start()
+
+    def _on_enrich_ready(self, result: object) -> None:
+        if not isinstance(result, Word) or result.id is None:
+            return
+        # 用户已经收起卡片或点了别的词：只更新库里的词条，不打扰当前阅读。
+        if self._pending is None or self._current_word_id != result.id:
+            return
+        self._panel.update_definition(result, self._pending[3])
+        set_status(self._status, "已加入生词本，释义已在后台补全。", "success")
+
+    @staticmethod
+    def _on_enrich_failed(message: str) -> None:
+        logger.info("后台补全释义失败，保留简释：%s", message)
+
+    def _on_enrich_finished(self) -> None:
+        self._enrich_worker = None
+        self._pump_enrich()
 
     def _start_generation(self, *, regenerate: bool, user_request: str = "") -> None:
         if self._worker is not None and self._worker.isRunning():
@@ -248,6 +352,8 @@ class ReaderPage(QWidget):
         worker.start()
 
     def _on_generate_clicked(self) -> None:
+        # 用户主动重试：清掉失败标记，允许本次会话继续自动生成。
+        self._generation_failed = False
         self._start_generation(regenerate=False)
 
     def _on_regenerate_clicked(self) -> None:
@@ -371,6 +477,7 @@ class ReaderPage(QWidget):
     def _on_article_failed(self, message: str) -> None:
         # 已有文章时只是“换一篇/重写”失败，旧文章还在，不要显示“重试生成”。
         if self._article is None:
+            self._generation_failed = True
             self._generate_button.setVisible(True)
             self._generate_button.setText("重试生成")
         set_status(self._status, message, "error")
@@ -484,6 +591,8 @@ class ReaderPage(QWidget):
         self._panel.mark_added(inserted)
         if inserted:
             set_status(self._status, "已加入生词本，今日生词 +1。", "success")
+        # 简释词条（文章难词 / 预取）在后台补一次完整查词，阅读不中断。
+        self._start_enrich(word.id, sentence)
 
     # ------------------------------------------------------------------ 辅助
     def _refresh_quiz_button(self, article: Article) -> None:
@@ -579,11 +688,18 @@ class ReaderPage(QWidget):
     # ------------------------------------------------------------------ 关闭
     def shutdown(self, timeout_ms: int = 3000) -> TaskWorker | None:
         """窗口关闭时收尾：请求取消并等待；返回超时后仍在运行的线程。"""
-        worker = self._worker
-        # 不能用 isRunning() 判断：start() 后线程可能还没真正跑起来，
-        # 此时 isRunning() 是 False，但线程仍会在稍后执行。
-        if worker is None or worker.isFinished():
-            return None
-        if worker.stop(timeout_ms):
-            return None
-        return worker
+        remaining: TaskWorker | None = None
+        for worker in (self._worker, self._prefetch_worker, self._enrich_worker):
+            # 不能用 isRunning() 判断：start() 后线程可能还没真正跑起来，
+            # 此时 isRunning() 是 False，但线程仍会在稍后执行。
+            if worker is None or worker.isFinished():
+                continue
+            if worker.stop(timeout_ms):
+                continue
+            if worker is self._prefetch_worker or worker is self._enrich_worker:
+                # 预取 / 补全请求自带 35s / 45s 超时，且不承载用户可见结果：
+                # 在这里等它退出，避免返回多个“卡住”的线程而 MainWindow 只等得及一个。
+                worker.wait()
+                continue
+            remaining = worker
+        return remaining

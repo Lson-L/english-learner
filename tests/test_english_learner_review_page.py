@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
 from english_learner.gui.pages.review import ReviewPage  # noqa: E402
 from english_learner.models.entities import Word, now_iso, today_str  # noqa: E402
 from english_learner.services.app_context import AppContext  # noqa: E402
-from english_learner.services.config_store import AIConfig, ConfigStore  # noqa: E402
+from english_learner.services.config_store import AIConfig, ConfigStore, ReviewConfig  # noqa: E402
 from english_learner.services.recall import (  # noqa: E402
     STATUS_CORRECT,
     STATUS_NEAR,
@@ -48,10 +48,19 @@ def db(tmp_path: Path):
     database.close()
 
 
-def make_context(db: Database, tmp_path: Path) -> AppContext:
+def make_context(
+    db: Database,
+    tmp_path: Path,
+    *,
+    spelling: bool = True,
+    daily_limit: int = 20,
+) -> AppContext:
+    """默认给旧用例开启拼写，避免它们同时验证新开关；新用例显式关闭。"""
+    store = ConfigStore(tmp_path / "config.json")
+    store.save_review(ReviewConfig(daily_limit=daily_limit, spelling_enabled=spelling))
     return AppContext(
         AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
-        ConfigStore(tmp_path / "config.json"),
+        store,
         db,
     )
 
@@ -260,7 +269,7 @@ def test_session_respects_queue_limit(db: Database, tmp_path: Path) -> None:
     for index in range(205):
         db.words.upsert(make_word(f"word{index:03d}"))
 
-    page = ReviewPage(make_context(db, tmp_path))
+    page = ReviewPage(make_context(db, tmp_path, daily_limit=200))
     page.on_activated()
     page._start_session()
 
@@ -624,3 +633,230 @@ def test_cancelled_help_keeps_dual_spell_shortcuts(
     page._spelling_input.returnPressed.emit()
     assert page._recall_result is not None
     assert page._recall_result.status == STATUS_CORRECT
+
+
+# ---------------------------------------------------------------- 每日目标与分批
+def test_spelling_is_off_by_default(db: Database, tmp_path: Path) -> None:
+    """没有 review 配置时默认只做看词回忆，不出现拼写卡片。"""
+    get_app()
+    store = ConfigStore(tmp_path / "config.json")
+    context = AppContext(
+        AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
+        store,
+        db,
+    )
+    db.words.upsert(make_dual_word("alpha"))
+    db.words.upsert(make_spelling_word("beta"))
+
+    page = ReviewPage(context)
+    page.on_activated()
+    page._start_session()
+
+    assert [card.mode for card in page._session] == [CARD_RECOGNITION, CARD_RECOGNITION]
+    assert page._spelling_box.isHidden() is True
+    assert page._mode_label.text() == "看词回忆"
+
+
+def test_daily_goal_limits_session_and_reports_progress(db: Database, tmp_path: Path) -> None:
+    get_app()
+    for index in range(8):
+        db.words.upsert(make_word(f"word{index}"))
+
+    page = ReviewPage(make_context(db, tmp_path, spelling=False, daily_limit=5))
+    page.on_activated()
+    page._start_session()
+
+    assert len(page._session) == 5
+    for _ in range(5):
+        page._reveal()
+        page._rate(RATING_KNOWN)
+
+    assert page._stack.currentWidget() is page._summary_page
+    assert "今日已完成 5 / 5" in page._summary_detail.text()
+    assert "加练一轮" in page._continue_button.text()
+    assert db.stats.get().reviews_done == 5
+    assert page._due_label.text().startswith("今天到期 3 词")
+
+
+def test_idle_hint_reports_backlog_when_due_exceeds_goal(db: Database, tmp_path: Path) -> None:
+    get_app()
+    for index in range(8):
+        db.words.upsert(make_word(f"word{index}"))
+
+    page = ReviewPage(make_context(db, tmp_path, spelling=False, daily_limit=5))
+    page.on_activated()
+
+    assert page._idle_title.text() == "今天先复习 5 个词"
+    assert "本轮先做 5 个" in page._idle_hint.text()
+    assert "剩下的会留在积压里" in page._idle_hint.text()
+
+
+def test_idle_hint_handles_due_shorter_than_remaining_goal(db: Database, tmp_path: Path) -> None:
+    get_app()
+    for index in range(3):
+        db.words.upsert(make_word(f"word{index}"))
+
+    page = ReviewPage(make_context(db, tmp_path, spelling=False, daily_limit=10))
+    page.on_activated()
+
+    assert page._idle_title.text() == "今天先复习 3 个词"
+    assert "全部做完即可" in page._idle_hint.text()
+    assert "暂时没有更多到期词" in page._idle_hint.text()
+
+
+def test_session_limit_caps_batch(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    get_app()
+    from english_learner.gui.pages import review as review_module
+
+    monkeypatch.setattr(review_module, "SESSION_LIMIT", 3)
+    for index in range(10):
+        db.words.upsert(make_word(f"word{index}"))
+
+    page = ReviewPage(make_context(db, tmp_path, spelling=False, daily_limit=5))
+    page.on_activated()
+    assert "今天先复习 3 个词" in page._idle_title.text()
+
+    page._start_session()
+    assert len(page._session) == 3
+
+
+def test_daily_goal_subtracts_reviews_done_today(db: Database, tmp_path: Path) -> None:
+    get_app()
+    db.stats.bump(today_str(), reviews_done=2)
+    for index in range(5):
+        db.words.upsert(make_word(f"word{index}"))
+
+    page = ReviewPage(make_context(db, tmp_path, spelling=False, daily_limit=5))
+    page.on_activated()
+    page._start_session()
+
+    # 目标 5、今天已经复习 2 个，本轮只取剩下的 3 个。
+    assert len(page._session) == 3
+    assert page._progress_label.text() == "第 1 / 3 个"
+
+
+def test_round_checkpoint_and_continue(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    get_app()
+    from english_learner.gui.pages import review as review_module
+
+    monkeypatch.setattr(review_module, "ROUND_SIZE", 2)
+    for index in range(3):
+        db.words.upsert(make_word(f"word{index}"))
+
+    page = ReviewPage(make_context(db, tmp_path, spelling=False, daily_limit=3))
+    page.on_activated()
+    page._start_session()
+
+    for _ in range(2):
+        page._reveal()
+        page._rate(RATING_KNOWN)
+
+    assert page._stack.currentWidget() is page._summary_page
+    assert page._summary_title.text() == "第 1 轮完成"
+    assert "本轮复习 2 个词" in page._summary_detail.text()
+    assert page._finish_button.isHidden() is False
+    assert "还剩 1 个" in page._continue_button.text()
+
+    page._continue_from_summary()
+    assert page._stack.currentWidget() is page._card_page
+    assert page._progress_label.text() == "第 3 / 3 个"
+
+    page._reveal()
+    page._rate(RATING_KNOWN)
+    assert page._stack.currentWidget() is page._summary_page
+    assert "本轮复习了 3 个词" in page._summary_detail.text()
+
+
+def test_on_activated_keeps_checkpoint(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """停在检查点时切走再回来，不应被刷新回概览。"""
+    get_app()
+    from english_learner.gui.pages import review as review_module
+
+    monkeypatch.setattr(review_module, "ROUND_SIZE", 2)
+    for index in range(4):
+        db.words.upsert(make_word(f"word{index}"))
+
+    page = ReviewPage(make_context(db, tmp_path, spelling=False, daily_limit=4))
+    page.on_activated()
+    page._start_session()
+    for _ in range(2):
+        page._reveal()
+        page._rate(RATING_KNOWN)
+
+    page.on_activated()
+
+    assert page._at_checkpoint is True
+    assert page._stack.currentWidget() is page._summary_page
+    assert page._summary_title.text() == "第 1 轮完成"
+
+
+def test_on_activated_keeps_active_card_session(db: Database, tmp_path: Path) -> None:
+    """卡片会话进行中切走再回来，不应被刷新回概览或重置当前卡片。"""
+    get_app()
+    for index in range(3):
+        db.words.upsert(make_word(f"word{index}"))
+
+    page = ReviewPage(make_context(db, tmp_path, spelling=False, daily_limit=3))
+    page.on_activated()
+    page._start_session()
+    page._reveal()
+    page._rate(RATING_KNOWN)
+
+    page.on_activated()
+
+    assert page._stack.currentWidget() is page._card_page
+    assert page._index == 1
+    assert page._current is not None
+    assert page._current.lemma == "word1"
+
+
+def test_round_of_exactly_ten_finishes_without_empty_checkpoint(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    get_app()
+    from english_learner.gui.pages import review as review_module
+
+    # 显式锁定 10，避免以后调整常量时用例名与语义漂移。
+    monkeypatch.setattr(review_module, "ROUND_SIZE", 10)
+    for index in range(10):
+        db.words.upsert(make_word(f"word{index}"))
+
+    page = ReviewPage(make_context(db, tmp_path, spelling=False, daily_limit=10))
+    page.on_activated()
+    page._start_session()
+    for _ in range(10):
+        page._reveal()
+        page._rate(RATING_KNOWN)
+
+    # 第 10 张正好是最后一张：直接进总结，不应停在「还剩 0 个」的检查点。
+    assert page._at_checkpoint is False
+    assert page._stack.currentWidget() is page._summary_page
+    assert page._summary_title.text() == "今天的复习已完成"
+
+
+def test_end_session_early_saves_partial_progress(db: Database, tmp_path: Path) -> None:
+    get_app()
+    for index in range(5):
+        db.words.upsert(make_word(f"word{index}"))
+
+    page = ReviewPage(make_context(db, tmp_path, spelling=False, daily_limit=5))
+    page.on_activated()
+    page._start_session()
+    for _ in range(2):
+        page._reveal()
+        page._rate(RATING_KNOWN)
+
+    page._end_session_early()
+
+    assert page._stack.currentWidget() is page._summary_page
+    assert "今日已完成 2 / 5" in page._summary_detail.text()
+    assert "还差 3 个" in page._summary_detail.text()
+    assert page._finish_button.isHidden() is True
+    assert "继续复习" in page._continue_button.text()
+    assert db.stats.get().reviews_done == 2

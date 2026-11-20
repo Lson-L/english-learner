@@ -1126,3 +1126,20 @@ def test_review_last_reviews_returns_latest_per_word(db: Database) -> None:
         beta.id: (4, ""),
     }
     assert db.reviews.last_reviews([]) == {}
+
+
+def test_migrate_v8_database_adds_quiz_choice_notes_column(tmp_path: Path) -> None:
+    """阅读检测的补充说明是 v8 内幂等增量：旧库启动后补列，不升版本号。"""
+    path = tmp_path / "data.db"
+    db = Database(path)
+    db.execute("ALTER TABLE reading_quizzes DROP COLUMN choice_notes_json")
+    db.close()
+
+    reopened = Database(path)
+    try:
+        rows = reopened.query_all("PRAGMA table_info(reading_quizzes)")
+        columns = {str(row["name"]) for row in rows}
+        assert "choice_notes_json" in columns
+        assert int(reopened.query_one("PRAGMA user_version")["user_version"]) == SCHEMA_VERSION
+    finally:
+        reopened.close()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from datetime import date, timedelta
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -68,6 +69,15 @@ def db(tmp_path: Path):
     database = Database(tmp_path / "data.db")
     yield database
     database.close()
+
+
+@pytest.fixture(autouse=True)
+def disable_reader_prefetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本文件的阅读器测试不联网：统一停用打开文章后的后台预取。
+
+    预取本身由 test_english_learner_prefetch.py 用假 service 单独验证。
+    """
+    monkeypatch.setattr(ReaderPage, "_start_prefetch", lambda self, article: None)
 
 
 def make_article(**overrides) -> Article:
@@ -352,6 +362,45 @@ def test_add_to_vocabulary_is_idempotent(db: Database) -> None:
     assert first is True
     assert second is False
     assert len(db.words.list_highlights(article.id)) == 1
+
+
+def test_add_to_vocabulary_schedules_first_review_tomorrow(db: Database) -> None:
+    """查词缓存可能放了很多天；第一次入本时把 due_date 改成明天，避免一入本即逾期。"""
+    article = db.articles.insert(make_article())
+    word = db.words.upsert(make_word(in_vocabulary=False, due_date="2020-01-01"))
+    assert article.id is not None and word.id is not None
+    service = DictionaryService(FakeCompleter(), db.words, db.stats)
+
+    service.add_to_vocabulary(
+        word,
+        article_id=article.id,
+        start_offset=0,
+        end_offset=5,
+    )
+
+    stored = db.words.get_by_id(word.id)
+    assert stored is not None
+    assert stored.in_vocabulary is True
+    assert stored.due_date == (date.today() + timedelta(days=1)).isoformat()
+
+
+def test_re_adding_does_not_reset_existing_due_date(db: Database) -> None:
+    """已经入本的词再次添加（例如换个位置高亮）不能重置 SRS 排期。"""
+    article = db.articles.insert(make_article())
+    word = db.words.upsert(make_word(in_vocabulary=True, due_date="2099-01-01"))
+    assert article.id is not None and word.id is not None
+    service = DictionaryService(FakeCompleter(), db.words, db.stats)
+
+    service.add_to_vocabulary(
+        word,
+        article_id=article.id,
+        start_offset=0,
+        end_offset=5,
+    )
+
+    stored = db.words.get_by_id(word.id)
+    assert stored is not None
+    assert stored.due_date == "2099-01-01"
     assert db.stats.get(today_str()).words_added == 1
     stored = db.words.get_by_id(word.id)
     assert stored is not None and stored.in_vocabulary is True
@@ -438,6 +487,60 @@ def test_reader_page_loads_cached_article_without_worker(db: Database) -> None:
     stored = db.articles.get_by_date(today_str())
     assert stored is not None and stored.read_at is not None
     assert db.stats.get(today_str()).article_read == 1
+
+
+def test_reader_auto_generates_first_visit(db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    """第一次进阅读页（当天没有文章）仍然自动生成。"""
+    get_app()
+    context = AppContext(
+        AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
+        ConfigStore(Path("unused.json")),
+        db,
+    )
+    page = ReaderPage(context)
+    calls: list[dict] = []
+    monkeypatch.setattr(page, "_start_generation", lambda **kwargs: calls.append(kwargs))
+
+    page.refresh()
+
+    assert calls == [{"regenerate": False}]
+    assert page._generation_failed is False
+
+
+def test_reader_does_not_auto_generate_again_after_failure(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """生成失败后切页回来不再自动重发，必须由用户点“重试生成”。
+
+    超时一次要等好几分钟，自动重发既耗 token 又会让用户以为界面卡住。
+    """
+    get_app()
+    context = AppContext(
+        AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
+        ConfigStore(Path("unused.json")),
+        db,
+    )
+    page = ReaderPage(context)
+
+    page._on_article_failed("请求超时")
+
+    assert page._generation_failed is True
+    assert page._generate_button.isHidden() is False
+    assert page._generate_button.text() == "重试生成"
+
+    calls: list[dict] = []
+    monkeypatch.setattr(page, "_start_generation", lambda **kwargs: calls.append(kwargs))
+    page.refresh()
+
+    assert calls == []
+    assert page._generate_button.isHidden() is False
+    assert page._generate_button.text() == "重试生成"
+
+    # 用户主动点重试才真正发起生成，并清掉失败标记。
+    page._on_generate_clicked()
+
+    assert calls == [{"regenerate": False}]
+    assert page._generation_failed is False
 
 
 def test_reader_feedback_button_needs_profile_and_article(db: Database) -> None:

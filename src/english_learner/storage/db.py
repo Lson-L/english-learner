@@ -31,7 +31,9 @@ Java 对照：
   articles 增加 metrics_json（M5.3 本地可读性指标，M5.1 发布时还没有这一列，
   所以这一列不放在 `version < 8` 分支里，而是幂等补齐，见 `_apply_schema`）；
 - v8 内新增 writing_attempts（M5.4 回译练习）：新表由 `CREATE TABLE IF NOT EXISTS`
-  自动补齐，不需要再升版本号，旧库启动后即可用。
+  自动补齐，不需要再升版本号，旧库启动后即可用；
+- v8 内新增 reading_quizzes.choice_notes_json（阅读检测“不知道”补充说明）：
+  与 articles.metrics_json 一样用幂等 `_add_column` 补齐，不升版本号。
 """
 
 from __future__ import annotations
@@ -161,6 +163,8 @@ CREATE TABLE IF NOT EXISTS reading_quizzes (
     level             TEXT    NOT NULL,
     questions_json    TEXT    NOT NULL,
     answers_json      TEXT    NOT NULL DEFAULT '[]',
+    -- 与选择题一一对应：选「不知道」时用户填写的补充说明（其余位置为空串）
+    choice_notes_json TEXT    NOT NULL DEFAULT '[]',
     explanations_json TEXT    NOT NULL DEFAULT '[]',
     error_types_json  TEXT    NOT NULL DEFAULT '[]',
     short_answer_text TEXT    NOT NULL DEFAULT '',
@@ -390,6 +394,8 @@ class Database:
         # （当时还没有这一列），所以不能放进 `version < 8` 分支，否则已经是 v8 的
         # 旧库永远补不上。_add_column 自己用 PRAGMA table_info 判断，重复启动幂等。
         self._add_column(conn, "articles", "metrics_json", "TEXT NOT NULL DEFAULT ''")
+        # 同理：阅读检测的补充说明也是 v8 内的幂等增量，旧库启动后补列即可。
+        self._add_column(conn, "reading_quizzes", "choice_notes_json", "TEXT NOT NULL DEFAULT '[]'")
 
         # words.cefr_band 是 v6 才加的列，索引必须等 ALTER TABLE 之后再建。
         conn.execute("CREATE INDEX IF NOT EXISTS idx_words_band ON words(cefr_band)")

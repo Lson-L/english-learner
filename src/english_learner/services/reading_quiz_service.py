@@ -54,6 +54,7 @@ from ..storage.db import DuplicateError
 from ..storage.repositories import LevelEvidenceRepo, ProfileRepo, QuizRepo, ReviewRepo
 from .ai_client import AIError
 from .ai_protocol import TextCompleter
+from .assessment_bank import UNKNOWN_ANSWER, UNKNOWN_LABEL
 from .assessment_service import assessment_result_from_data
 from .json_utils import JsonParseError, as_int, as_text, parse_json_object
 from .learner_memory import LearnerMemory, load_memory
@@ -112,6 +113,9 @@ STAGE_TWO_MAX_TOKENS = 5000
 QUESTION_REVIEW_MAX_TOKENS = 1500
 GRADING_MAX_TOKENS = 6000
 BLIND_MAX_TOKENS = 1000
+
+# 选择题补充说明的截断长度：只给 AI 当错因线索，不需要长篇大论。
+MAX_CHOICE_NOTE_CHARS = 200
 
 # 薄弱技能进入出题 prompt 的最低样本数，避免一次失误就被当成长期弱点。
 WEAK_SKILL_MIN_SAMPLES = 2
@@ -928,8 +932,13 @@ class ReadingQuizService:
         article: Article,
         quiz: ReadingQuiz,
         answers: tuple[int, ...],
+        *,
+        choice_notes: Sequence[str] = (),
     ) -> ReadingQuiz:
-        """写入第一轮作答，按正确率生成第二轮并追加到同一套题。"""
+        """写入第一轮作答，按正确率生成第二轮并追加到同一套题。
+
+        `choice_notes` 与选择题一一对应，只有选了「不知道」的题会保留说明。
+        """
         if quiz.id is None:
             raise AIError("题目还没有保存", "请先重新打开阅读检测。")
         if quiz.completed:
@@ -938,8 +947,9 @@ class ReadingQuizService:
             return quiz
 
         normalized = _normalize_answers(answers, quiz)
-        if any(index < 0 for index in normalized):
+        if any(index == -1 for index in normalized):
             raise AIError("还有选择题没有作答", "请把第一轮的每道选择题都选完。")
+        notes = _normalize_choice_notes(choice_notes, quiz, normalized)
 
         correct = sum(
             1
@@ -956,7 +966,7 @@ class ReadingQuizService:
         )
 
         # 先保存第一轮答案，再请求第二轮：出题失败/关窗后重进仍能回显已选项。
-        self._quizzes.save_stage_answers(quiz.id, normalized)
+        self._quizzes.save_stage_answers(quiz.id, normalized, notes)
         questions = self.generate_stage_two(article, quiz.level, target)
         stored = self._quizzes.append_questions(quiz.id, questions, stage=2)
         logger.info("第二轮已追加：quiz=%s 总题数=%s", quiz.id, len(stored.questions))
@@ -973,6 +983,7 @@ class ReadingQuizService:
         short_answer_text: str = "",
         self_report: str = "ok",
         production_texts: tuple[str, ...] | list[str] | None = None,
+        choice_notes: Sequence[str] = (),
     ) -> QuizOutcome:
         """本地判分 → 盲评 + AI 讲评 → 本地后验 → 保存画像与结果。
 
@@ -986,8 +997,9 @@ class ReadingQuizService:
             raise AIError("请先完成第一轮题目", "第一轮提交后才会生成边界题。")
 
         normalized = _normalize_answers(answers, quiz)
-        if any(index < 0 for index in normalized):
+        if any(index == -1 for index in normalized):
             raise AIError("还有选择题没有作答", "请把每道选择题都选完再提交。")
+        notes = _normalize_choice_notes(choice_notes, quiz, normalized)
 
         texts = _normalize_production_texts(quiz, production_texts, short_answer_text)
         choice_correct = sum(
@@ -1018,6 +1030,7 @@ class ReadingQuizService:
                 choice_correct,
                 self_report=self_report,
                 production_texts=texts,
+                choice_notes=notes,
                 history=history,
                 completed=completed,
             )
@@ -1030,6 +1043,7 @@ class ReadingQuizService:
                     normalized,
                     choice_correct,
                     texts,
+                    notes,
                 )
                 data = self._grade_with_repair(
                     profile,
@@ -1039,6 +1053,7 @@ class ReadingQuizService:
                     choice_correct,
                     self_report=self_report,
                     production_texts=texts,
+                    choice_notes=notes,
                     history=history,
                     completed=completed,
                 )
@@ -1151,6 +1166,7 @@ class ReadingQuizService:
         stored_quiz = self._quizzes.save_result(
             quiz.id,
             answers=normalized,
+            choice_notes=notes,
             explanations=explanations,
             error_types=error_types,
             short_answer_text=texts[0] if texts else "",
@@ -1236,6 +1252,7 @@ class ReadingQuizService:
         *,
         self_report: str,
         production_texts: list[str],
+        choice_notes: Sequence[str],
         history: tuple[QuizHistoryEntry, ...],
         completed: list[ReadingQuiz],
     ) -> dict[str, object]:
@@ -1254,6 +1271,7 @@ class ReadingQuizService:
                 choice_correct,
                 self_report=self_report,
                 production_texts=production_texts,
+                choice_notes=choice_notes,
                 history=history,
                 difficulty_stats=difficulty_stats(completed),
                 skill_stats=skill_stats(completed),
@@ -1316,10 +1334,11 @@ class ReadingQuizService:
         answers: tuple[int, ...],
         choice_correct: int,
         production_texts: list[str],
+        choice_notes: Sequence[str] = (),
     ) -> str:
         """盲评调用；失败时返回空串，不影响讲评与本地后验。"""
         messages = build_blind_level_messages(
-            article, quiz, answers, choice_correct, production_texts
+            article, quiz, answers, choice_correct, production_texts, choice_notes
         )
         try:
             text = self._client.complete_json(
@@ -1435,16 +1454,37 @@ def _level_reason(
 
 
 def _normalize_answers(answers: tuple[int, ...], quiz: ReadingQuiz) -> tuple[int, ...]:
-    """把作答整理成与选择题等长的下标元组；越界/缺答统一记为 -1。"""
+    """把作答整理成与选择题等长的下标元组。
+
+    - `UNKNOWN_ANSWER`（-2）是有效作答：用户主动表示“不知道”，按答错计分；
+    - 其余越界 / 缺答统一记为 -1（未作答），提交时会被拦下。
+    """
     normalized: list[int] = []
     for index, question in enumerate(quiz.choice_questions):
         try:
             chosen = int(answers[index]) if index < len(answers) else -1
         except (TypeError, ValueError):
             chosen = -1
+        if chosen == UNKNOWN_ANSWER:
+            normalized.append(chosen)
+            continue
         if not (0 <= chosen < len(question.options)):
             chosen = -1
         normalized.append(chosen)
+    return tuple(normalized)
+
+
+def _normalize_choice_notes(
+    notes: Sequence[str],
+    quiz: ReadingQuiz,
+    answers: tuple[int, ...],
+) -> tuple[str, ...]:
+    """把补充说明整理成与选择题等长的元组；非「不知道」的题一律清空。"""
+    normalized: list[str] = []
+    for position, _ in enumerate(quiz.choice_questions):
+        chosen = answers[position] if position < len(answers) else -1
+        text = as_text(notes[position])[:MAX_CHOICE_NOTE_CHARS] if position < len(notes) else ""
+        normalized.append(text if chosen == UNKNOWN_ANSWER else "")
     return tuple(normalized)
 
 
@@ -1647,6 +1687,8 @@ __all__ = [
     "LevelDecision",
     "QuizOutcome",
     "ReadingQuizService",
+    "UNKNOWN_ANSWER",
+    "UNKNOWN_LABEL",
     "apply_level_policy",
     "choose_boundary_level",
     "decide_recommended_level",

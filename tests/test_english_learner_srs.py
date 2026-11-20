@@ -139,6 +139,17 @@ def test_due_words_filters_future_and_mastered(db: Database) -> None:
     assert service.count_due() == 1
 
 
+def test_count_due_is_not_truncated_by_queue_limit(db: Database) -> None:
+    """到期词超过 200 时，count_due 仍返回精确值（due_words 只加载 200 条）。"""
+    for index in range(205):
+        db.words.upsert(make_word(lemma=f"word{index}", due_date="2026-11-19"))
+
+    service = ReviewService(db.words, db.reviews, db.stats, today=lambda: "2026-11-19")
+
+    assert len(service.due_words()) == 200
+    assert service.count_due() == 205
+
+
 def test_review_persists_schedule_logs_and_stats(db: Database) -> None:
     stored = db.words.upsert(make_word(due_date="2026-11-19"))
     assert stored.id is not None

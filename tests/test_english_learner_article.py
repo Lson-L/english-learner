@@ -11,9 +11,11 @@ from english_learner.models.entities import Article, Profile, Word, now_iso
 from english_learner.services.ai_client import AIError
 from english_learner.services.article_service import (
     ArticleService,
+    GlossaryEntry,
     InvalidArticleError,
     parse_article_draft,
 )
+from english_learner.services.dictionary_service import DictionaryService
 from english_learner.services.learner_memory import LearnerMemory
 from english_learner.services.prompts import build_article_messages
 from english_learner.services.readability import ReadabilityThresholds
@@ -84,7 +86,7 @@ def test_parse_valid_draft() -> None:
     assert len(draft.paragraphs) == 3
     assert draft.word_count == 216
     assert draft.target_words == ("habits",)
-    assert draft.glossary == (("habits", "习惯"),)
+    assert draft.glossary == (GlossaryEntry(word="habits", meaning_cn="习惯", lemma="habits"),)
     assert draft.content == "\n\n".join(draft.paragraphs)
 
 
@@ -181,6 +183,63 @@ def test_due_words_are_sent_to_prompt(db: Database, profile: Profile) -> None:
 
     user_message = fake.messages[0][1]["content"]
     assert "resilient" in user_message
+
+
+def test_glossary_seeds_lookup_cache_without_entering_vocabulary(
+    db: Database, profile: Profile
+) -> None:
+    """文章自带的难词释义直接写成查词缓存：双击时 0 等待，但不进生词本。"""
+    fake = FakeCompleter(payload_text())
+    article = make_service(db, fake).get_or_create_today(profile, today="2026-11-18")
+
+    cached = db.words.get_by_form("habits")
+    assert cached is not None
+    assert cached.meaning_cn == "习惯"
+    assert cached.in_vocabulary is False
+    assert cached.article_id == article.id
+
+    # 再查同一个词形：命中缓存，不再调用 AI。
+    no_ai = FakeCompleter()
+    result = DictionaryService(no_ai, db.words, db.stats).lookup(
+        "Habits", "Small habits are easy to start."
+    )
+    assert result.cached is True
+    assert no_ai.calls == 0
+
+
+def test_glossary_does_not_overwrite_existing_word(db: Database, profile: Profile) -> None:
+    """已有词条（含生词本状态与完整释义）不能被预生成的短释义覆盖。"""
+    db.words.upsert(
+        Word(
+            lemma="habits",
+            meaning_cn="旧释义",
+            example_en="Old example.",
+            in_vocabulary=True,
+            due_date="2026-11-18",
+            created_at=now_iso(),
+            updated_at=now_iso(),
+        )
+    )
+    make_service(db, FakeCompleter(payload_text())).get_or_create_today(profile, today="2026-11-18")
+
+    stored = db.words.get_by_lemma("habits")
+    assert stored is not None
+    assert stored.meaning_cn == "旧释义"
+    assert stored.example_en == "Old example."
+    assert stored.in_vocabulary is True
+
+
+def test_glossary_skips_words_not_in_article() -> None:
+    """模型偶尔会编造正文里没有的词，解析阶段直接丢弃。"""
+    payload = make_payload()
+    payload["glossary"] = [
+        {"word": "habits", "meaning_cn": "习惯"},
+        {"word": "resilient", "meaning_cn": "有韧性的"},  # 正文没出现
+        {"word": "two words", "meaning_cn": "不是单词"},
+    ]
+    draft = parse_article_draft(json.dumps(payload, ensure_ascii=False), "B1")
+
+    assert [entry.word for entry in draft.glossary] == ["habits"]
 
 
 def test_regenerate_replaces_today_article(db: Database, profile: Profile) -> None:

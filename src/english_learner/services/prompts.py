@@ -23,16 +23,23 @@ from ..models.entities import (
     ReadingQuiz,
     Word,
 )
-from .assessment_bank import OPTION_LETTERS, AssessmentSet, Question
+from .assessment_bank import (
+    OPTION_LETTERS,
+    UNKNOWN_ANSWER,
+    UNKNOWN_LABEL,
+    AssessmentSet,
+    Question,
+)
 from .back_translation import WRITING_ERROR_LABELS, WRITING_ERROR_TYPES
 from .learner_memory import LearnerMemory
 
 if TYPE_CHECKING:  # 避免与 assessment_service 循环导入
     from .assessment_service import AnswerSheet, ObjectiveScore
 
-# M5.4：新增回译练习的翻译 / 批改 prompt；文章 prompt 结构未变，
-# 但学习者记忆多了“英文写作薄弱”一行，整体版本照例升一次。
-PROMPT_VERSION = "m5-4"
+# M6.1：文章 prompt 要求附带 glossary（难词语境义），查词预取新增批量 prompt，
+# 让阅读时双击查词尽量走本地缓存。
+# M6.2：阅读检测选择题支持「不知道 + 补充说明」，讲评与盲评 prompt 带上原因。
+PROMPT_VERSION = "m6-2"
 
 # ------------------------------------------------------------ 学习者记忆
 # 记忆按任务过滤：不同 AI 任务只该看到与自己相关的那几行。
@@ -262,6 +269,15 @@ def build_article_messages(
             "可以使用常见词形变化（复数、过去式、派生词等）；\n"
         )
 
+    # 同一篇文章顺带产出“难词表”：文章落库后直接写成查词缓存，
+    # 阅读时双击这些词不再等 AI。只要求核心释义，例句/记忆法留给后续按需生成。
+    glossary_rule = (
+        "5. glossary 从正文里挑 8~15 个对 CEFR "
+        f"{level} 学习者可能陌生的词（不要专有名词），word 用正文中的形态，"
+        "并给出它在这篇文章语境下的中文释义；只给词、词性、音标和释义，"
+        "不要例句和记忆方法；\n"
+    )
+
     feedback_rule = ""
     if learner_feedback.strip():
         feedback_rule = (
@@ -356,6 +372,7 @@ def build_article_messages(
         "2. 句子长度和词汇符合该等级，内容完整、有开头和结尾；\n"
         f"{target_rule}"
         f"{target_check}"
+        f"{glossary_rule}"
         f"{feedback_rule}"
         f"{focus_rule}"
         f"{memory_rule}"
@@ -368,7 +385,11 @@ def build_article_messages(
         f'  "level": "{level}",\n'
         f'  "topic": "{subject}",\n'
         '  "paragraphs": ["第一段", "第二段", "第三段"],\n'
-        '  "target_words": ["resilient", "consistent"]\n'
+        '  "target_words": ["resilient", "consistent"],\n'
+        '  "glossary": [\n'
+        '    {"word": "resilient", "lemma": "resilient", "pos": "adj.", '
+        '"phonetic": "/rɪˈzɪliənt/", "meaning_cn": "有韧性的"}\n'
+        "  ]\n"
         "}"
     )
     return [
@@ -870,6 +891,7 @@ def build_quiz_grading_messages(
     short_answer_text: str = "",
     self_report: str = "",
     production_texts: Sequence[str] = (),
+    choice_notes: Sequence[str] = (),
     history: Sequence[QuizHistoryEntry] = (),
     difficulty_stats: Sequence[object] = (),
     skill_stats: Sequence[object] = (),
@@ -880,6 +902,8 @@ def build_quiz_grading_messages(
     选择题得分由本地算好（AI 不重算）；每道主动产出题由 AI 给 0/1 分。
     等级建议不在这里做——Phase 3 起由不看当前等级的盲评模型单独给，
     本函数只负责讲评、产出题评分与薄弱点总结。
+    `choice_notes` 与选择题一一对应：选「不知道」时用户写的补充说明，
+    prompt 里会作为错因线索交给模型，不改变本地判分。
     `repair_note` 用于“上一次漏了产出题分数”时的定向重试。
     """
     texts = list(production_texts) or [short_answer_text]
@@ -927,16 +951,23 @@ def build_quiz_grading_messages(
             continue
 
         chosen = answers[choice_position] if choice_position < len(answers) else -1
+        note = choice_notes[choice_position].strip() if choice_position < len(choice_notes) else ""
         choice_position += 1
         option_lines = "\n".join(
             f"   {chr(ord('A') + position)}. {option}"
             for position, option in enumerate(question.options)
         )
+        answer_text = (
+            f"{UNKNOWN_LABEL}（主动表示不会）"
+            if chosen == UNKNOWN_ANSWER
+            else question.letter(chosen)
+        )
+        note_line = f"\n   补充说明：{note}" if note else ""
         lines.append(
             f"第 {index} 题（选择，难度 {difficulty}，技能 {skill}）：{question.prompt}\n"
             f"{option_lines}\n"
             f"   正确答案：{question.letter(question.answer_index)}；"
-            f"学习者答案：{question.letter(chosen)}"
+            f"学习者答案：{answer_text}{note_line}"
         )
 
     current = profile.cefr_level
@@ -979,6 +1010,10 @@ def build_quiz_grading_messages(
         "3. 总结优势与薄弱点（不判断等级，等级由另一次盲评 + 本地后验决定）。\n\n"
         "评分规则：\n"
         "- 选择题得分已由系统算好，不要重新计算；\n"
+        f"- 学习者选「{UNKNOWN_LABEL}」表示主动承认不会，按答错处理，"
+        "不要当成跳过或未作答；如果附了补充说明，讲评与错因要参考它"
+        "（例如单词不认识 → vocabulary，句子结构看不懂 → grammar，"
+        "没找到依据 → detail / inference）；\n"
         "- 英译中题按「理解准确 / 中文通顺」评分：准确传达原句意思给 1；"
         "关键词义、指代、否定或逻辑关系译错、漏译、译反给 0；"
         "不要求逐字直译，也不因中文文采或个别措辞扣分；\n"
@@ -1026,6 +1061,7 @@ def build_blind_level_messages(
     answers: tuple[int, ...],
     choice_correct: int,
     production_texts: Sequence[str] = (),
+    choice_notes: Sequence[str] = (),
 ) -> list[dict[str, str]]:
     """盲评：不告诉模型当前等级，避免它被画像锚定。
 
@@ -1050,11 +1086,18 @@ def build_blind_level_messages(
             )
             continue
         chosen = answers[choice_position] if choice_position < len(answers) else -1
+        note = choice_notes[choice_position].strip() if choice_position < len(choice_notes) else ""
         choice_position += 1
+        answer_text = (
+            f"{UNKNOWN_LABEL}（主动表示不会）"
+            if chosen == UNKNOWN_ANSWER
+            else question.letter(chosen)
+        )
+        note_line = f"\n   补充说明：{note}" if note else ""
         lines.append(
             f"第 {index} 题（选择）：{question.prompt}\n"
             f"   正确答案：{question.letter(question.answer_index)}；"
-            f"学习者答案：{question.letter(chosen)}"
+            f"学习者答案：{answer_text}{note_line}"
         )
 
     content = article.content.strip()
@@ -1243,6 +1286,45 @@ def build_mnemonic_messages(word: Word, level: str) -> list[dict[str, str]]:
     )
     return [
         {"role": "system", "content": MNEMONIC_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+
+
+PREFETCH_SYSTEM = (
+    "你是一名英语词典编辑，擅长根据上下文判断词义。你只输出 JSON 对象，不输出解释或代码围栏。"
+)
+
+
+def build_prefetch_messages(entries: list[tuple[str, str]], level: str) -> list[dict[str, str]]:
+    """批量预查释义（阅读页后台预取用）。
+
+    `entries` 是 (单词, 所在句子) 列表。刻意只要核心字段、不要例句和记忆方法：
+    输出短、往返快，这些释义只作为查词缓存写入 `words` 表，用户双击时直接命中；
+    如果语境义不符，界面上的“按本句重查”仍可发起完整查词。
+    """
+    lines: list[str] = []
+    for index, (word, sentence) in enumerate(entries, start=1):
+        clean = " ".join((sentence or "").split())
+        if len(clean) > 240:
+            clean = clean[:240] + "…"
+        lines.append(f'{index}. word: "{word}" | sentence: "{clean}"')
+
+    user = (
+        f"学习者 CEFR 等级：{level}。下面是一篇文章里的单词及其所在句子。\n"
+        "请为每个单词给出它在该句中的语境义，用于本地查词缓存。\n"
+        "要求：\n"
+        "1. word 原样返回输入里的写法；lemma 给词典原形（went→go、studies→study）；\n"
+        "2. phonetic 用国际音标并带斜杠，按原形标注；pos 用 v./n./adj. 等缩写；\n"
+        "3. meaning_cn 不超过 20 字，meaning_en 一句话；\n"
+        "4. 输出条目数量与输入完全一致，顺序不变；不要例句、不要记忆方法；\n"
+        "5. 只输出 JSON，不要解释、不要代码围栏。\n\n"
+        "JSON 结构：\n"
+        '{"entries": [{"word": "...", "lemma": "...", "phonetic": "/.../", '
+        '"pos": "...", "meaning_cn": "...", "meaning_en": "..."}]}\n\n'
+        f"单词列表：\n" + "\n".join(lines)
+    )
+    return [
+        {"role": "system", "content": PREFETCH_SYSTEM},
         {"role": "user", "content": user},
     ]
 

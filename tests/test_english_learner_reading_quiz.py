@@ -24,6 +24,7 @@ from english_learner.services.quiz_calibration import (
     skill_stats,
 )
 from english_learner.services.reading_quiz_service import (
+    UNKNOWN_ANSWER,
     EvidenceSummary,
     InvalidQuizError,
     QuizOutcome,
@@ -1239,3 +1240,64 @@ def test_quiz_calibration_groups_by_difficulty_and_skill() -> None:
 
     by_skill = {stat.skill: stat for stat in skill_stats([completed])}
     assert by_skill["writing"].total == 1
+
+
+# ------------------------------------------------- 选择题「不知道 + 补充说明」
+def test_advance_stage_accepts_unknown_answer_and_saves_note(db: Database) -> None:
+    article = make_article(db)
+    service = make_service(db, RoutingCompleter())
+    quiz = service.get_or_create(article, "B1")
+
+    advanced = service.advance_stage(
+        article,
+        quiz,
+        (UNKNOWN_ANSWER, 1, 0),
+        choice_notes=("这个单词不认识", "不该保留", ""),
+    )
+
+    # -2 是有效作答，按答错计分；说明只保留在选「不知道」的题上。
+    assert advanced.answers == (UNKNOWN_ANSWER, 1, 0)
+    assert advanced.choice_notes[:3] == ("这个单词不认识", "", "")
+
+    stored = db.quizzes.get_by_article(article.id)
+    assert stored is not None
+    assert stored.choice_notes[:3] == ("这个单词不认识", "", "")
+
+
+def test_submit_accepts_unknown_answer_and_passes_note_to_ai(
+    db: Database, profile: Profile
+) -> None:
+    article = make_article(db)
+    fake = RoutingCompleter()
+    service = make_service(db, fake)
+    quiz = service.get_or_create(article, "B1")
+    quiz = service.advance_stage(article, quiz, (1, 1, 1))
+
+    outcome = service.submit(
+        article,
+        quiz,
+        (UNKNOWN_ANSWER, 1, 1, 1, 1),
+        profile,
+        production_texts=("小习惯会不断累积。", "小习惯会改变生活。"),
+        choice_notes=("这个单词不认识", "不该保留", "", "", ""),
+    )
+
+    assert outcome.quiz.answers[:5] == (UNKNOWN_ANSWER, 1, 1, 1, 1)
+    assert outcome.quiz.choice_notes[:5] == ("这个单词不认识", "", "", "", "")
+    stored = db.quizzes.get_by_article(article.id)
+    assert stored is not None and stored.choice_notes[0] == "这个单词不认识"
+
+    grading = next(
+        messages[-1]["content"]
+        for messages in fake.messages
+        if "逐题用中文讲评" in messages[-1]["content"]
+    )
+    assert "不知道（主动表示不会）" in grading
+    assert "补充说明：这个单词不认识" in grading
+
+    blind = next(
+        messages[-1]["content"]
+        for messages in fake.messages
+        if "不会看到学习者的当前等级" in messages[-1]["content"]
+    )
+    assert "补充说明：这个单词不认识" in blind

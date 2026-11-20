@@ -3,10 +3,10 @@
 设计（对应 HISTORY.md M1-5）：
 - 规范化 lemma 后先查 `words` 表，命中就不再消耗 token；
 - 未命中才调用 AI，要求“结合上下文给语境义”；
-- 查词结果直接写入 `words`（既是生词本，也是查词缓存），`due_date = 今天`，
-  M2 的复习从今天开始排队；
+- 查词结果直接写入 `words`（既是生词本，也是查词缓存），`due_date = 今天`；
 - 加入生词本 = 插入一条 `highlights` 记录 + `daily_stats.words_added += 1`，
-  同一位置重复添加由 UNIQUE 约束保证幂等。
+  同一位置重复添加由 UNIQUE 约束保证幂等；第一次入本时把 `due_date` 改成
+  明天，避免读文章加词后当天复习队列立刻膨胀。
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 from ..models.entities import (
     Word,
@@ -34,12 +35,28 @@ from .prompts import (
     build_dictionary_messages,
     build_learner_memory_block,
     build_mnemonic_messages,
+    build_prefetch_messages,
 )
+from .readability import KNOWN_INTERVAL_DAYS, default_wordlist, select_lookup_words
 
 logger = logging.getLogger(__name__)
 
 # 允许的单词形态：字母开头，可含内部连字符或撇号（如 well-known、don't）。
 _WORD_RE = re.compile(r"^[A-Za-z][A-Za-z'\-]*$")
+
+# 后台预取：每篇文章最多预查多少个词、单次批量请求的输出额度。
+# 数量刻意压在一屏阅读会点到的量级：太多会让预取请求本身变慢、也浪费 token。
+PREFETCH_LIMIT = 10
+PREFETCH_MAX_TOKENS = 1800
+# 预取是“失败也无所谓”的后台增强：比业务默认的 300s 读超时短得多，
+# 这样关闭窗口时不会为了一个用户根本没看到的请求干等五分钟。
+# 刻意略大于 30s（客户端“超时后是否自动重试”的阈值）：预取超时就直接放弃，
+# 不再自动重试两轮，避免把最长等待拖到一分半以上。
+PREFETCH_TIMEOUT_SECONDS = 35.0
+# 加入生词本后的后台补全：用户可见的结果在后台更新，但同样不能拖住关窗口。
+# 45s 已覆盖常见完整查词（实测 15~20s），且大于 30s 的自动重试阈值——
+# 超时直接放弃，保留简释，不再自动重试两轮。
+ENRICH_TIMEOUT_SECONDS = 45.0
 
 # 句子边界：英文句末标点 + 换行。分号、逗号不作为边界，避免把句子切得太碎。
 _SENTENCE_DELIMITERS = ".!?\n"
@@ -103,6 +120,15 @@ class LookupResult:
         return WordDefinition.from_word(self.word)
 
 
+def needs_definition(word: Word) -> bool:
+    """词条是否只有预生成简释（文章难词 / 后台预取），值得再补一次完整查词。
+
+    完整查词的 prompt 必然要求例句与记忆方法（`build_dictionary_messages`），
+    两者都为空说明这条来自 glossary / 预取这类“只要短释义”的批量生成。
+    """
+    return not (word.example_en or "").strip() and not (word.mnemonic or "").strip()
+
+
 class DictionaryService:
     """查词 + 加入生词本。同步阻塞，必须放在 TaskWorker 里调用。"""
 
@@ -158,6 +184,68 @@ class DictionaryService:
                     context_mismatch=_context_mismatch(cached.context_sentence, sentence),
                 )
 
+        word = self._request_definition(raw_word, sentence, level, article_id=article_id)
+        stored = self._words.upsert(word)
+        if stored.id is not None:
+            # 记住“文章词形”和原形，下一次查同一词形不再调用 AI。
+            self._words.remember_form(surface, stored.id)
+            self._words.remember_form(word.lemma, stored.id)
+        return LookupResult(word=stored, cached=False)
+
+    def enrich_definition(
+        self,
+        word_id: int,
+        sentence: str = "",
+        level: str = "B1",
+    ) -> Word | None:
+        """把预生成简释补全成与双击查词一致的完整词条（后台调用）。
+
+        M6.3：文章难词 / 后台预取只缓存了短释义（无例句、无记忆方法），
+        用户把词加入生词本后，再按同一个查词 prompt 补一次完整释义，
+        免得生词本里长期只有一行简释。只更新释义类字段：lemma、
+        display_form、in_vocabulary 与 SRS 排期都不动。
+
+        词条不存在、或已经有完整释义时直接返回 None（不花 token）。
+        AI / 解析失败照常抛 `AIError`，由调用方（TaskWorker）静默处理。
+        """
+        word = self._words.get_by_id(int(word_id))
+        if word is None or not needs_definition(word):
+            return None
+
+        # 用文章里的词形发请求，和用户双击时选中的文本一致。
+        raw_word = word.display_form or word.lemma
+        fresh = self._request_definition(
+            raw_word,
+            sentence,
+            level,
+            article_id=word.article_id,
+            task="查词补全",
+            timeout=ENRICH_TIMEOUT_SECONDS,
+        )
+        stored = self._words.update_definition(int(word_id), fresh)
+        if stored is None:
+            return None
+        self._words.remember_form(raw_word, int(word_id))
+        self._words.remember_form(stored.lemma, int(word_id))
+        logger.info("查词补全完成：%s → %s", raw_word, stored.lemma)
+        return stored
+
+    def _request_definition(
+        self,
+        raw_word: str,
+        sentence: str,
+        level: str,
+        *,
+        article_id: int | None = None,
+        task: str = "查词",
+        timeout: float | None = None,
+    ) -> Word:
+        """调用一次完整查词并解析成 Word（不落库）。
+
+        双击查词与“加入生词本后补全简释”共用这套 prompt 与字段，
+        保证两个入口看到的释义一致。`task` 只影响 `ai_calls` 记录。
+        """
+        surface = normalize_lemma(raw_word)
         memory = load_memory(self._memory_provider)
         messages = build_dictionary_messages(
             raw_word.strip(),
@@ -165,8 +253,15 @@ class DictionaryService:
             level,
             learner_memory=build_learner_memory_block(memory, MEMORY_TASK_DICTIONARY),
         )
-        logger.info("查词调用 AI prompt=%s word=%s", PROMPT_VERSION, surface)
-        text = self._client.complete_json(messages, temperature=0.3, max_tokens=1500, task="查词")
+        logger.info("查词调用 AI prompt=%s word=%s task=%s", PROMPT_VERSION, surface, task)
+        if timeout is None:
+            # 普通查词沿用客户端默认超时；也兼容只实现旧签名（没有 timeout）
+            # 的 TextCompleter 测试替身。
+            text = self._client.complete_json(messages, temperature=0.3, max_tokens=1500, task=task)
+        else:
+            text = self._client.complete_json(
+                messages, temperature=0.3, max_tokens=1500, timeout=timeout, task=task
+            )
         try:
             data = parse_json_object(text)
         except JsonParseError as exc:
@@ -190,7 +285,7 @@ class DictionaryService:
         )
 
         timestamp = now_iso()
-        word = Word(
+        return Word(
             lemma=lemma,
             display_form=display_form,
             phonetic=as_text(data.get("phonetic")),
@@ -208,12 +303,135 @@ class DictionaryService:
             created_at=timestamp,
             updated_at=timestamp,
         )
-        stored = self._words.upsert(word)
-        if stored.id is not None:
-            # 记住“文章词形”和原形，下一次查同一词形不再调用 AI。
+
+    # ------------------------------------------------------------------ 预取
+    def prefetch(
+        self,
+        text: str,
+        *,
+        level: str = "B1",
+        article_id: int | None = None,
+        limit: int = PREFETCH_LIMIT,
+    ) -> int:
+        """后台批量预查文章里可能陌生的词，写入查词缓存（不加入生词本）。
+
+        设计（M6.1）：
+        - 候选词完全由本地词表 + 用户已掌握词筛选，不调用 AI；
+        - 一次批量请求查最多 `limit` 个词，返回后写入 `words`（`in_vocabulary=0`），
+          用户双击时直接命中缓存，0 等待；
+        - 任何失败（网络、解析、落库）都只记日志并返回 0：预取是尽力而为，
+          不能影响阅读与正文展示。
+
+        返回本次实际写入缓存的词条数。
+        """
+        content = text or ""
+        if limit <= 0 or len(content.strip()) < 40:
+            return 0
+
+        try:
+            candidates = self._prefetch_candidates(content, level=level, limit=limit)
+        except Exception:  # noqa: BLE001 - 词表 / 词库异常不能拖垮阅读
+            logger.warning("筛选预取候选词失败，跳过本次预取", exc_info=True)
+            return 0
+        if not candidates:
+            logger.info("预取跳过：没有需要预查的新词")
+            return 0
+
+        entries = [(word, self._sentence_for(content, word)) for word in candidates]
+        logger.info(
+            "查词预取 prompt=%s level=%s words=%s",
+            PROMPT_VERSION,
+            level,
+            candidates,
+        )
+        try:
+            reply = self._client.complete_json(
+                build_prefetch_messages(entries, level),
+                temperature=0.2,
+                max_tokens=PREFETCH_MAX_TOKENS,
+                timeout=PREFETCH_TIMEOUT_SECONDS,
+                task="查词预取",
+            )
+        except AIError as exc:
+            # 预取失败对用户不可见：他仍然可以双击后走正常查词。
+            logger.info("查词预取失败，忽略：%s", exc.message)
+            return 0
+        except Exception:  # noqa: BLE001
+            logger.warning("查词预取异常，忽略", exc_info=True)
+            return 0
+
+        try:
+            data = parse_json_object(reply)
+        except JsonParseError as exc:
+            logger.info("查词预取结果无法解析，忽略：%s", exc)
+            return 0
+        raw_entries = data.get("entries")
+        if not isinstance(raw_entries, list):
+            return 0
+
+        wanted = {word.lower() for word in candidates}
+        sentences = {word.lower(): sentence for word, sentence in entries}
+        timestamp = now_iso()
+        count = 0
+        for item in raw_entries:
+            if not isinstance(item, dict):
+                continue
+            surface = normalize_lemma(as_text(item.get("word")))
+            if not surface or surface not in wanted:
+                continue
+            meaning_cn = as_text(item.get("meaning_cn"))
+            meaning_en = as_text(item.get("meaning_en"))
+            if not meaning_cn and not meaning_en:
+                continue
+            lemma = normalize_lemma(as_text(item.get("lemma"))) or surface
+            word = Word(
+                lemma=lemma,
+                display_form=surface if surface != lemma else "",
+                phonetic=as_text(item.get("phonetic"))[:60],
+                pos=as_text(item.get("pos"))[:20],
+                meaning_cn=meaning_cn,
+                meaning_en=meaning_en,
+                context_sentence=(sentences.get(surface) or "")[:500],
+                article_id=article_id,
+                status="new",
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
+            try:
+                stored = self._words.seed_cache(word)
+            except Exception:  # noqa: BLE001 - 单个词失败不影响其它词
+                logger.warning("写入预取缓存失败：%s", surface, exc_info=True)
+                continue
+            if stored is None or stored.id is None:
+                continue
             self._words.remember_form(surface, stored.id)
             self._words.remember_form(lemma, stored.id)
-        return LookupResult(word=stored, cached=False)
+            count += 1
+
+        logger.info("查词预取完成：候选 %s 个，写入缓存 %s 个", len(candidates), count)
+        return count
+
+    def _prefetch_candidates(self, content: str, *, level: str, limit: int) -> list[str]:
+        """本地筛选候选词：已掌握 / 已缓存的词全部排除。"""
+        known = set(self._words.list_known_lemmas(KNOWN_INTERVAL_DAYS))
+        cached = self._words.cached_forms()
+        return list(
+            select_lookup_words(
+                content,
+                default_wordlist(),
+                known_words=known | cached,
+                level=level,
+                limit=limit,
+            )
+        )
+
+    @staticmethod
+    def _sentence_for(content: str, word: str) -> str:
+        """取单词在正文中第一次出现时的所在句，作为预取释义的上下文。"""
+        match = re.search(rf"\b{re.escape(word)}\b", content, re.I)
+        if match is None:
+            return ""
+        return extract_sentence(content, match.start(), match.end())
 
     def generate_mnemonic(self, word: Word, level: str = "B1") -> Word:
         """给已有生词单独生成 / 更新记忆方法（老词条或用户手动触发）。"""
@@ -259,7 +477,9 @@ class DictionaryService:
             raise ValueError("文章或偏移量不合法")
 
         # 查词只写缓存；只有走到这里（用户点“加入生词本”）才真正入本。
-        if self._words.mark_in_vocabulary(word.id) is None:
+        # 首次复习放到明天：今天读文章加的 10 个词不会立刻挤进今天的复习队列。
+        first_due = (date.fromisoformat(self._today()) + timedelta(days=1)).isoformat()
+        if self._words.mark_in_vocabulary(word.id, first_due_date=first_due) is None:
             raise ValueError("词条不存在，请重新查词")
 
         inserted = self._words.add_highlight(

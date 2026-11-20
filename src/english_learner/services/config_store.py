@@ -33,6 +33,11 @@ APP_DIR_NAME = "EnglishLearner"
 CONFIG_FILE_NAME = "config.json"
 CONFIG_VERSION = 1
 
+# 每日复习目标：默认 20 个，大约 10~15 分钟；范围防止手滑写成 0 或几千。
+DEFAULT_DAILY_REVIEW_LIMIT = 20
+MIN_DAILY_REVIEW_LIMIT = 5
+MAX_DAILY_REVIEW_LIMIT = 200
+
 
 class ConfigError(RuntimeError):
     """配置文件损坏或内容不合法。"""
@@ -161,9 +166,13 @@ class UiConfig:
     旧版本曾把复习模式（`review_mode`）存在这里；现在复习卡由
     `services.review_plan` 按学习阶段自动编排，该字段已移除，
     读到旧配置时直接忽略，不做迁移。
+
+    `prefetch_enabled`：打开文章后是否在后台批量预查生词并写入查词缓存。
+    默认开启，让阅读时双击查词尽量不走网络；关闭后只在真正双击时调用 AI。
     """
 
     english_font: str = ""
+    prefetch_enabled: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -174,7 +183,60 @@ class UiConfig:
             return cls()
         # 兼容旧字段 reading_font：早期版本只把字体作用在正文上。
         raw = data.get("english_font") or data.get("reading_font") or ""
-        return cls(english_font=str(raw).strip().lower())
+        raw_prefetch = data.get("prefetch_enabled", True)
+        if isinstance(raw_prefetch, str):
+            # JSON 里写 "false" 时 bool("false") 是 True，字符串要单独判断。
+            prefetch = raw_prefetch.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            prefetch = bool(raw_prefetch)
+        return cls(english_font=str(raw).strip().lower(), prefetch_enabled=prefetch)
+
+
+@dataclass(frozen=True)
+class ReviewConfig:
+    """复习偏好，放在 config.json 的 `review` 段。
+
+    `daily_limit`：每日目标复习数。复习页只按「目标 - 今日已完成」取词，
+    剩余到期词留在积压里，可以手动加练；避免一次面对几百个词直接放弃。
+
+    `spelling_enabled`：是否要求默写英文。默认关闭，只做看词回忆——先保证
+    「看到词能想起意思」的闭环，需要产出练习时再手动打开。
+    """
+
+    daily_limit: int = DEFAULT_DAILY_REVIEW_LIMIT
+    spelling_enabled: bool = False
+
+    def normalized(self) -> ReviewConfig:
+        """把目标数限制在合理范围，否则回退默认值。"""
+        try:
+            limit = int(self.daily_limit)
+        except (TypeError, ValueError):
+            limit = DEFAULT_DAILY_REVIEW_LIMIT
+        limit = min(max(limit, MIN_DAILY_REVIEW_LIMIT), MAX_DAILY_REVIEW_LIMIT)
+        return ReviewConfig(daily_limit=limit, spelling_enabled=bool(self.spelling_enabled))
+
+    def to_dict(self) -> dict[str, Any]:
+        config = self.normalized()
+        return {
+            "daily_limit": config.daily_limit,
+            "spelling_enabled": config.spelling_enabled,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ReviewConfig:
+        if not isinstance(data, dict):
+            return cls()
+        try:
+            limit = int(data.get("daily_limit", DEFAULT_DAILY_REVIEW_LIMIT))
+        except (TypeError, ValueError):
+            limit = DEFAULT_DAILY_REVIEW_LIMIT
+        raw_spelling = data.get("spelling_enabled", False)
+        if isinstance(raw_spelling, str):
+            # JSON 里写 "false" 时 bool("false") 是 True，字符串要单独判断。
+            spelling = raw_spelling.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            spelling = bool(raw_spelling)
+        return cls(daily_limit=limit, spelling_enabled=spelling).normalized()
 
 
 class ConfigStore:
@@ -248,6 +310,19 @@ class ConfigStore:
         payload["ui"] = ui.to_dict()
         self._write_payload(payload)
         return ui
+
+    def load_review(self) -> ReviewConfig:
+        """读取复习偏好；文件缺失或格式损坏一律回退默认值。"""
+        return ReviewConfig.from_dict(self._read_payload().get("review", {}))
+
+    def save_review(self, config: ReviewConfig) -> ReviewConfig:
+        """只更新 `review` 段，与 `save_ui` 一样保留其它配置。"""
+        normalized = config.normalized()
+        payload = self._strip_legacy_ai_fields(self._read_payload())
+        payload.setdefault("version", CONFIG_VERSION)
+        payload["review"] = normalized.to_dict()
+        self._write_payload(payload)
+        return normalized
 
     def load_readability(self) -> ReadabilityThresholds:
         """读取本地可读性阈值；缺失或非法一律回退默认值。"""

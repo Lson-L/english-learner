@@ -178,6 +178,32 @@ class WordPanel(QFrame):
         cached: bool = False,
         context_mismatch: bool = False,
     ) -> None:
+        self._apply_word(word, sentence)
+
+        self._add_button.setVisible(True)
+        self._add_button.setEnabled(True)
+        self._refresh_button.setVisible(bool(context_mismatch))
+        if word.in_vocabulary:
+            self._add_button.setText("加入本篇高亮")
+            self._status.setText("这个词已在生词本中，加入后会在本篇高亮。")
+        else:
+            self._add_button.setText("加入生词本")
+            self._status.setText("已有释义缓存，点「加入生词本」才会收进生词本。" if cached else "")
+        if context_mismatch:
+            self._status.setText(
+                "这条释义来自之前查过的句子，当前语境可能不同；如含义不符，点「按本句重查」。"
+            )
+
+    def update_definition(self, word: Word, sentence: str = "") -> None:
+        """后台补全释义后原地刷新字段。
+
+        M6.3：用户加入生词本后，页面会在后台把预生成简释补成完整查词。
+        这里只重绘内容，不动按钮与状态文案，避免把“已加入生词本”的反馈冲掉。
+        """
+        self._apply_word(word, sentence)
+
+    def _apply_word(self, word: Word, sentence: str = "") -> None:
+        """把词条字段渲染到卡片上（不涉及按钮状态）。"""
         self._current = word
         self._placeholder.setVisible(False)
         self._scroll.setVisible(True)
@@ -208,20 +234,6 @@ class WordPanel(QFrame):
 
         self._mnemonic.setText(f"记忆方法：{word.mnemonic}" if word.mnemonic else "")
         self._mnemonic.setVisible(bool(word.mnemonic))
-
-        self._add_button.setVisible(True)
-        self._add_button.setEnabled(True)
-        self._refresh_button.setVisible(bool(context_mismatch))
-        if word.in_vocabulary:
-            self._add_button.setText("加入本篇高亮")
-            self._status.setText("这个词已在生词本中，加入后会在本篇高亮。")
-        else:
-            self._add_button.setText("加入生词本")
-            self._status.setText("已有释义缓存，点「加入生词本」才会收进生词本。" if cached else "")
-        if context_mismatch:
-            self._status.setText(
-                "这条释义来自之前查过的句子，当前语境可能不同；如含义不符，点「按本句重查」。"
-            )
 
     def show_error(self, message: str) -> None:
         self._current = None

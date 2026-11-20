@@ -213,6 +213,23 @@ class WordRepo(_BaseRepo):
             updated_at       = excluded.updated_at
     """
 
+    # 预取 / 文章难词只补缓存，绝不覆盖已有词条：已有的完整释义（例句、记忆法、
+    # SRS 状态、in_vocabulary）都比预生成的短释义更权威。
+    _SEED_CACHE_SQL = """
+        INSERT INTO words (
+            lemma, display_form, phonetic, pos, meaning_cn, meaning_en,
+            example_en, example_cn, mnemonic, context_sentence, article_id,
+            in_vocabulary, cefr_band, status, ease, interval_days, repetitions, due_date,
+            created_at, updated_at
+        ) VALUES (
+            :lemma, :display_form, :phonetic, :pos, :meaning_cn, :meaning_en,
+            :example_en, :example_cn, :mnemonic, :context_sentence, :article_id,
+            :in_vocabulary, :cefr_band, :status, :ease, :interval_days, :repetitions, :due_date,
+            :created_at, :updated_at
+        )
+        ON CONFLICT(lemma) DO NOTHING
+    """
+
     def get_by_lemma(self, lemma: str) -> Word | None:
         row = self._db.query_one("SELECT * FROM words WHERE lemma = ?", (lemma,))
         return Word.from_row(row) if row is not None else None
@@ -249,6 +266,29 @@ class WordRepo(_BaseRepo):
             """,
             (value, int(word_id), now_iso()),
         )
+
+    def seed_cache(self, word: Word) -> Word | None:
+        """写入“预生成释义”缓存；同原形已存在时原样保留旧词条。
+
+        用于文章 glossary 与阅读后台预取：只补空缺，不覆盖用户已有的
+        完整释义、SRS 进度与生词本状态。
+        """
+        params = word.to_params()
+        if not params["created_at"]:
+            params["created_at"] = now_iso()
+        if not params["updated_at"]:
+            params["updated_at"] = params["created_at"]
+        with self._db.transaction() as conn:
+            conn.execute(self._SEED_CACHE_SQL, params)
+            row = conn.execute("SELECT * FROM words WHERE lemma = ?", (word.lemma,)).fetchone()
+        return Word.from_row(row) if row is not None else None
+
+    def cached_forms(self) -> set[str]:
+        """全部已知词形与原形（小写）：预取时用来跳过已有缓存的词。"""
+        rows = self._db.query_all(
+            "SELECT lemma AS value FROM words UNION SELECT form AS value FROM word_forms"
+        )
+        return {str(row["value"]).strip().lower() for row in rows if str(row["value"]).strip()}
 
     def upsert(self, word: Word) -> Word:
         """按 lemma（大小写不敏感）插入或更新释义，SRS 字段保持原值。"""
@@ -383,14 +423,86 @@ class WordRepo(_BaseRepo):
             return None
         return self.get_by_id(int(word_id))
 
-    def mark_in_vocabulary(self, word_id: int) -> Word | None:
-        """把词条从“查词缓存”升级为“已加入生词本”。"""
+    def update_definition(self, word_id: int, word: Word) -> Word | None:
+        """按 id 更新释义类字段（音标 / 词性 / 释义 / 例句 / 记忆法 / 词档 / 上下文）。
+
+        后台补全预生成简释专用（M6.3）：不改 lemma（高亮与 word_forms 都指向它）、
+        display_form、in_vocabulary 与 SRS 排期，也不新建词条；空的新值不覆盖旧值。
+        """
         cursor = self._db.execute(
-            "UPDATE words SET in_vocabulary = 1, updated_at = ? WHERE id = ?",
-            (now_iso(), int(word_id)),
+            """
+            UPDATE words SET
+                phonetic = CASE WHEN :phonetic <> '' THEN :phonetic ELSE phonetic END,
+                pos = CASE WHEN :pos <> '' THEN :pos ELSE pos END,
+                meaning_cn = CASE
+                    WHEN :meaning_cn <> '' THEN :meaning_cn
+                    ELSE meaning_cn
+                END,
+                meaning_en = CASE
+                    WHEN :meaning_en <> '' THEN :meaning_en
+                    ELSE meaning_en
+                END,
+                example_en = CASE
+                    WHEN :example_en <> '' THEN :example_en
+                    ELSE example_en
+                END,
+                example_cn = CASE
+                    WHEN :example_cn <> '' THEN :example_cn
+                    ELSE example_cn
+                END,
+                -- 记忆方法只在原本为空时补：用户可能已在生词本里手动生成过
+                mnemonic = CASE
+                    WHEN mnemonic = '' AND :mnemonic <> '' THEN :mnemonic
+                    ELSE mnemonic
+                END,
+                cefr_band = CASE WHEN :cefr_band <> '' THEN :cefr_band ELSE cefr_band END,
+                context_sentence = CASE
+                    WHEN :context_sentence <> '' THEN :context_sentence
+                    ELSE context_sentence
+                END,
+                article_id = COALESCE(article_id, :article_id),
+                updated_at = :updated_at
+            WHERE id = :id
+            """,
+            {
+                "id": int(word_id),
+                "phonetic": (word.phonetic or "").strip(),
+                "pos": (word.pos or "").strip(),
+                "meaning_cn": (word.meaning_cn or "").strip(),
+                "meaning_en": (word.meaning_en or "").strip(),
+                "example_en": (word.example_en or "").strip(),
+                "example_cn": (word.example_cn or "").strip(),
+                "mnemonic": (word.mnemonic or "").strip(),
+                "cefr_band": (word.cefr_band or "").strip(),
+                "context_sentence": (word.context_sentence or "").strip(),
+                "article_id": word.article_id,
+                "updated_at": now_iso(),
+            },
         )
         if cursor.rowcount == 0:
             return None
+        return self.get_by_id(int(word_id))
+
+    def mark_in_vocabulary(self, word_id: int, *, first_due_date: str | None = None) -> Word | None:
+        """把词条从“查词缓存”升级为“已加入生词本”。
+
+        `first_due_date` 只在 0 → 1 的第一次入本时写入，用于把首次复习放到
+        明天；重复加入（`in_vocabulary` 已经是 1）不能重置已经推进的 SRS 排期。
+        查词缓存可能放了很多天，若沿用它当时的 `due_date`，一入本就会变成逾期。
+        """
+        current = self.get_by_id(int(word_id))
+        if current is None:
+            return None
+        if not current.in_vocabulary and first_due_date:
+            self._db.execute(
+                "UPDATE words SET in_vocabulary = 1, due_date = ?, updated_at = ? WHERE id = ?",
+                (first_due_date, now_iso(), int(word_id)),
+            )
+        else:
+            self._db.execute(
+                "UPDATE words SET in_vocabulary = 1, updated_at = ? WHERE id = ?",
+                (now_iso(), int(word_id)),
+            )
         return self.get_by_id(int(word_id))
 
     def delete(self, word_id: int) -> bool:
@@ -820,6 +932,7 @@ class QuizRepo(_BaseRepo):
         quiz_id: int,
         *,
         answers: tuple[int, ...],
+        choice_notes: tuple[str, ...] = (),
         explanations: tuple[str, ...],
         score: int,
         previous_level: str,
@@ -849,6 +962,7 @@ class QuizRepo(_BaseRepo):
             """
             UPDATE reading_quizzes SET
                 answers_json       = :answers_json,
+                choice_notes_json  = :choice_notes_json,
                 explanations_json  = :explanations_json,
                 error_types_json   = :error_types_json,
                 short_answer_text  = :short_answer_text,
@@ -872,6 +986,7 @@ class QuizRepo(_BaseRepo):
             {
                 "id": int(quiz_id),
                 "answers_json": json.dumps(list(answers), ensure_ascii=False),
+                "choice_notes_json": json.dumps(list(choice_notes), ensure_ascii=False),
                 "explanations_json": json.dumps(list(explanations), ensure_ascii=False),
                 "error_types_json": json.dumps(list(error_types), ensure_ascii=False),
                 "short_answer_text": short_answer_text.strip(),
@@ -931,11 +1046,24 @@ class QuizRepo(_BaseRepo):
         assert stored is not None
         return stored
 
-    def save_stage_answers(self, quiz_id: int, answers: tuple[int, ...]) -> None:
+    def save_stage_answers(
+        self,
+        quiz_id: int,
+        answers: tuple[int, ...],
+        choice_notes: tuple[str, ...] = (),
+    ) -> None:
         """第一轮作答先落库：第二阶段出题失败/关窗后重进不用重答。"""
         self._db.execute(
-            "UPDATE reading_quizzes SET answers_json = ? WHERE id = ? AND completed_at IS NULL",
-            (json.dumps(list(answers), ensure_ascii=False), int(quiz_id)),
+            """
+            UPDATE reading_quizzes
+               SET answers_json = ?, choice_notes_json = ?
+             WHERE id = ? AND completed_at IS NULL
+            """,
+            (
+                json.dumps(list(answers), ensure_ascii=False),
+                json.dumps(list(choice_notes), ensure_ascii=False),
+                int(quiz_id),
+            ),
         )
 
     def list_recent_completed_with_titles(self, limit: int = 8) -> list[tuple[ReadingQuiz, str]]:

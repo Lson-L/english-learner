@@ -33,7 +33,10 @@ from english_learner.models.entities import (  # noqa: E402
 )
 from english_learner.services.app_context import AppContext  # noqa: E402
 from english_learner.services.config_store import AIConfig, ConfigStore  # noqa: E402
-from english_learner.services.reading_quiz_service import QuizOutcome  # noqa: E402
+from english_learner.services.reading_quiz_service import (  # noqa: E402
+    UNKNOWN_ANSWER,
+    QuizOutcome,
+)
 from english_learner.storage.db import Database  # noqa: E402
 
 _APP: QApplication | None = None
@@ -187,6 +190,9 @@ class StubQuizService:
         self.advance_calls = 0
         self.submit_calls = 0
         self.last_advance_answers: tuple[int, ...] = ()
+        self.last_advance_notes: tuple[str, ...] = ()
+        self.last_submit_answers: tuple[int, ...] = ()
+        self.last_submit_notes: tuple[str, ...] = ()
 
     def get_cached(self, article_id: int) -> ReadingQuiz | None:
         self.get_cached_calls += 1
@@ -200,14 +206,17 @@ class StubQuizService:
         assert self.generated is not None
         return self.generated
 
-    def advance_stage(self, article, quiz, answers) -> ReadingQuiz:
+    def advance_stage(self, article, quiz, answers, *, choice_notes=()) -> ReadingQuiz:
         self.advance_calls += 1
         self.last_advance_answers = tuple(answers)
+        self.last_advance_notes = tuple(choice_notes)
         assert self.advanced is not None
         return self.advanced
 
     def submit(self, article, quiz, answers, profile, **kwargs) -> QuizOutcome:
         self.submit_calls += 1
+        self.last_submit_answers = tuple(answers)
+        self.last_submit_notes = tuple(kwargs.get("choice_notes") or ())
         assert self.outcome is not None
         return self.outcome
 
@@ -514,5 +523,117 @@ def test_missing_cache_generates_stage_one_in_background(tmp_path: Path) -> None
     assert dialog._mode == MODE_QUIZ
     assert len(dialog._groups) == 3
     assert dialog._primary_button.text() == "提交第一轮"
+    dialog.close()
+    db.close()
+
+
+# ------------------------------------------------- 选择题「不知道 + 补充说明」
+def test_choice_card_offers_unknown_option_and_reason_input(tmp_path: Path) -> None:
+    get_app()
+    db = Database(tmp_path / "data.db")
+    article = make_article(db)
+    service = StubQuizService(cached=make_stage_one_quiz(article))
+    dialog = ReadingQuizDialog(make_context(db, tmp_path), article, service=service)  # type: ignore[arg-type]
+
+    group = dialog._groups[0]
+    unknown = group.button(UNKNOWN_ANSWER)
+    assert unknown is not None
+    assert unknown.text() == "E. 不知道"
+
+    note = dialog._choice_notes[0]
+    assert note.isHidden() is True
+
+    unknown.setChecked(True)
+    assert note.isHidden() is False
+    note.setText("这个单词不认识")
+
+    # 只有选「不知道」的题才提交说明。
+    assert dialog._collect_choice_notes() == ("这个单词不认识", "", "")
+    assert dialog._collect_answers()[0] == UNKNOWN_ANSWER
+    dialog.close()
+    db.close()
+
+
+def test_locked_stage_one_unknown_answer_keeps_note(tmp_path: Path) -> None:
+    get_app()
+    db = Database(tmp_path / "data.db")
+    article = make_article(db)
+    quiz = replace(
+        make_stage_two_quiz(article, answers=(UNKNOWN_ANSWER, 1, 1)),
+        choice_notes=("这个单词不认识", "", ""),
+    )
+    service = StubQuizService(cached=quiz)
+    dialog = ReadingQuizDialog(make_context(db, tmp_path), article, service=service)  # type: ignore[arg-type]
+
+    group = dialog._groups[0]
+    unknown = group.button(UNKNOWN_ANSWER)
+    assert unknown is not None and unknown.isChecked() is True
+    assert unknown.isEnabled() is False
+    note = dialog._choice_notes[0]
+    assert note.text() == "这个单词不认识"
+    assert note.isHidden() is False
+    assert note.isEnabled() is False
+    dialog.close()
+    db.close()
+
+
+def test_submit_passes_unknown_note_to_service(tmp_path: Path) -> None:
+    get_app()
+    db = Database(tmp_path / "data.db")
+    article = make_article(db)
+    db.profiles.save(Profile(cefr_level="B1", assessed_at=now_iso()))
+    service = StubQuizService(
+        cached=make_stage_two_quiz(article),
+        outcome=QuizOutcome(
+            quiz=make_completed_quiz(article),
+            profile=Profile(cefr_level="B1"),
+            result=None,  # type: ignore[arg-type]
+            previous_level="B1",
+        ),
+    )
+    dialog = ReadingQuizDialog(make_context(db, tmp_path), article, service=service)  # type: ignore[arg-type]
+
+    # 第一轮已锁定；给第 4 题（position 3）选「不知道」并写原因。
+    for group in dialog._groups[3:]:
+        button = group.button(1)
+        assert button is not None
+        button.setChecked(True)
+    unknown = dialog._groups[3].button(UNKNOWN_ANSWER)
+    assert unknown is not None
+    unknown.setChecked(True)
+    dialog._choice_notes[3].setText("句子结构没看懂")
+    for edit in dialog._production_edits:
+        edit.setPlainText("小习惯会不断累积。")
+
+    dialog._submit_answers()
+    worker = dialog._worker
+    assert worker is not None
+    assert worker.wait(3000) is True
+    get_app().processEvents()
+
+    assert service.submit_calls == 1
+    assert service.last_submit_answers[3] == UNKNOWN_ANSWER
+    assert service.last_submit_notes == ("", "", "", "句子结构没看懂", "")
+    dialog.close()
+    db.close()
+
+
+def test_result_page_shows_unknown_answer_and_note(tmp_path: Path) -> None:
+    get_app()
+    db = Database(tmp_path / "data.db")
+    article = make_article(db)
+    completed = replace(
+        make_completed_quiz(article),
+        answers=(UNKNOWN_ANSWER, 1, 1, 1, 0),
+        choice_notes=("这个单词不认识", "", "", "", ""),
+    )
+    service = StubQuizService(cached=completed)
+    dialog = ReadingQuizDialog(make_context(db, tmp_path), article, service=service)  # type: ignore[arg-type]
+
+    assert dialog._mode == MODE_RESULT
+    texts = [label.text() for label in dialog.findChildren(QLabel)]
+    assert "第 1 题 · 主动表示不会" in texts
+    assert "你的答案：不知道" in texts
+    assert "补充说明：这个单词不认识" in texts
     dialog.close()
     db.close()

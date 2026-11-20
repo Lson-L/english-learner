@@ -96,6 +96,11 @@ QLabel#cardTitle {
     font-size: 16px;
     font-weight: 600;
 }
+/* 阅读页文章标题：比卡片标题再小一档，把高度让给正文。 */
+QLabel#articleTitle {
+    font-size: 15px;
+    font-weight: 600;
+}
 QLabel#muted {
     color: #6B7280;
     font-size: 13px;

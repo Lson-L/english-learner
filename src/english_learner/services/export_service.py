@@ -163,6 +163,7 @@ CSV_COLUMNS: dict[str, tuple[str, ...]] = {
         "level",
         "questions",
         "answers",
+        "choice_notes",
         "explanations",
         "error_types",
         "short_answer_text",

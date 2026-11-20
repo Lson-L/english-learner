@@ -13,7 +13,11 @@ from PySide6.QtWidgets import QApplication, QFileDialog  # noqa: E402
 from english_learner.gui.pages.settings import SettingsPage  # noqa: E402
 from english_learner.models.entities import Word, now_iso, today_str  # noqa: E402
 from english_learner.services.app_context import AppContext  # noqa: E402
-from english_learner.services.config_store import AIConfig, ConfigStore  # noqa: E402
+from english_learner.services.config_store import (  # noqa: E402
+    AIConfig,
+    ConfigStore,
+    ReviewConfig,
+)
 from english_learner.services.export_service import ExportResult  # noqa: E402
 from english_learner.storage.db import Database  # noqa: E402
 
@@ -63,6 +67,35 @@ def test_export_buttons_enabled_with_context(tmp_path: Path) -> None:
 
     assert page._export_json_button.isEnabled() is True
     assert page._export_csv_button.isEnabled() is True
+    db.close()
+
+
+def test_review_preferences_persist(tmp_path: Path) -> None:
+    """设置页修改每日目标 / 拼写开关后立即写回 config.json。"""
+    get_app()
+    page, context, db = make_page(tmp_path)
+
+    assert context.store.load_review() == ReviewConfig()
+    page._daily_limit_spin.setValue(30)
+    page._spelling_check.setChecked(True)
+
+    assert context.store.load_review() == ReviewConfig(daily_limit=30, spelling_enabled=True)
+    assert "已保存" in page._review_status.text()
+    db.close()
+
+
+def test_settings_construction_does_not_write_config(tmp_path: Path) -> None:
+    """初始化 QSpinBox / QCheckBox 不应该触发一次保存。"""
+    get_app()
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(make_config())
+    before = store.path.read_text(encoding="utf-8")
+    db = Database(tmp_path / "data.db")
+    context = AppContext(make_config(), store, db)
+
+    SettingsPage(make_config(), store, context)
+
+    assert store.path.read_text(encoding="utf-8") == before
     db.close()
 
 

@@ -2,7 +2,7 @@
 
 为什么单独一个文件：
 - 编排规则是纯函数，不碰数据库、不碰 PySide6，方便单测；
-- 复习页只负责按计划展示卡片，不再让用户选择模式；
+- 复习页只负责按计划展示卡片；拼写输入是总开关，关闭时全部降级为看词回忆；
 - 规则集中在本地，可解释、可复现，不引入随机数。
 
 判定优先级（从上到下，命中即停）：
@@ -98,15 +98,25 @@ def plan_card(word: Word, *, last_rating: int = 0, last_verdict: str = "") -> st
 def build_session_plan(
     words: list[Word] | tuple[Word, ...],
     history: ReviewHistory | None = None,
+    *,
+    spelling_enabled: bool = True,
 ) -> list[ReviewCard]:
-    """把到期词列表编排成本轮卡片序列（已做穿插）。"""
+    """把到期词列表编排成本轮卡片序列（已做穿插）。
+
+    `spelling_enabled=False` 时全部排成看词回忆：用户当前只需要「看到词
+    能想起意思」，不要求产出拼写。关闭时也不再穿插，因为只有一种卡面。
+    """
     records = history or {}
     cards: list[ReviewCard] = []
     for word in words:
         rating, verdict = records.get(word.id or -1, (0, ""))
-        mode = plan_card(word, last_rating=rating, last_verdict=verdict)
+        mode = (
+            plan_card(word, last_rating=rating, last_verdict=verdict)
+            if spelling_enabled
+            else CARD_RECOGNITION
+        )
         cards.append(ReviewCard(word=word, mode=mode))
-    return _interleave(cards)
+    return _interleave(cards) if spelling_enabled else cards
 
 
 def _front(mode: str) -> str:

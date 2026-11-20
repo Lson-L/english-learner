@@ -11,6 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -26,7 +28,13 @@ from PySide6.QtWidgets import (
 from ...models.entities import today_str
 from ...services.ai_client import AIClient, ConnectionResult
 from ...services.app_context import AppContext
-from ...services.config_store import AIConfig, ConfigError, ConfigStore
+from ...services.config_store import (
+    MAX_DAILY_REVIEW_LIMIT,
+    MIN_DAILY_REVIEW_LIMIT,
+    AIConfig,
+    ConfigError,
+    ConfigStore,
+)
 from ...services.export_service import ExportResult
 from ...services.log_files import log_directory
 from ...services.metrics_service import MetricsSnapshot, PlanCompletion, RateMetric, RetryMetric
@@ -61,6 +69,7 @@ class SettingsPage(QWidget):
         self._store = store
         self._context = context
         self._ui = store.load_ui()
+        self._review = store.load_review()
         self._worker: TaskWorker | None = None
 
         # 卡片较多，小窗口下放进滚动区，避免内容被挤压或截断。
@@ -77,13 +86,15 @@ class SettingsPage(QWidget):
         layout.addWidget(
             PageHeader(
                 "设置",
-                "AI 服务配置、学习效果、调用记录与运行日志、阅读外观、数据导出与备份。",
+                "AI 服务配置、学习效果、调用记录与运行日志、阅读外观、复习节奏、数据导出与备份。",
             )
         )
         layout.addWidget(self._build_ai_card())
         layout.addWidget(self._build_metrics_card())
         layout.addWidget(self._build_ai_usage_card())
         layout.addWidget(self._build_appearance_card())
+        layout.addWidget(self._build_reading_card())
+        layout.addWidget(self._build_review_card())
         layout.addWidget(self._build_data_card())
         layout.addWidget(self._build_export_card())
         layout.addStretch(1)
@@ -347,6 +358,100 @@ class SettingsPage(QWidget):
         else:
             set_status(self._font_status, "已保存，立即生效。", "hint")
         self.english_font_changed.emit(key)
+
+    def _build_reading_card(self) -> Card:
+        """阅读节奏：打开文章后是否后台预查生词。"""
+        card = Card()
+        title = QLabel("阅读")
+        title.setObjectName("cardTitle")
+        card.body.addWidget(title)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 4, 0, 0)
+        form.setHorizontalSpacing(24)
+        form.setVerticalSpacing(10)
+
+        self._prefetch_check = QCheckBox("打开文章后自动预查生词")
+        self._prefetch_check.setChecked(self._ui.prefetch_enabled)
+        self._prefetch_check.toggled.connect(self._on_prefetch_toggled)
+        form.addRow(self._form_label("查词预取"), self._prefetch_check)
+        card.body.addLayout(form)
+
+        self._prefetch_status = QLabel("")
+        card.body.addWidget(self._prefetch_status)
+
+        note = QLabel(
+            "预取会在文章加载后，用一次批量请求查 10 个左右对当前等级偏难的词，"
+            "写入本地查词缓存；之后双击这些词直接出释义，不再等待。"
+            "只补缓存、不加入生词本，会额外消耗少量 token。"
+        )
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        card.body.addWidget(note)
+        return card
+
+    def _on_prefetch_toggled(self, checked: bool) -> None:
+        self._ui = replace(self._ui, prefetch_enabled=bool(checked))
+        try:
+            self._ui = self._store.save_ui(self._ui)
+        except (ConfigError, OSError) as exc:
+            set_status(self._prefetch_status, f"预取偏好保存失败：{exc}", "error")
+        else:
+            set_status(self._prefetch_status, "已保存，下一次打开文章时生效。", "hint")
+
+    def _build_review_card(self) -> Card:
+        """复习节奏：每日目标与拼写输入开关。"""
+        card = Card()
+        title = QLabel("复习")
+        title.setObjectName("cardTitle")
+        card.body.addWidget(title)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 4, 0, 0)
+        form.setHorizontalSpacing(24)
+        form.setVerticalSpacing(10)
+
+        self._daily_limit_spin = QSpinBox()
+        self._daily_limit_spin.setRange(MIN_DAILY_REVIEW_LIMIT, MAX_DAILY_REVIEW_LIMIT)
+        self._daily_limit_spin.setSuffix(" 个")
+        self._daily_limit_spin.setValue(self._review.daily_limit)
+        # 先设好值再连信号，避免构造期间误触发保存。
+        self._daily_limit_spin.valueChanged.connect(self._on_daily_limit_changed)
+        form.addRow(self._form_label("每日复习目标"), self._daily_limit_spin)
+
+        self._spelling_check = QCheckBox("复习时要求默写英文单词")
+        self._spelling_check.setChecked(self._review.spelling_enabled)
+        self._spelling_check.toggled.connect(self._on_spelling_toggled)
+        form.addRow(self._form_label("拼写输入"), self._spelling_check)
+        card.body.addLayout(form)
+
+        self._review_status = QLabel("")
+        card.body.addWidget(self._review_status)
+
+        note = QLabel(
+            "每日目标只决定当天先复习多少个；没做完的到期词会留在积压里，"
+            "可以随时加练，不会丢失进度。拼写默认关闭，先保证看到词能想起意思。"
+        )
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        card.body.addWidget(note)
+        return card
+
+    def _on_daily_limit_changed(self, value: int) -> None:
+        self._review = replace(self._review, daily_limit=int(value))
+        self._save_review_preference()
+
+    def _on_spelling_toggled(self, checked: bool) -> None:
+        self._review = replace(self._review, spelling_enabled=bool(checked))
+        self._save_review_preference()
+
+    def _save_review_preference(self) -> None:
+        try:
+            self._review = self._store.save_review(self._review)
+        except (ConfigError, OSError) as exc:
+            set_status(self._review_status, f"复习偏好保存失败：{exc}", "error")
+        else:
+            set_status(self._review_status, "已保存，下一次开始复习时生效。", "hint")
 
     def _build_data_card(self) -> Card:
         card = Card()

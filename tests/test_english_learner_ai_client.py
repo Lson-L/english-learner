@@ -197,6 +197,18 @@ def test_complete_uses_configured_temperature(monkeypatch: pytest.MonkeyPatch) -
     assert completions.last_kwargs["temperature"] == 0.7
 
 
+def test_per_call_timeout_overrides_client_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """后台预取用 35s 超时：请求层要真正带上，不能默默沿用业务默认的 300s。"""
+    completions = FakeCompletions(response=fake_response("hello"))
+    monkeypatch.setattr(ai_module, "OpenAI", FakeClient.factory(completions))
+
+    AIClient(make_config()).complete([{"role": "user", "content": "hi"}], timeout=30.0)
+
+    assert completions.last_kwargs["timeout"] == 30.0
+
+
 def test_truncated_output_has_a_clear_error(monkeypatch: pytest.MonkeyPatch) -> None:
     completions = FakeCompletions(response=fake_response('{"title": "cut', finish_reason="length"))
     monkeypatch.setattr(ai_module, "OpenAI", FakeClient.factory(completions))
@@ -235,6 +247,24 @@ def test_transient_errors_are_retried(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert text == "ok"
     assert completions.calls == 2
+
+
+def test_long_read_timeout_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """业务调用读超时 300s：超时说明服务端真慢，不再自动重试拖成十几分钟。"""
+    request = httpx2.Request("POST", "https://api.example.com/v1/chat/completions")
+    completions = SequenceCompletions(
+        openai.APITimeoutError(request=request),
+        fake_response("ok"),
+    )
+    monkeypatch.setattr(ai_module, "OpenAI", FakeClient.factory(completions))
+    monkeypatch.setattr(ai_module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(AIError, match="超时"):
+        AIClient(make_config(), timeout=ai_module.BUSINESS_TIMEOUT).complete(
+            [{"role": "user", "content": "hi"}]
+        )
+
+    assert completions.calls == 1
 
 
 def _capture_built_clients(monkeypatch: pytest.MonkeyPatch, completions) -> list[FakeClient]:

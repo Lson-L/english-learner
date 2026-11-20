@@ -292,6 +292,85 @@ def _is_known(word: str, wordlist: dict[str, str], known_words: set[str]) -> boo
     return any(candidate in wordlist or candidate in known_words for candidate in _candidates(word))
 
 
+# 词表里保留了 A1（比 A2 更基础）；A1 对任何目标等级都算已知。
+_BAND_RANK = {"A1": 0, "A2": 1, "B1": 2, "B2": 3, "C1": 4}
+# 词表里没有的词视为“超出常见范围”，预取优先级最高。
+_UNLISTED_RANK = 99
+_RAW_TOKEN_RE = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)*")
+
+
+def _at_sentence_start(text: str, start: int) -> bool:
+    """判断位置 start 是否处在句首（句号/问号/叹号/换行之后或全文开头）。"""
+    index = start - 1
+    while index >= 0 and text[index] in " \t\r\"'“‘([":
+        index -= 1
+    return index < 0 or text[index] in ".!?\n"
+
+
+def select_lookup_words(
+    text: str,
+    wordlist: dict[str, str],
+    *,
+    known_words: Iterable[str] = (),
+    level: str = "B1",
+    limit: int = 10,
+) -> tuple[str, ...]:
+    """挑出“对当前等级可能陌生、值得预查”的词（M6 预取查词用）。
+
+    口径与 `analyze()` 的“生词”不同：这里把“词表里存在、但词档高于用户等级”
+    也算候选（B1 用户读到 C1 词一样会卡住）；词表里没有的词优先级最高。
+    过滤规则：
+    - 用户已掌握的词（生词本 / 复习间隔达标）直接排除；
+    - 只出现在句中的大写词视为专有名词跳过，句首大写不算；
+    - 同一词形按出现次数排序，次数相同按首次出现位置。
+    纯函数，无网络、无数据库，便于单测。
+    """
+    if limit <= 0 or not (text or "").strip():
+        return ()
+
+    known = {str(item).strip().lower() for item in known_words if str(item).strip()}
+    level_rank = _BAND_RANK.get(level.strip().upper(), _BAND_RANK["B1"])
+    matches = list(_RAW_TOKEN_RE.finditer(text))
+    # 同一个词只要出现过小写形态，就说明它不是专有名词。
+    lowercase_forms = {
+        match.group(0).lower().replace("’", "'") for match in matches if match.group(0)[0].islower()
+    }
+
+    counts: dict[str, int] = {}
+    first_seen: dict[str, int] = {}
+    ranks: dict[str, int] = {}
+    for match in matches:
+        raw = match.group(0)
+        surface = raw.lower().replace("’", "'")
+        if len(surface) < 3:
+            continue
+        if raw[0].isupper() and surface not in lowercase_forms:
+            if not _at_sentence_start(text, match.start()):
+                continue  # 句中大写：专有名词
+        candidates = list(_candidates(_normalize_token(raw)))
+        if any(candidate in known for candidate in candidates):
+            continue
+        band = next((wordlist[c] for c in candidates if c in wordlist), "")
+        listed = bool(band) or any(candidate in wordlist for candidate in candidates)
+        if listed:
+            # 词表里且有词档：不超过用户等级就算已知；词档缺失时保守跳过；
+            # 出现未收录的更高词档（如 C2）时按“超出常见范围”处理。
+            if not band:
+                continue
+            band_rank = _BAND_RANK.get(band)
+            if band_rank is not None and band_rank <= level_rank:
+                continue
+        counts[surface] = counts.get(surface, 0) + 1
+        first_seen.setdefault(surface, match.start())
+        ranks[surface] = _BAND_RANK.get(band, _UNLISTED_RANK)
+
+    ordered = sorted(
+        counts,
+        key=lambda word: (-ranks[word], -counts[word], first_seen[word]),
+    )
+    return tuple(ordered[:limit])
+
+
 @dataclass(frozen=True)
 class ReadabilityMetrics:
     """一篇文章的可读性快照；字段全部由本地计算得出。"""
@@ -529,6 +608,7 @@ __all__ = [
     "analyze",
     "default_wordlist",
     "load_wordlist",
+    "select_lookup_words",
     "threshold_warnings",
     "tokenize",
 ]
