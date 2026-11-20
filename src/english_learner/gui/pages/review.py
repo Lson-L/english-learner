@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -106,21 +107,23 @@ class ReviewPage(QWidget):
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 28, 32, 24)
-        layout.setSpacing(14)
+        # 页头压缩：复习页的主体是中间卡片，标题区只留必要高度。
+        layout.setContentsMargins(32, 18, 32, 18)
+        layout.setSpacing(10)
 
         layout.addWidget(
             PageHeader(
-                "复习",
+                "",
                 "只复习今天到期的词；系统自动在看词回忆与拼写回忆之间穿插，"
                 "翻面后按 1~4 反馈记得牢不牢。全程离线可用。",
+                compact=True,
             )
         )
 
         status_row = QHBoxLayout()
         status_row.setSpacing(10)
         self._due_label = QLabel("")
-        self._due_label.setObjectName("muted")
+        self._due_label.setObjectName("mutedCompact")
         status_row.addWidget(self._due_label)
         status_row.addStretch(1)
         layout.addLayout(status_row)
@@ -176,9 +179,17 @@ class ReviewPage(QWidget):
 
     def _build_card_page(self) -> QWidget:
         page = QWidget()
-        box = QVBoxLayout(page)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(12)
+
+        # 正文放进滚动区：窗口偏矮（高 DPI / 小屏 / 选 Literata 这类行高更大的字体）时，
+        # 让内容滚动而不是被 QVBoxLayout 压扁。QLabel 开了 wordWrap 后 minimumSizeHint
+        # 只有一行高，压扁时文字会被裁掉，所以这里不能靠标签自适应，必须给它足够的布局高度。
+        content = QWidget()
+        box = QVBoxLayout(content)
         box.setContentsMargins(0, 0, 0, 0)
-        box.setSpacing(12)
+        box.setSpacing(10)
 
         progress_row = QHBoxLayout()
         progress_row.setSpacing(10)
@@ -294,10 +305,23 @@ class ReviewPage(QWidget):
 
         box.addStretch(1)
 
+        scroll = QScrollArea()
+        scroll.setObjectName("reviewScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        # 卡片本身是白底，滚动区与内容容器都别再画自己的底色。
+        scroll.viewport().setAutoFillBackground(False)
+        content.setAutoFillBackground(False)
+        self._scroll = scroll
+        outer.addWidget(scroll, 1)
+
+        # 底部操作区固定在卡片底边，不随正文滚动，窗口再矮也能点。
         self._reveal_button = QPushButton("显示答案（空格）")
         self._reveal_button.setObjectName("primaryButton")
         self._reveal_button.clicked.connect(self._reveal)
-        box.addWidget(self._reveal_button)
+        outer.addWidget(self._reveal_button)
 
         self._rating_bar = QWidget()
         rating_row = QHBoxLayout(self._rating_bar)
@@ -310,12 +334,12 @@ class ReviewPage(QWidget):
             button.clicked.connect(lambda _checked=False, r=rating: self._rate(r))
             self._rating_buttons[rating] = button
             rating_row.addWidget(button)
-        box.addWidget(self._rating_bar)
+        outer.addWidget(self._rating_bar)
 
         self._rating_hint = QLabel("按 1~4 或点击按钮：忘记 / 模糊 / 认识 / 太简单")
         self._rating_hint.setObjectName("muted")
         self._rating_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        box.addWidget(self._rating_hint)
+        outer.addWidget(self._rating_hint)
 
         self._answer_box.setVisible(False)
         self._rating_bar.setVisible(False)
@@ -459,6 +483,8 @@ class ReviewPage(QWidget):
             build_spelling_prompt(word) if card.mode in (CARD_SPELLING, CARD_DUAL) else None
         )
 
+        # 换卡时回到正文顶部，避免沿用上一张卡翻到底后的滚动位置。
+        self._scroll.verticalScrollBar().setValue(0)
         self._progress_label.setText(f"第 {self._index + 1} / {len(self._session)} 个")
         self._mode_label.setText(_MODE_TITLES.get(card.mode, ""))
         self._word_label.setText(word.display_form or word.lemma)
@@ -576,12 +602,22 @@ class ReviewPage(QWidget):
             self._reveal_spelling_answer()
             self._answer_box.setVisible(True)
             self._show_rating_bar()
+            self._scroll_to(self._word_label)
         elif self._current_mode == CARD_DUAL and self._prompt is not None:
             self._show_dual_spell_phase()
         else:
             # 双阶段题面异常时回退成普通看词翻面，不能让界面卡住。
             self._answer_box.setVisible(True)
             self._show_rating_bar()
+            self._scroll_to(self._answer_box)
+
+    def _scroll_to(self, widget: QWidget) -> None:
+        """把翻面后要看的控件滚进视野。
+
+        控件刚 setVisible(True) 时布局还没刷新，同步调 ensureWidgetVisible 会用旧几何，
+        所以延后到下一拍事件循环再滚。
+        """
+        QTimer.singleShot(0, lambda: self._scroll.ensureWidgetVisible(widget, 0, 8))
 
     def _show_rating_bar(self) -> None:
         self._reveal_button.setVisible(False)
@@ -687,6 +723,7 @@ class ReviewPage(QWidget):
         self._rating_bar.setVisible(True)
         self._rating_hint.setVisible(True)
         self._set_shortcuts_enabled(True)
+        self._scroll_to(self._word_label)
 
     def _show_spelling_feedback(self, result: RecallResult) -> None:
         expected = self._answer_display(self._current) if self._current else result.expected

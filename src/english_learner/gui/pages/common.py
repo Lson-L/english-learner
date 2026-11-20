@@ -31,21 +31,34 @@ class Card(QFrame):
 
 
 class PageHeader(QWidget):
-    """页面标题区：大标题 + 一句话说明。"""
+    """页面标题区：大标题 + 一句话说明。
 
-    def __init__(self, title: str, subtitle: str = "", parent: QWidget | None = None) -> None:
+    compact=True 用更小的标题/说明字号和更紧的行距，适合复习页这种
+    要把竖向空间尽量让给正文卡片的页面。
+    """
+
+    def __init__(
+        self,
+        title: str,
+        subtitle: str = "",
+        parent: QWidget | None = None,
+        *,
+        compact: bool = False,
+    ) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setSpacing(2 if compact else 6)
 
-        title_label = QLabel(title)
-        title_label.setObjectName("pageTitle")
-        layout.addWidget(title_label)
+        # 标题可以留空：调用方只想要说明文字时不用自己拼 QLabel。
+        if title:
+            title_label = QLabel(title)
+            title_label.setObjectName("pageTitleCompact" if compact else "pageTitle")
+            layout.addWidget(title_label)
 
         if subtitle:
             subtitle_label = QLabel(subtitle)
-            subtitle_label.setObjectName("pageSubtitle")
+            subtitle_label.setObjectName("pageSubtitleCompact" if compact else "pageSubtitle")
             subtitle_label.setWordWrap(True)
             layout.addWidget(subtitle_label)
 

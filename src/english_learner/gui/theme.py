@@ -78,6 +78,20 @@ QLabel#pageSubtitle {
     color: #6B7280;
     font-size: 13px;
 }
+/* 紧凑页头（复习页）：标题/说明各降一档，把高度让给正文卡片。 */
+QLabel#pageTitleCompact {
+    font-size: 20px;
+    font-weight: 600;
+    color: #111827;
+}
+QLabel#pageSubtitleCompact {
+    color: #6B7280;
+    font-size: 12px;
+}
+QLabel#mutedCompact {
+    color: #6B7280;
+    font-size: 12px;
+}
 QLabel#cardTitle {
     font-size: 16px;
     font-weight: 600;
@@ -378,6 +392,14 @@ QFrame#reviewCard {
     background: #FFFFFF;
     border: 1px solid #E4E8F0;
     border-radius: 12px;
+}
+/* 复习卡片正文的滚动区：透出卡片白底，只留滚动条。 */
+QScrollArea#reviewScroll {
+    background: transparent;
+    border: none;
+}
+QScrollArea#reviewScroll > QWidget > QWidget {
+    background: transparent;
 }
 QLabel#reviewIdleTitle {
     font-size: 22px;
