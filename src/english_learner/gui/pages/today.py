@@ -18,14 +18,16 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
-from ...models.entities import CEFR_LEVELS, today_str
+from ...models.entities import CEFR_LEVELS, Profile, today_str
 from ...services.app_context import AppContext
+from ...services.level_progress import LevelProgress
 from .common import Card, PageHeader, StatCard
 
 
@@ -90,6 +92,25 @@ class TodayPage(QWidget):
         self._level_label = QLabel("尚未测评")
         self._level_label.setObjectName("cardTitle")
         info.addWidget(self._level_label)
+
+        # M6.4：档内进度条；没有检测数据时隐藏，不显示 0% 误导成“毫无进展”。
+        self._level_progress = QProgressBar()
+        self._level_progress.setObjectName("levelProgress")
+        self._level_progress.setRange(0, 100)
+        self._level_progress.setTextVisible(False)
+        self._level_progress.setFixedHeight(8)
+        self._level_progress.setVisible(False)
+        info.addWidget(self._level_progress)
+
+        self._level_meta = QLabel("")
+        self._level_meta.setObjectName("muted")
+        self._level_meta.setWordWrap(True)
+        info.addWidget(self._level_meta)
+
+        self._level_evidence = QLabel("")
+        self._level_evidence.setObjectName("muted")
+        self._level_evidence.setWordWrap(True)
+        info.addWidget(self._level_evidence)
 
         self._profile_desc = QLabel(
             "完成一次 5 分钟的摸底测评，AI 会给出 CEFR 等级、词汇量估算和薄弱点。"
@@ -214,6 +235,9 @@ class TodayPage(QWidget):
         profile = self._context.profile()
         if profile is None:
             self._level_label.setText("尚未测评")
+            self._level_progress.setVisible(False)
+            self._level_meta.setText("")
+            self._level_evidence.setText("")
             self._profile_desc.setText(
                 "完成一次 5 分钟的摸底测评，AI 会给出 CEFR 等级、词汇量估算和薄弱点。"
             )
@@ -221,15 +245,38 @@ class TodayPage(QWidget):
             self._assessment_button.setText("开始测评")
             return
 
-        confidence = ""
-        if profile.level_confidence:
-            confidence = f" · 置信度 {profile.level_confidence:.2f}"
+        progress = self._context.level_progress()
+        self._level_label.setText(self._headline(profile, progress))
+
+        percent = progress.progress_percent if progress is not None else None
+        self._level_progress.setVisible(percent is not None)
+        if percent is not None:
+            self._level_progress.setValue(percent)
+            if progress.progress_source == "posterior":
+                tip = (
+                    f"按最近一次正式检测的四档后验计算：向 {progress.next_level} 的把握 {percent}%"
+                )
+            else:
+                tip = f"按已积累的连续升级证据估算：向 {progress.next_level} 的进度 {percent}%"
+            self._level_progress.setToolTip(tip)
+
+        meta: list[str] = []
+        confidence = progress.confidence if progress is not None else profile.level_confidence
+        if confidence:
+            meta.append(f"置信度 {confidence:.2f}")
         if profile.vocab_estimate:
-            self._level_label.setText(
-                f"{profile.cefr_level} · 估算词汇量 {profile.vocab_estimate:,}{confidence}"
+            meta.append(f"估算词汇量 {profile.vocab_estimate:,}")
+        if progress is not None and progress.pending_count and progress.pending_level:
+            meta.append(
+                f"已积累 {progress.pending_count}/2 次升级到 {progress.pending_level} 的证据"
             )
-        else:
-            self._level_label.setText(f"{profile.cefr_level}{confidence}")
+        if progress is not None and progress.practice_only:
+            meta.append("今天的检测为练习，未计入进度")
+        self._level_meta.setText(" · ".join(meta))
+
+        evidence = self._evidence_lines(progress)
+        self._level_evidence.setText(" · ".join(evidence))
+
         details: list[str] = []
         if profile.strengths:
             details.append("优势：" + "、".join(profile.strengths))
@@ -242,6 +289,44 @@ class TodayPage(QWidget):
         self._profile_desc.setText("；".join(details) or "已完成测评。")
         self._trend_label.setText(self._trend_text())
         self._assessment_button.setText("重新测评")
+
+    @staticmethod
+    def _headline(profile: Profile, progress: LevelProgress | None) -> str:
+        """等级区首行：有后验进度时显示“B1 → B2 · 把握 38%”。"""
+        current = profile.cefr_level
+        if progress is None:
+            return current
+        if not progress.next_level:
+            return f"{current} · 已到最高档"
+        if progress.progress_percent is None:
+            return current
+        return f"{current} → {progress.next_level} · 把握 {progress.progress_percent}%"
+
+    @staticmethod
+    def _evidence_lines(progress: LevelProgress | None) -> list[str]:
+        """最多 3 条“看得见”的证据；没有数据时给一句引导。"""
+        if progress is None:
+            return []
+        lines: list[str] = []
+        quiz = progress.quiz
+        if quiz.has_data:
+            line = f"最近检测 答对 {quiz.correct}/{quiz.answered}"
+            if quiz.high_correct:
+                line += f"（高两档 {quiz.high_correct} 道）"
+            lines.append(line)
+        article = progress.article
+        if article is not None:
+            arrow = {"up": "↑", "down": "↓", "flat": "→"}.get(article.direction, "→")
+            line = f"近 7 天生词比例 {article.recent_ratio * 100:.0f}%"
+            if article.delta is not None:
+                line += f"（{arrow}{abs(article.delta) * 100:.0f}%）"
+            lines.append(line)
+        band = progress.band
+        if band is not None:
+            lines.append(f"{band.band} 词档认识率 {band.accuracy * 100:.0f}%")
+        if not lines:
+            return ["完成首次阅读检测后显示进度"]
+        return lines[:3]
 
     def _trend_text(self) -> str:
         """近 4 周等级记录，先用文字表达，不做复杂图表。"""

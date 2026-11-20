@@ -26,7 +26,7 @@ uv run ruff format src/english_learner tests
 
 ## 会话开工协议
 
-当用户说「完成本次开工计划」「开工」「继续 M5」或类似短句时，**不要要求用户再贴长指令**：
+当用户说「完成本次开工计划」「开工」「继续 M6」或类似短句时，**不要要求用户再贴长指令**：
 
 1. 读 `docs/english_learner/PROGRESS.md` 看板与 `docs/english_learner/AI_TASKS.md`；
 2. 取 AI_TASKS 中第一个未完成里程碑，按任务卡的改动点与验收执行；
@@ -41,8 +41,9 @@ uv run ruff format src/english_learner tests
 - `docs/english_learner/ARCHITECTURE.md`：**按需**。文件地图 + 关键实现与踩坑说明；
   改 AI 客户端、存储、阅读检测、导出等模块前定向读对应小节；
 - `docs/english_learner/TECH_DEBT.md`：**按需**。已知问题与技术债完整表格；
-- `docs/english_learner/AI_TASKS.md`：**按需**。AI 学习闭环排期（M5.0~M5.6 任务卡、
-  依赖、验收、schema v8 清单），开发 / 排期 AI 功能前读，**执行以本文为准**；
+- `docs/english_learner/AI_TASKS.md`：**按需**。AI 学习闭环与等级体验排期
+  （M5.0~M5.6、M6.4~M6.7 任务卡、依赖、验收、schema v8 清单），开发 / 排期前读，
+  **执行以本文为准**；
 - `docs/english_learner/HISTORY.md`：**默认不读**。已完成里程碑的交付记录、
   旧任务书与验证记录，只在排查历史决策时检索；
 - `docs/english_learner/PRODUCT.md`：产品定位、MVP 范围、已确认决策。
@@ -101,5 +102,13 @@ uv run ruff format src/english_learner tests
   追加 `E. 不知道`（`UNKNOWN_ANSWER=-2`，-1 仍为未作答），选中后才显示原因输入框；
   -2 按答错计分，说明随第一轮答案落库（`reading_quizzes.choice_notes_json`，
   v8 内幂等补列），并进入讲评 / 盲评 prompt 作为错因线索。
-- **剩余为可选 M4**（深色模式、安装器 / 自动更新）与真实环境调优。当前看板见
+- **M6.4（2026-11-20）**：档内进度仪表盘。新增纯函数
+  `services/level_progress.py`，今日页显示「B1 → B2 · 把握 38%」+ 进度条 +
+  置信度 / pending + 最多 3 条证据（最近检测、生词比例趋势、词档认识率）；
+  检测结果页补难度分布与高两档题答对数。不新增 AI 调用、不改等级与 SRS。
+- **M6.5（2026-11-20）**：档内难度浮动。`difficulty_hint()` 推导 low / mid / high
+  并注入文章 prompt（空值 / mid 与旧版逐字节一致），hint 与理由写入
+  `articles.metrics_json`；可读性重试会撤掉 high，用户阅读反馈优先于 hint。
+- **剩余为 M6.6 / M6.7**（强证据升级与边界文案）、可选 M4（深色模式、
+  安装器 / 自动更新）与真实环境调优。当前看板见
   `docs/english_learner/PROGRESS.md`，已知技术债见 `TECH_DEBT.md`。

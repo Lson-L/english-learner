@@ -1081,6 +1081,21 @@ class QuizRepo(_BaseRepo):
         )
         return [(ReadingQuiz.from_row(row), str(row["article_title"] or "")) for row in rows]
 
+    def list_recent_formal_completed(self, limit: int = 8) -> list[ReadingQuiz]:
+        """最近完成的**正式**检测（排除练习模式），按完成时间倒序。
+
+        今日页进度与档内难度提示需要“最近一次正式检测”；如果先取最近 N 条
+        再在内存里过滤，连续多天“正式检测 → 换一篇 → 练习检测”时可能被
+        练习行挤满窗口，看不到真实后验。
+        """
+        rows = self._db.query_all(
+            "SELECT * FROM reading_quizzes "
+            "WHERE completed_at IS NOT NULL AND practice_mode = 0 "
+            "ORDER BY completed_at DESC, id DESC LIMIT ?",
+            (int(limit),),
+        )
+        return [ReadingQuiz.from_row(row) for row in rows]
+
     def list_completed_between(self, start_day: str, end_day: str) -> list[ReadingQuiz]:
         """按文章日期过滤的已完成检测，按日期升序（每周复盘 / 首页趋势）。"""
         rows = self._db.query_all(

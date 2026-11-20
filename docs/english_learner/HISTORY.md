@@ -594,6 +594,58 @@ M6.3（加入生词本后后台补全简释）完成（2026-11-20）：
 - **边界**：不改 schema、不改 SRS / 等级 / 预取；补全是增强信息，
   失败保留原简释；只对用户主动加入生词本的词触发，纯缓存词不消耗 token。
 
+M6.4（档内进度仪表盘）完成（2026-11-20）：
+
+- **目标**：等级维持四档 CEFR，但用户每天能看到“向下一档走了多远”的可见证据，
+  解决“等级不动 = 没进步”的停滞感；0 新增 AI 调用、不升 schema、不改等级与 SRS；
+- **纯函数**：新增 `services/level_progress.py`。`build_level_progress()` 从
+  profile / 最近检测 / 词档复习 / 最近文章组装 `LevelProgress`；
+  `summarize_quiz()` 统计答对数与“高两档题”答对数（选择题按答案下标、产出题按
+  0/1 分，AI 漏评分的产出题不算对也不进分母）；`progress_source` 区分
+  posterior / pending / 空，供界面切换说明；
+- **口径**：进度 = `P(next) / (P(current) + P(next))`，取最近一次**正式**检测的
+  posterior；旧数据没有 posterior 时，只有 pending 指向下一档才回退
+  `pending_count / 2`；C1 无下一档。生词比例取近 7 天 vs 更早 3 天均值，
+  ±2 个百分点为持平，`word_total < 40` 或词表 < 500 的指标视为不可信；
+  词档认识率要求当前档 ≥4 次复习；
+- **仓库**：`QuizRepo.list_recent_formal_completed()` 在 SQL 层过滤
+  `practice_mode = 0`，避免连续“正式 → 换一篇 → 练习”后练习行挤满最近窗口；
+  今日页与难度提示都走这个方法；
+- **界面**：今日页等级区改为「B1 → B2 · 把握 38%」+ 细进度条
+  （`QProgressBar#levelProgress`，样式进全局 QSS，不单独设 font-family）+
+  元信息（置信度 / 词汇量 / pending / 练习提示）+ 最多 3 条证据
+  （最近检测正确数、近 7 天生词比例趋势、当前词档认识率）；无检测时不显示 0%，
+  改为“完成首次阅读检测后显示进度”；C1 显示“已到最高档”；
+  检测结果页补充本卷难度分布与「答对高两档题 N 道」；
+- **测试**：新增 `tests/test_english_learner_level_progress.py` 覆盖进度公式、
+  pending 回退、练习模式、C1、窗口边界、趋势方向、不可信指标、词档阈值、
+  题目摘要与未评分题；GUI 冒烟补无检测时进度条隐藏与 AppContext 接线。
+  全量 580 passed，`ruff check` 与 `ruff format --check` 通过。
+
+M6.5（档内难度浮动）完成（2026-11-20）：
+
+- **目标**：文章生成从“只有 CEFR 标签”升级为“档内位置”，让低 B1 / 高 B1
+  拿到不同难度的文章；不传该参数时 prompt 必须与旧版逐字节一致；
+- **推导**：`difficulty_hint()` 输出 low / mid / high + 中文理由。
+  `low` 优先于 `high`：最近两篇有效文章生词比例都超阈值，或近 7 天正式检测
+  发生过降级；`high`：上一档后验 ≥0.45 或 pending 指向下一档，且最近一篇
+  生词比例未超阈值；C1 固定 mid；无数据 mid；
+- **prompt**：`build_article_messages()` 新增 `within_level`，空串 / mid 时
+  不改变任何文本；low 要求高频词、短句、避免抽象概念；high 引用**高一档**
+  （B1 → B2，A2 → B1），要求句长靠近本档上限、语法与抽象度不得越过上一档；
+  C1 只要求句式与论证更复杂，不引入超纲词；`PROMPT_VERSION` 升到 `m6-5`；
+- **服务**：`ArticleService` 新增 `hint_provider` 与 `within_level/hint_reason`，
+  `load_hint()` 对 provider 异常静默退化；hint 与理由写入
+  `articles.metrics_json`（readability 关闭时也写，`ReadabilityMetrics.from_dict`
+  会忽略附加键）；`_thresholds_for()` 按 low 收紧 ×0.8/×0.9、high 放宽
+  ×1.2/×1.1 派生本次阈值，不改 `config.json` 默认值；
+- **重试与反馈**：可读性重试会清空 `effective_within`，避免“偏难”与“换更简单
+  的词重写”同时出现，metrics 记录实际发送值；阅读反馈中“太难 / 太简单”
+  优先于相反 hint；
+- **测试**：新增 prompt 逐字节、low/high 规则、hint 落库、readability 关闭仍落库、
+  provider 异常、反馈优先、重试撤掉 high、窗口边界等用例。
+  全量 580 passed，`ruff check` 与 `ruff format --check` 通过。
+
 ## 5. 验证记录
 
 ### 5.1 M0（2026-11-18）

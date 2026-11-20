@@ -17,6 +17,7 @@ from english_learner.services.article_service import (
 )
 from english_learner.services.dictionary_service import DictionaryService
 from english_learner.services.learner_memory import LearnerMemory
+from english_learner.services.level_progress import DifficultyHint
 from english_learner.services.prompts import build_article_messages
 from english_learner.services.readability import ReadabilityThresholds
 from english_learner.storage.db import Database
@@ -578,3 +579,121 @@ def test_readability_retry_ai_error_keeps_first_article(db: Database, profile: P
 
     assert article.title == "Hard Article"
     assert article.metrics is not None
+
+
+# ------------------------------------------------------- M6.5 档内难度提示
+def test_article_prompt_within_level_empty_or_mid_is_unchanged() -> None:
+    base = build_article_messages("B1", ["habits"], "psychology")
+
+    assert build_article_messages("B1", ["habits"], "psychology", within_level="") == base
+    assert build_article_messages("B1", ["habits"], "psychology", within_level="mid") == base
+
+
+def test_article_prompt_within_level_low_and_high() -> None:
+    low = build_article_messages("B1", ["habits"], "psychology", within_level="low")
+    high = build_article_messages("B1", ["habits"], "psychology", within_level="high")
+
+    assert "在 CEFR B1 内偏易" in low[-1]["content"]
+    assert "平均句长靠近本档下限" in low[-1]["content"]
+    assert "在 CEFR B1 内偏难" in high[-1]["content"]
+    assert "可含 1~2 个 B2 词" in high[-1]["content"]
+    assert "不得越过 B2" in high[-1]["content"]
+
+
+def test_hint_provider_changes_prompt_and_metrics(db: Database, profile: Profile) -> None:
+    fake = FakeCompleter(payload_text())
+    service = ArticleService(
+        fake,
+        db.articles,
+        db.words,
+        hint_provider=lambda: DifficultyHint("high", "向 B2 的把握约 50%"),
+    )
+
+    article = service.get_or_create_today(profile, today="2026-11-20")
+
+    prompt = fake.messages[0][1]["content"]
+    assert "在 CEFR B1 内偏难" in prompt
+    assert article.metrics is not None
+    assert article.metrics["within_level"] == "high"
+    assert article.metrics["hint_reason"] == "向 B2 的把握约 50%"
+    stored = db.articles.get_by_date("2026-11-20")
+    assert stored is not None
+    assert stored.metrics == article.metrics
+
+
+def test_hint_is_stored_even_when_readability_is_disabled(db: Database, profile: Profile) -> None:
+    fake = FakeCompleter(payload_text())
+    service = ArticleService(
+        fake,
+        db.articles,
+        db.words,
+        hint_provider=lambda: DifficultyHint("low", "最近两篇生词比例偏高"),
+        readability=ReadabilityThresholds(enabled=False),
+    )
+
+    article = service.get_or_create_today(profile, today="2026-11-20")
+
+    assert article.metrics == {
+        "within_level": "low",
+        "hint_reason": "最近两篇生词比例偏高",
+    }
+
+
+def test_hint_provider_failure_keeps_default_prompt(db: Database, profile: Profile) -> None:
+    def broken() -> DifficultyHint:
+        raise RuntimeError("数据库读失败")
+
+    fake = FakeCompleter(payload_text())
+    service = ArticleService(fake, db.articles, db.words, hint_provider=broken)
+
+    article = service.get_or_create_today(profile, today="2026-11-20")
+
+    prompt = fake.messages[0][1]["content"]
+    assert "在 CEFR B1 内偏难" not in prompt
+    assert "在 CEFR B1 内偏易" not in prompt
+    assert article.metrics is not None
+    assert "within_level" not in article.metrics
+
+
+def test_readability_retry_drops_high_hint_for_second_attempt(
+    db: Database, profile: Profile
+) -> None:
+    """重试指令是“更简单”时，不能同时保留“档内偏难”，否则两条指令互相矛盾。"""
+    fake = FakeCompleter(hard_payload_text(), payload_text())
+    service = ArticleService(
+        fake,
+        db.articles,
+        db.words,
+        hint_provider=lambda: DifficultyHint("high", "向 B2 的把握约 60%"),
+        readability=ReadabilityThresholds(retry_enabled=True),
+        wordlist_provider=lambda: READABILITY_WORDLIST,
+    )
+
+    article = service.get_or_create_today(profile, today="2026-11-20")
+
+    assert "在 CEFR B1 内偏难" in fake.messages[0][1]["content"]
+    second = fake.messages[1][1]["content"]
+    assert "在 CEFR B1 内偏难" not in second
+    assert "请换更简单的词和更短的句子重写" in second
+    assert article.metrics is not None
+    assert "within_level" not in article.metrics
+
+
+def test_mid_hint_is_stored_without_changing_prompt(db: Database, profile: Profile) -> None:
+    fake = FakeCompleter(payload_text())
+    service = ArticleService(
+        fake,
+        db.articles,
+        db.words,
+        hint_provider=lambda: DifficultyHint("mid", "暂无足够信号，保持档内中位"),
+        readability=ReadabilityThresholds(enabled=False),
+    )
+
+    article = service.get_or_create_today(profile, today="2026-11-20")
+
+    assert "内偏难" not in fake.messages[0][1]["content"]
+    assert "内偏易" not in fake.messages[0][1]["content"]
+    assert article.metrics == {
+        "within_level": "mid",
+        "hint_reason": "暂无足够信号，保持档内中位",
+    }

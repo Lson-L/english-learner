@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from ..models.entities import CEFR_LEVELS, Article, QuizQuestion, ReadingQuiz
 from ..services.app_context import AppContext
+from ..services.level_progress import summarize_quiz
 from ..services.reading_quiz_service import (
     UNKNOWN_ANSWER,
     UNKNOWN_LABEL,
@@ -703,6 +704,24 @@ class ReadingQuizDialog(QDialog):
         meta.setObjectName("muted")
         meta.setWordWrap(True)
         card.body.addWidget(meta)
+
+        # M6.4：把“这张卷子考了什么难度”说清楚，避免只看正确率。
+        summary = summarize_quiz(quiz, quiz.previous_level or quiz.level)
+        if summary.difficulty_counts:
+            distribution = "本卷难度：" + " · ".join(
+                f"{level}×{count}" for level, count in summary.difficulty_counts
+            )
+            distribution_label = QLabel(distribution)
+            distribution_label.setObjectName("muted")
+            distribution_label.setWordWrap(True)
+            card.body.addWidget(distribution_label)
+        if summary.high_correct:
+            high_label = QLabel(
+                f"本次答对 {summary.high_correct} 道高两档题（比当前等级难两档及以上）。"
+            )
+            high_label.setObjectName("muted")
+            high_label.setWordWrap(True)
+            card.body.addWidget(high_label)
 
         if quiz.self_report:
             report = QLabel(

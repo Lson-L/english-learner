@@ -23,6 +23,7 @@ from .ai_client import AIError
 from .ai_protocol import TextCompleter
 from .json_utils import JsonParseError, as_str_list, as_text, parse_json_object
 from .learner_memory import LearnerMemory, load_memory
+from .level_progress import DifficultyHint
 from .prompts import (
     MEMORY_TASK_ARTICLE,
     PROMPT_VERSION,
@@ -87,6 +88,18 @@ ANGLE_HINTS: tuple[str, ...] = (
 AVOID_TITLE_LIMIT = 6
 
 
+def load_hint(provider: Callable[[], DifficultyHint | None] | None) -> DifficultyHint:
+    """读取档内难度提示；失败或为空时退化为空提示（prompt 与旧版一致）。"""
+    if provider is None:
+        return DifficultyHint()
+    try:
+        hint = provider()
+    except Exception:  # noqa: BLE001 - 提示是增强信息，失败不能拖垮生成
+        logger.warning("读取档内难度提示失败，按默认难度生成", exc_info=True)
+        return DifficultyHint()
+    return hint if isinstance(hint, DifficultyHint) else DifficultyHint()
+
+
 class InvalidArticleError(ValueError):
     """AI 返回的文章不满足本地校验规则。"""
 
@@ -119,6 +132,9 @@ class ArticleDraft:
     glossary: tuple[GlossaryEntry, ...] = ()
     # M5.3 本地可读性指标；只在服务层计算，解析器本身不碰词表。
     metrics: ReadabilityMetrics | None = None
+    # M6.5 档内位置：low / mid / high 及推导理由，随指标一起入库。
+    within_level: str = ""
+    hint_reason: str = ""
 
     @property
     def content(self) -> str:
@@ -292,6 +308,7 @@ class ArticleService:
         word_repo: WordRepo | None = None,
         *,
         memory_provider: Callable[[], LearnerMemory] | None = None,
+        hint_provider: Callable[[], DifficultyHint | None] | None = None,
         readability: ReadabilityThresholds | None = None,
         wordlist_provider: Callable[[], dict[str, str]] = default_wordlist,
     ) -> None:
@@ -299,6 +316,8 @@ class ArticleService:
         self._articles = article_repo
         self._words = word_repo
         self._memory_provider = memory_provider
+        # M6.5：档内难度提示由 AppContext 注入，文章服务不直接依赖检测 / 复习仓库。
+        self._hint_provider = hint_provider
         # 可读性指标是“记录 / 告警 / 展示”用的增强信息，阈值可配、默认不强制重试。
         self._readability = readability or ReadabilityThresholds()
         self._wordlist_provider = wordlist_provider
@@ -314,6 +333,7 @@ class ArticleService:
         target_words = self._pick_target_words(day)
         topic = self._pick_topic(day)
         memory = load_memory(self._memory_provider)
+        hint = load_hint(self._hint_provider)
         draft = self.generate_article(
             profile.cefr_level,
             target_words,
@@ -323,6 +343,8 @@ class ArticleService:
             learner_focus="" if not memory.is_empty else _focus_from_profile(profile),
             learner_memory=build_learner_memory_block(memory, MEMORY_TASK_ARTICLE),
             learner_plan=_plan_text(memory),
+            within_level=hint.within_level,
+            hint_reason=hint.reason,
         )
         return self._store(day, draft)
 
@@ -337,6 +359,8 @@ class ArticleService:
         learner_focus: str = "",
         learner_memory: str = "",
         learner_plan: str = "",
+        within_level: str = "",
+        hint_reason: str = "",
         angle: str | None = None,
         avoid_titles: list[str] | tuple[str, ...] = (),
         user_request: str = "",
@@ -357,6 +381,12 @@ class ArticleService:
         auto_angle = angle is None
         chosen_angle = self.pick_angle() if auto_angle else (angle or "").strip()
         last_reason = ""
+        # 档内提示按“实际发出去的 prompt”记录：可读性重试要求更简单时，
+        # 第二次必须撤掉 high，否则两条指令互相矛盾。
+        normalized_within = within_level.strip().lower()
+        # mid 不改变 prompt（builder 只认 low/high），但仍作为“档内中位”落库。
+        effective_within = normalized_within if normalized_within in {"low", "mid", "high"} else ""
+        effective_reason = hint_reason if effective_within else ""
         # 可读性重试时先留好第一篇合法文章：第二次生成失败（校验不过 / 网络错误）
         # 不能让用户当天没有文章。
         fallback: ArticleDraft | None = None
@@ -368,6 +398,7 @@ class ArticleService:
                 level.strip().upper(),
                 list(target_words),
                 topic,
+                within_level=effective_within,
                 soft_targets=not strict_targets,
                 learner_feedback=learner_feedback,
                 learner_focus=learner_focus,
@@ -408,6 +439,11 @@ class ArticleService:
                 raise
             try:
                 draft = parse_article_draft(text, level, require_targets=strict_targets)
+                draft = replace(
+                    draft,
+                    within_level=effective_within,
+                    hint_reason=effective_reason,
+                )
             except InvalidArticleError as exc:
                 last_reason = str(exc)
                 logger.warning("文章未通过校验（第 %s 次）：%s", attempt + 1, exc)
@@ -428,7 +464,7 @@ class ArticleService:
             # 默认只记录不重试；开启 retry_enabled 后走现有 repair_note 通道
             # （复用本循环的第二次尝试，不新增调用类型）。
             if attempt == 0 and metrics is not None and self._readability.retry_enabled:
-                warnings = threshold_warnings(metrics, self._readability)
+                warnings = threshold_warnings(metrics, self._thresholds_for(effective_within))
                 if warnings:
                     fallback = replace(draft, metrics=metrics)
                     last_reason = (
@@ -437,6 +473,9 @@ class ArticleService:
                         + "），请换更简单的词和更短的句子重写"
                     )
                     logger.info("文章可读性超出阈值（第 1 次）：%s", last_reason)
+                    # 重试指令本身就是“更简单”，撤掉 high；metrics 也随之记录为空。
+                    effective_within = ""
+                    effective_reason = ""
                     continue
             return replace(draft, metrics=metrics)
         if fallback is not None:
@@ -486,6 +525,7 @@ class ArticleService:
             angle = None
 
         memory = load_memory(self._memory_provider)
+        hint = load_hint(self._hint_provider)
         draft = self.generate_article(
             profile.cefr_level,
             targets,
@@ -494,6 +534,8 @@ class ArticleService:
             learner_focus="" if not memory.is_empty else _focus_from_profile(profile),
             learner_memory=build_learner_memory_block(memory, MEMORY_TASK_ARTICLE),
             learner_plan=_plan_text(memory),
+            within_level=hint.within_level,
+            hint_reason=hint.reason,
             angle=angle,
             # 用户写明了要求时，不再把当前标题列进“禁止重复”：
             # 他可能就是要一篇同主题/同风格的文章，不能让两条指令互相打架。
@@ -518,7 +560,7 @@ class ArticleService:
             topic=draft.topic,
             word_count=draft.word_count,
             target_words=draft.target_words,
-            metrics=draft.metrics.to_dict() if draft.metrics is not None else None,
+            metrics=self._metrics_payload(draft),
             created_at=now_iso(),
         )
         stored = self._articles.replace_by_date(article)
@@ -527,6 +569,43 @@ class ArticleService:
         return stored
 
     # -------------------------------------------------------------- 内部
+    def _thresholds_for(self, within_level: str) -> ReadabilityThresholds:
+        """按档内位置微调可读性阈值（M6.5）。
+
+        只影响本次“是否触发重试”的判断，不改 `config.json` 的默认值：
+        `low` 收紧约 20%/10%，`high` 放宽约 20%/10%。
+        """
+        base = self._readability
+        if within_level == "low":
+            return replace(
+                base,
+                max_unknown_ratio=base.max_unknown_ratio * 0.8,
+                max_avg_sentence_len=max(5.0, base.max_avg_sentence_len * 0.9),
+            )
+        if within_level == "high":
+            return replace(
+                base,
+                max_unknown_ratio=min(1.0, base.max_unknown_ratio * 1.2),
+                max_avg_sentence_len=base.max_avg_sentence_len * 1.1,
+            )
+        return base
+
+    @staticmethod
+    def _metrics_payload(draft: ArticleDraft) -> dict[str, object] | None:
+        """入库的 metrics JSON：可读性指标 + 档内位置（M6.5）。
+
+        档内位置是附加键，`ReadabilityMetrics.from_dict()` 会忽略不认识的字键，
+        旧读者 / 旧导出不受影响。
+        """
+        payload: dict[str, object] | None = (
+            draft.metrics.to_dict() if draft.metrics is not None else None
+        )
+        if draft.within_level:
+            payload = dict(payload or {})
+            payload["within_level"] = draft.within_level
+            payload["hint_reason"] = draft.hint_reason
+        return payload
+
     def _analyze(self, draft: ArticleDraft) -> ReadabilityMetrics | None:
         """计算本地可读性指标；关闭或计算失败时返回 None，不影响文章入库。"""
         if not self._readability.enabled:
@@ -556,7 +635,7 @@ class ArticleService:
             topic=draft.topic,
             word_count=draft.word_count,
             target_words=draft.target_words,
-            metrics=draft.metrics.to_dict() if draft.metrics is not None else None,
+            metrics=self._metrics_payload(draft),
             created_at=now_iso(),
         )
         try:

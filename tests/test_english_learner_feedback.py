@@ -14,6 +14,7 @@ from english_learner.services.level_feedback_service import (
     LevelFeedbackService,
     clamp_reassessed_level,
 )
+from english_learner.services.level_progress import DifficultyHint
 from english_learner.services.readability import ReadabilityThresholds
 from english_learner.storage.db import Database
 
@@ -342,3 +343,39 @@ def test_rewrite_path_records_metrics_by_default(
 
     assert outcome.article.metrics is not None
     assert outcome.article.metrics["wordlist_size"] > 0
+
+
+def test_difficult_feedback_drops_high_hint(
+    db: Database, profile: Profile, article: Article
+) -> None:
+    fake = FakeCompleter(reassess_payload(cefr="A2"), article_payload("A2"))
+    service = LevelFeedbackService(
+        fake,
+        db.profiles,
+        db.articles,
+        db.words,
+        hint_provider=lambda: DifficultyHint("high", "向 B2 的把握约 60%"),
+        readability=ReadabilityThresholds(enabled=False),
+    )
+
+    service.adjust("太难了，读不下去", today=TODAY)
+
+    prompt = fake.messages[1][1]["content"]
+    assert "内偏难" not in prompt
+
+
+def test_easy_feedback_drops_low_hint(db: Database, profile: Profile, article: Article) -> None:
+    fake = FakeCompleter(reassess_payload(cefr="B1"), article_payload("B1"))
+    service = LevelFeedbackService(
+        fake,
+        db.profiles,
+        db.articles,
+        db.words,
+        hint_provider=lambda: DifficultyHint("low", "最近两篇生词比例偏高"),
+        readability=ReadabilityThresholds(enabled=False),
+    )
+
+    service.adjust("太简单了，没挑战", today=TODAY)
+
+    prompt = fake.messages[1][1]["content"]
+    assert "内偏易" not in prompt

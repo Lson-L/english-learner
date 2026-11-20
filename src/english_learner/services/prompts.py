@@ -39,7 +39,8 @@ if TYPE_CHECKING:  # 避免与 assessment_service 循环导入
 # M6.1：文章 prompt 要求附带 glossary（难词语境义），查词预取新增批量 prompt，
 # 让阅读时双击查词尽量走本地缓存。
 # M6.2：阅读检测选择题支持「不知道 + 补充说明」，讲评与盲评 prompt 带上原因。
-PROMPT_VERSION = "m6-2"
+# M6.5：文章生成支持档内位置（low / mid / high），空值时不改变 prompt。
+PROMPT_VERSION = "m6-5"
 
 # ------------------------------------------------------------ 学习者记忆
 # 记忆按任务过滤：不同 AI 任务只该看到与自己相关的那几行。
@@ -217,6 +218,7 @@ def build_article_messages(
     word_min: int = ARTICLE_WORD_MIN,
     word_max: int = ARTICLE_WORD_MAX,
     paragraph_min: int = ARTICLE_PARAGRAPH_MIN,
+    within_level: str = "",
     soft_targets: bool = False,
     learner_feedback: str = "",
     learner_focus: str = "",
@@ -285,6 +287,29 @@ def build_article_messages(
             "请据此调整：优先使用高频常见词、缩短句子、控制生词密度，"
             f"但整体等级仍保持 CEFR {level}。\n"
         )
+
+    # M6.5：档内位置。空串时完全不加这一段，保证 prompt 与旧版逐字节一致。
+    within_rule = ""
+    normalized_level = level.strip().upper()
+    level_index = CEFR_LEVELS.index(normalized_level) if normalized_level in CEFR_LEVELS else None
+    if within_level == "low":
+        within_rule = (
+            f"补充要求：在 CEFR {level} 内偏易——以高频词为主，平均句长靠近本档下限，"
+            "避免抽象概念和复杂从句。\n"
+        )
+    elif within_level == "high" and level_index is not None:
+        if level_index + 1 < len(CEFR_LEVELS):
+            higher_level = CEFR_LEVELS[level_index + 1]
+            within_rule = (
+                f"补充要求：在 CEFR {level} 内偏难——可含 1~2 个 {higher_level} 词，"
+                f"句长靠近本档上限，但语法与抽象度不得越过 {higher_level}。\n"
+            )
+        else:
+            # C1 没有更高一档：只要求句式与论证更复杂，不引入超纲词汇。
+            within_rule = (
+                f"补充要求：在 CEFR {level} 内偏难——句式与论证可以更复杂，"
+                f"但不要使用超出 {level} 范围的生僻词。\n"
+            )
 
     focus_rule = ""
     if learner_focus.strip():
@@ -373,6 +398,7 @@ def build_article_messages(
         f"{target_rule}"
         f"{target_check}"
         f"{glossary_rule}"
+        f"{within_rule}"
         f"{feedback_rule}"
         f"{focus_rule}"
         f"{memory_rule}"

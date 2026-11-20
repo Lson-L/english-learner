@@ -110,12 +110,42 @@ def test_today_page_reflects_database(tmp_path: Path) -> None:
     window = MainWindow(make_config(), store, db)
 
     assert "B2" in window._today_page._level_label.text()
-    assert "5,200" in window._today_page._level_label.text()
+    # M6.4：词汇量移到等级下方的元信息行，等级首行改为进度口径。
+    assert "5,200" in window._today_page._level_meta.text()
+    # 没有检测数据时不能显示 0% 进度条，只给一句引导。
+    assert window._today_page._level_progress.isHidden()
+    assert "完成首次阅读检测后显示进度" in window._today_page._level_evidence.text()
     assert window._today_page._words_card._value_label.text() == "2 词"
     assert window._today_page._due_card._value_label.text() == "2 词"
     assert window._today_page._streak_card._value_label.text() == "1 天"
     assert window._today_page._review_button.text() == "开始复习"
     window.close()
+
+
+def test_context_exposes_level_progress_and_difficulty_hint(tmp_path: Path) -> None:
+    """M6.4 / M6.5：页面通过 AppContext 取档内进度与状态提示，不自己拼 SQL。"""
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(make_config())
+    db = Database(tmp_path / "data.db")
+    db.profiles.save(
+        Profile(
+            cefr_level="B1",
+            vocab_estimate=3200,
+            pending_level="B2",
+            pending_count=1,
+        )
+    )
+    context = AppContext(make_config(), store, db)
+
+    progress = context.level_progress()
+    hint = context.difficulty_hint()
+
+    assert progress is not None
+    assert progress.current_level == "B1"
+    assert progress.next_level == "B2"
+    assert progress.progress == 0.5  # 旧数据无 posterior 时回退到 pending 进度
+    assert hint.within_level == "high"
+    db.close()
 
 
 def test_today_page_distinguishes_last_week_review(tmp_path: Path) -> None:

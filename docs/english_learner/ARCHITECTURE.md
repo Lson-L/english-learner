@@ -881,3 +881,39 @@ tests/（共 522 个用例，全部 mock AI、无网络）
 - **测试**：`test_english_learner_enrich.py` 覆盖简释判定、补全字段与 SRS/
   词条身份不变、prompt 与双击逐字节一致、完整词条跳过不调 AI、AI 原形不一致
   不新建词条、AI 失败保留简释，以及阅读页加入生词本后自动起后台补全的接线。
+
+### 6.36 M6.4 / M6.5：档内进度与档内难度（2026-11-20）
+
+- **分层**：口径与计算全在 `services/level_progress.py`（纯函数，只依赖
+  `models/entities.py`，不碰数据库 / PySide6 / 网络）；`AppContext` 负责取数，
+  今日页只做格式化。新增规则先改纯函数，不要写进页面。
+- **进度公式**：`progress = P(next) / (P(current) + P(next))`，取最近一次
+  **正式**检测的 posterior；旧数据没有 posterior 时，只有 `pending_level`
+  恰为下一档才回退 `pending_count / 2`。`progress_source` 记录来源，
+  界面 tooltip 必须按来源切换，不能一律写“后验计算”。
+- **正式检测不能先取 N 条再过滤**：练习模式行会挤占最近窗口，
+  而“正式检测 → 换一篇 → 练习”会让旧正式行被级联删除。用
+  `QuizRepo.list_recent_formal_completed()` 在 SQL 层过滤 `practice_mode = 0`。
+- **指标可信度**：生词比例只在 `word_total >= 40` 且 `wordlist_size >= 500` 时
+  参与趋势；趋势窗口是 `today-6..today` 与 `today-9..today-7`，相邻不重叠，
+  ±2 个百分点内为持平。
+- **hint 优先级**：`low` > `high` > `mid`。low 看最近两篇有效文章生词比例
+  或近 7 天正式检测降级；high 看上一档后验 ≥0.45 或 pending 指向下一档，
+  且最近一篇生词比例未超阈值；C1 固定 mid。
+- **prompt 兼容**：`within_level` 为空串或 `mid` 时不插入任何文本，
+  必须保持与旧版逐字节一致（有快照测试）。high 引用的是**高一档**
+  （B1 → B2），不是低一档；C1 没有更高档，只要求句式与论证更复杂。
+- **重试例外**：可读性重试的 `repair_note` 本身就是“换更简单的词”，
+  第二次必须清空 `effective_within`，否则 prompt 同时要求“偏难”和“更简单”。
+  metrics 记录的是**实际发给模型**的 hint，不是调用方传入值。
+- **metrics 扩展**：`within_level / hint_reason` 追加进
+  `articles.metrics_json`；readability 关闭时也写。`ReadabilityMetrics.from_dict`
+  只读已知键，附加键对旧读者 / 导出安全。阈值派生用
+  `dataclasses.replace`，只影响本次重试判断，不改配置默认值。
+- **UI**：进度条样式 `QProgressBar#levelProgress` 走全局 QSS（不单独设
+  `font-family`）；无检测、C1、练习模式都有空状态；未评分产出题不进
+  “答对 X/Y”的分母。
+- **测试**：`test_english_learner_level_progress.py`（纯函数与边界）、
+  `test_english_learner_article.py`（prompt / metrics / 重试）、
+  `test_english_learner_feedback.py`（反馈优先）、
+  `test_english_learner_gui_smoke.py`（空状态与 AppContext 接线）。

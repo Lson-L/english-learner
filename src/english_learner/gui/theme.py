@@ -134,6 +134,16 @@ QFrame#card {
     border: 1px solid #E4E8F0;
     border-radius: 12px;
 }
+/* 档内进度条：细条、无文字，具体百分比写在旁边的 muted 文案里。 */
+QProgressBar#levelProgress {
+    background: #EEF1F6;
+    border: none;
+    border-radius: 4px;
+}
+QProgressBar#levelProgress::chunk {
+    background: #2563EB;
+    border-radius: 4px;
+}
 QFrame#divider {
     background: #EEF1F6;
     max-height: 1px;

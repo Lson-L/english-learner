@@ -1,11 +1,11 @@
-# Daily English：AI 学习闭环排期（M5）
+# Daily English：AI 学习闭环与等级体验排期（M5 / M6.4~M6.7）
 
 - 最后更新：2026-11-20
-- 状态：**M5.0 ~ M5.5 已完成；M5.6 按真实数据决定是否开工**
-- 下一项：**M5.6 可选 P2**（先看 M5.5 指标，再决定做哪一项）；M4 仍排在 M5 之后
-- 基线：M3.18 + M5.5 完成，SQLite schema v8，499 passed
-- 执行顺序：M5.0 → M5.1 → M5.2 → M5.3 → M5.4 → M5.5；M5.6 按数据决定
-- 与 M4 的关系：**M5 优先**；M4（深色模式 / 安装器 / 自动更新）继续作为可选工程项排在 M5 之后
+- 状态：**M5.0 ~ M5.5 已完成；M6.1 ~ M6.5 已交付；M6.6 ~ M6.7 待开工**
+- 下一项：**M6.6 强证据升级 + 主客观一致**（第 7 节）；M5.6 可选 P2 与 M4 继续顺延
+- 基线：M6.5 完成，SQLite schema v8，580 passed
+- 执行顺序：M6.4 → M6.5 → M6.6 → M6.7；M5.6 按数据决定，M4 最后
+- 与 M4 的关系：**M5 / M6 优先**；M4（深色模式 / 安装器 / 自动更新）继续作为可选工程项排在最后
 - 来源：合并自两份 AI 能力提案（原 `AI_LEARNING_LOOP.md` 与 `AI_STRATEGY.md`，
   已于 2026-11-20 清理；需要追溯论证时看 git 历史）
 - **执行以本文为准**，不要再引入第二份 AI 排期文档
@@ -26,6 +26,10 @@
 | M5.6 | 可选 P2（语境义 / 教学包 / 窄式阅读等） | 按需 | v9+ | 按需 | 真实数据 | ⬜ 未开始 |
 
 合计约 8 天；其中 0 新增调用的部分约 5 天。
+
+> **M6 后续**：M6.1 ~ M6.3（查词预取 / 检测「不知道」/ 生词补全）已交付，细节见
+> `HISTORY.md`；M6.4 ~ M6.7 是「等级体验优化」四期，任务卡见第 7 节。
+> `M5.6` 保持可选、暂缓，不作为下一个开工项。
 
 ### 为什么是这个顺序
 
@@ -335,7 +339,212 @@
 
 ---
 
-## 7. M5.6 可选 P2（按数据决定）
+## 7. M6.4 ~ M6.7 等级体验优化（P1~P4，2026-11-20 排期）
+
+**背景**：等级制度保持四档 CEFR（A2/B1/B2/C1）不变。评审结论是「刻度粗不是主要
+瓶颈」：真正影响体验的是（1）等级长时间不动、看不见进步；（2）文章只按 CEFR 标签
+生成，档内贴合度差；（3）强证据也要等第二次检测，主观调级却能立即生效。因此四期
+都**不升 schema、不新增 AI 调用、不改 SRS**，只做展示层、prompt 参数与可选的策略增强。
+
+### 7.0 总览
+
+| 期 | 任务 | 估时 | schema | 新增调用 | 依赖 | 状态 |
+|---|---|---|---|---|---|---|
+| M6.4 | 档内进度仪表盘 | 1 天 | — | 0 | — | ✅ 2026-11-20 |
+| M6.5 | 档内难度浮动 | 1 天 | — | 0 | M6.4（同模块 `level_progress`） | ✅ 2026-11-20 |
+| M6.6 | 强证据升级 + 主客观一致 | 1 天 | — | 0 | — | ⬜ 未开始 |
+| M6.7 | 边界用户与文案 | 0.5 天 | — | 0 | M6.5 | ⬜ 未开始 |
+
+顺序理由：M6.4 只读已有数据、零风险，先拿反馈；M6.5 直接复用 M6.4 的纯函数；
+M6.6 动的是判定策略，单独成期并默认关闭；M6.7 收尾文案与边界。
+
+### 7.1 M6.4 档内进度仪表盘（1 天，0 新增调用，无 schema）
+
+**目标**：等级标签不变，但用户每天能看到「向下一档走了多远」的可见证据，
+解决「等级不动 = 没进步」的停滞感。
+
+**改动点**：
+
+1. 新增 `services/level_progress.py`（纯 Python，不 import PySide6、不写库）：
+   - `LevelProgress` 冻结 dataclass：`current_level / next_level / progress /
+     confidence / pending_level / pending_count / quiz_summary / article_summary /
+     band_summary / practice_only / has_data`；
+   - `build_level_progress(profile, quizzes, band_stats, articles, *, today)`：
+     - `progress = P(next) / (P(current) + P(next))`，取最近一次**非练习**检测的
+       `ReadingQuiz.posterior`；没有 posterior 的旧数据回退为
+       `pending_count / 2`，两者都没有则 `None`；
+     - `quiz_summary`：最近一次正式检测按题目难度统计「答对 X/Y」，并单独统计
+       「高两档题答对 N 道」；
+     - `article_summary`：近 7 天 `articles.metrics_json` 的生词比例均值，
+       与更早 3 天比较给 ↑ / ↓ / →（阈值 ±2 个百分点，见 7.5）；
+     - `band_summary`：当前档与下一档的认识率，`ReviewRepo.list_band_stats()`
+       各 ≥4 次复习才展示，否则省略；
+     - `practice_only`：最近一次检测是练习模式时为 True，只标注「练习不计入」。
+2. 仓库层：优先复用 `QuizRepo.list_recent_completed_with_titles()`、
+   `ReviewRepo.list_band_stats()`、`ArticleRepo.list_recent()`；
+   缺聚合时只加只读方法，**不写库**。
+3. `gui/pages/today.py` 等级区改造：
+   - 首行「B1 → B2 把握 38%」+ `QProgressBar`（`objectName="levelProgress"`，
+     样式进全局 QSS）；
+   - 第二行置信度 + `pending 1/2`（已有字段）；
+   - 第三行最多 3 条证据（本周题目正确 / 生词比例 / 词档认识率），没有的条目省略；
+   - 空状态：未测评沿用现有文案；已测评未检测显示「完成首次阅读检测后显示进度」；
+     C1 显示「已到最高档」。
+4. `gui/reading_quiz_dialog.py` 结果页补充：
+   - 本卷难度分布（如 `B1×3 / B2×2 / C1×1`）；
+   - 「本次答对 N 道高两档题」——只在 N > 0 时显示。
+
+**验收**：
+
+- 纯函数单测：无检测 / 无 posterior / 练习模式 / pending 1/2 / 刚降级 /
+  空 articles / 词档复习不足 4 次 / C1；
+- 0 新增 AI 调用，不升 schema，不改等级判定与 SRS；
+- offscreen 构造测试；QSS 不单独设 `font-family`（CLAUDE.md 第 9 条）；
+- 全量 pytest + ruff 通过。
+
+**风险**：数字堆成装饰 → 最多 3 条证据，每条都对应一个可行动作
+（做题 / 阅读 / 复习）；口径漂移 → 纯函数 + 7.5 冻结 + 单测。
+
+**交付（2026-11-20）**：`services/level_progress.py` 已落地（`LevelProgress` /
+`QuizProgressSummary` / `ArticleRatioSummary` / `BandProgressSummary` 冻结 DTO +
+`build_level_progress()` / `summarize_quiz()`）；今日页等级区改为
+「B1 → B2 · 把握 38%」+ `QProgressBar#levelProgress` + 元信息（置信度 / 词汇量 /
+pending）+ 最多 3 条证据，无检测 / C1 / 练习模式均有空状态；结果页补充本卷难度
+分布与「答对高两档题 N 道」；`QuizRepo.list_recent_formal_completed()` 在 SQL 层
+排除练习，避免练习行挤占最近窗口；`progress_source` 区分 posterior / pending，
+tooltip 按来源切换。580 passed，ruff 通过。
+
+### 7.2 M6.5 档内难度浮动（1 天，0 新增调用，无 schema）
+
+**目标**：文章生成从「只有 CEFR 标签」升级为「档内位置」，让低 B1 / 高 B1
+拿到不同难度的文章，等级标签不变。
+
+**改动点**：
+
+1. `services/level_progress.py` 增 `difficulty_hint(...)`，返回
+   `DifficultyHint(within_level: "low"|"mid"|"high", reason: str)`：
+   - `high`：`P(上一档) >= 0.45` 或 `pending 1/2`，且最近一篇生词比例未超阈值；
+   - `low`：最近 2 篇生词比例超阈值，或 7 天内发生过降级；
+   - 其余 `mid`；`low` 与 `high` 同时命中时取 `low`；
+   - 规则固定写进 7.5，不在调用方各写一套。
+2. `services/prompts.py` 的 `build_article_messages()` 增 `within_level: str = ""`：
+   - 空串 → 输出与当前逐字节一致（快照测试）；
+   - `low`：要求「本档内偏易：高频词为主、句长靠近本档下限、避免抽象概念」；
+   - `high`：要求「本档内偏难：可含 1~2 个上一档词、句长靠近本档上限，
+     但语法与抽象度不得越过上一档」。
+3. `ArticleService.generate_article()` 增 `within_level=""` 并透传；
+   `get_or_create_today()` 与 `LevelFeedbackService` 重写文章时计算并传入；
+   hint 由 `AppContext` 以 `hint_provider` 注入（与 `memory_provider` 同款），
+   `ArticleService` 不直接依赖 `QuizRepo / ReviewRepo`，保持分层。
+4. `ReadabilityThresholds` 按 hint 派生（`dataclasses.replace`）：
+   `low` 收紧生词比例阈值，`high` 放宽；不改 `config.json` 的默认值。
+5. hint 与 reason 写进 `articles.metrics_json`（已有 JSON 字段，**不升 schema**），
+   阅读页 meta 行不展示。
+6. `PROMPT_VERSION` 升到 `m6-5`。
+
+**验收**：
+
+- 不传 `within_level` 的 prompt 快照逐字节一致；
+- 各 hint 分支、空数据、用户反馈优先于 hint 有单测；
+- 旧文章无新字段正常显示；可读性重试仍走现有 `repair_note` 通道；
+- 0 新增调用。
+
+**风险**：模型越档 → prompt 写明「不得越过上一档」+ 可读性阈值兜底；
+hint 与用户明确反馈冲突 → 用户反馈优先（`learner_feedback` 已有通道）。
+
+**交付（2026-11-20）**：`difficulty_hint()` 按 7.5 口径落地（low 优先；两篇生词
+比例偏高或近 7 天降级；上一档后验 ≥0.45 或 pending 指向下一档）；`build_article_messages()`
+新增 `within_level`，空值 / mid 时 prompt 逐字节一致，high 引用**高一档**（B1 → B2），
+C1 只要求句式更复杂；`ArticleService` 新增 `hint_provider` 与
+`within_level/hint_reason`，写入 `articles.metrics_json`（readability 关闭也写），
+provider 异常静默退化；`_thresholds_for()` 按 low 收紧 / high 放宽可读性阈值；
+可读性重试会撤掉 high，metrics 记录实际发送值；阅读反馈中“太难/太简单”优先于
+相反 hint。580 passed，ruff 通过。
+
+### 7.3 M6.6 强证据升级 + 主客观一致（1 天，0 新增调用，无 schema）
+
+**目标**：强证据不必等第二天；主观调级的权限与提示和自动策略一致。
+
+**改动点**：
+
+1. `services/level_estimator.py` 增纯函数
+   `has_strong_upgrade_evidence(observations, posterior, current_level)`：
+   - 置信度 >= `STRONG_UPGRADE_CONFIDENCE = 0.75`；
+   - `posterior.recommended_level` 恰为**当前 +1 档**；
+   - 至少 1 条 `difficulty >= 当前 + 2` 且 `correct=True`、`weight >= 1.0`
+     的题目观测（只看 `quiz / production`，不看盲评与自评）；
+   - 常量集中在本模块。
+2. `apply_level_policy()` 增 `strong: bool = False`：升级方向且 strong 时一次
+   生效，不写 pending；降级路径不变。
+3. `ReadingQuizService.submit()`：非练习模式计算 strong 并透传；
+   `level_updated_reason` 区分「强证据升级 / 连续两次升级 / 主观调整」。
+4. 配置开关：`config.json` 增 `level` 段（`strong_upgrade_enabled`，默认 **false**），
+   `ConfigStore.load_level()` 宽松解析；开关关闭时行为与当前完全一致。
+5. 手动调级一致化：
+   - `LevelFeedbackService.adjust()` 拆为 `reassess()`（已有）+
+     `apply(profile, result, feedback, ...)`（原后半段：clamp → 生成文章 →
+     原子替换 → 保存 profile）；`adjust()` 保留为两步包装，测试与旧调用不变；
+   - `LevelFeedbackDialog` 改为两段 worker：先 `reassess()`；回到 UI 线程，
+     若目标等级高于当前，弹确认「手动调级会立即升档，自动策略通常需要两次检测。
+     仍要应用吗？」；确认后第二个 worker 执行 `apply()`；降级直接 `apply()`；
+   - 取消确认时画像与文章都不动。
+6. 设置页新增「等级」卡片：一个开关 + 一句说明（默认关）。
+
+**验收**：
+
+- 开关关：所有升级仍需连续两次（回归用例）；
+- 开关开：高置信 + 高两档题答对 → 一次升级；普通同档全对仍两次；
+- 降级路径不变；练习模式不写证据、不改级；
+- 主观升级必须二次确认；降级立即生效；apply 失败不改画像与文章；
+- `level_updated_reason` 能区分三种来源；
+- 0 新增调用；不升 schema。
+
+**风险**：升级抖动 → 双条件 + 默认关闭；开启后观察「升级后 7 天内降级次数」，
+超过 1 次就回退开关。拆分服务时保持原子性：`apply()` 内部先生成文章再替换，
+任何一步失败都不写 profile。
+
+### 7.4 M6.7 边界用户与文案（0.5 天，0 新增调用）
+
+**目标**：明确产品覆盖范围，降低 A2 底部与 C1 顶部的挫败。
+
+**改动点**：
+
+1. 测评结果页、设置页文案：「本产品覆盖 CEFR A2–C1；A2 以下建议先打基础，
+   C1 以上建议搭配真实材料」；
+2. A2 用户：`difficulty_hint` 优先 `low`，可读性阈值收紧；
+3. C1 用户：hint 上限保护（不生成更高档要求），「太简单」反馈仍可触发重写；
+4. `PRODUCT.md` 补一条决策记录：**刻度保持四档**，以及本轮评估的理由
+   （测量精度、稳定性、外部参照价值）。
+
+**验收**：文案快照；无逻辑回归；0 调用。
+
+### 7.5 口径冻结（后续不得静默修改）
+
+| 项 | 固定口径 |
+|---|---|
+| 档内进度 | `P(next) / (P(current) + P(next))`，取最近一次非练习检测 posterior；旧数据回退 `pending_count / 2`；再无则「—」 |
+| 生词比例趋势 | 近 7 天 vs 更早 3 天的均值差；±2 个百分点内算持平（→） |
+| 词档认识率 | `ReviewRepo.list_band_stats()`，单档复习 ≥4 次才展示 |
+| hint 优先级 | 同时满足 `low` 与 `high` 时 **`low` 优先**（读不下去先降难度） |
+| hint `high` | `P(上一档) >= 0.45` 或 pending 1/2，且最近一篇生词比例未超阈值 |
+| hint `low` | 最近 2 篇生词比例超阈值，或 7 天内降过级 |
+| C1 | `next_level` 为空：进度显示「已到最高档」，hint 固定 `mid` |
+| strong 升级 | 置信度 >= 0.75 + 建议等级恰为当前 +1 + 至少 1 条高两档题答对（quiz/production，weight >= 1.0） |
+
+改口径必须同步更新本节 + 单测 + `ARCHITECTURE.md` 对应小节；
+统计只读本地 SQL，不写库、不新增 AI 调用。
+
+### 7.6 观察指标与收尾
+
+- 观察（不建新表，全部来自现有数据 / 日志）：
+  「太难」反馈次数 / 周、「换一篇」次数、文章可读性重试率、检测完成率、
+  升级等待天数分布、升级后 7 天内降级次数（仅 M6.6 开启后）；
+- 每期独立可回滚；M6.6 默认关闭，先观察一周再决定是否打开；
+- 固定收尾同第 10 节：pytest / ruff / 文档（PROGRESS 只放状态，HISTORY 放细节）。
+
+---
+
+## 8. M5.6 可选 P2（按数据决定，暂缓）
 
 | 项 | 说明 | 前置 |
 |---|---|---|
@@ -348,7 +557,7 @@
 
 ---
 
-## 8. 明确不做
+## 9. 明确不做
 
 | 不做 | 原因 |
 |---|---|
@@ -361,12 +570,15 @@
 | 把缓存改成每次实时调用 | 成本爆炸且离线不可用；缓存是本项目最正确的设计之一 |
 | 口语陪练 / 发音评分 / TTS | PRODUCT 已明确 V2，V1 不做 |
 | 首页堆"学习报告" | 没有对应动作的报告等于装饰；要报告先要计划（M5.2） |
+| 拆细 CEFR 刻度（A2+ / 半档 / C2） | 每天 5~7 个观测撑不起更细刻度，属于假精确；改动要牵动 schema、题库、prompt、导出，收益低于展示层与档内浮动（见第 7 节） |
+| 为进度展示新增 AI 评估调用 | `posterior / level_evidence / metrics_json` 已足够；新增调用违背缓存优先与成本约束 |
+| 回填或重算历史等级数据 | 旧数据没有 posterior，重算等于伪造证据；只做向前兼容与「—」展示 |
 
 ---
 
-## 9. 每个里程碑的固定收尾
+## 10. 每个里程碑的固定收尾
 
-- `uv run pytest -q` 全绿（当前 472，只增不减）；`ruff check` 与
+- `uv run pytest -q` 全绿（当前 547，只增不减）；`ruff check` 与
   `ruff format --check` 通过；
 - `services/` / `storage/` 不 import PySide6；所有 AI 调用走 `gui.workers.TaskWorker`
   且带 `task` 标签，元数据统一由 `AIClient` 写 `ai_calls`；

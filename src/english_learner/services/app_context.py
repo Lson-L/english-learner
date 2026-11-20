@@ -36,6 +36,8 @@ from .dictionary_service import DictionaryService
 from .export_service import ExportService
 from .learner_memory import LearnerMemoryService
 from .level_feedback_service import LevelFeedbackService
+from .level_progress import DifficultyHint, LevelProgress, build_level_progress
+from .level_progress import difficulty_hint as build_difficulty_hint
 from .metrics_service import MetricsService
 from .readability import ReadabilityThresholds
 from .reading_quiz_service import ReadingQuizService
@@ -161,6 +163,7 @@ class AppContext:
             self.article_repo,
             self.word_repo,
             memory_provider=memory.build,
+            hint_provider=self.difficulty_hint,
             readability=self.readability_thresholds(),
         )
 
@@ -179,6 +182,7 @@ class AppContext:
             self.profile_repo,
             self.article_repo,
             self.word_repo,
+            hint_provider=self.difficulty_hint,
             readability=self.readability_thresholds(),
         )
 
@@ -248,6 +252,32 @@ class AppContext:
             self.weekly_review_repo,
             self.ai_call_repo,
             self.writing_attempt_repo,
+        )
+
+    # ------------------------------------------------------------ 等级进度
+    def level_progress(self) -> LevelProgress | None:
+        """今日页的档内进度（M6.4）：纯本地读取，0 次 AI 调用。"""
+        profile = self.profile()
+        if profile is None:
+            return None
+        return build_level_progress(
+            profile,
+            self.quiz_repo.list_recent_formal_completed(limit=8),
+            self.review_repo.list_band_stats(),
+            self.article_repo.list_recent(limit=12),
+        )
+
+    def difficulty_hint(self) -> DifficultyHint:
+        """文章档内位置（M6.5）：供文章生成服务注入，不直接暴露给界面。"""
+        profile = self.profile()
+        if profile is None:
+            return DifficultyHint()
+        thresholds = self.readability_thresholds()
+        return build_difficulty_hint(
+            profile,
+            self.quiz_repo.list_recent_formal_completed(limit=8),
+            self.article_repo.list_recent(limit=6),
+            max_unknown_ratio=thresholds.max_unknown_ratio,
         )
 
     # ------------------------------------------------------------------ 便捷

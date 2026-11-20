@@ -34,9 +34,10 @@ from ..models.entities import (
 from ..storage.repositories import ArticleRepo, ProfileRepo, WordRepo
 from .ai_client import AIError
 from .ai_protocol import TextCompleter
-from .article_service import ArticleService
+from .article_service import ArticleService, load_hint
 from .assessment_service import assessment_result_from_data
 from .json_utils import JsonParseError, parse_json_object
+from .level_progress import DifficultyHint
 from .prompts import PROMPT_VERSION, build_level_feedback_messages
 from .readability import ReadabilityThresholds, default_wordlist
 
@@ -125,6 +126,7 @@ class LevelFeedbackService:
         article_repo: ArticleRepo,
         word_repo: WordRepo,
         *,
+        hint_provider: Callable[[], DifficultyHint | None] | None = None,
         readability: ReadabilityThresholds | None = None,
         wordlist_provider: Callable[[], dict[str, str]] = default_wordlist,
     ) -> None:
@@ -132,11 +134,13 @@ class LevelFeedbackService:
         self._profiles = profile_repo
         self._articles = article_repo
         self._words = word_repo
+        self._hint_provider = hint_provider
         # 重写文章也要遵守同一份可读性配置（关闭 / 阈值 / 是否重试）。
         self._article_service = ArticleService(
             client,
             article_repo,
             word_repo,
+            hint_provider=hint_provider,
             readability=readability,
             wordlist_provider=wordlist_provider,
         )
@@ -234,6 +238,15 @@ class LevelFeedbackService:
         result = self._merge_profile_details(profile, result)
         target_words = [word.lemma for word in words]
 
+        # 用户反馈优先于档内提示：说“太难”时不再叠加偏难，说“太简单”时不再偏易。
+        hint = load_hint(self._hint_provider)
+        within_level = hint.within_level
+        lowered = text.lower()
+        if within_level == "high" and any(marker in lowered for marker in _DIFFICULT_MARKERS):
+            within_level = ""
+        if within_level == "low" and any(marker in lowered for marker in _EASY_MARKERS):
+            within_level = ""
+
         # 先生成新文章（软约束目标词），成功后再替换；失败时旧文章原样保留。
         draft = self._article_service.generate_article(
             result.cefr,
@@ -241,6 +254,8 @@ class LevelFeedbackService:
             article.topic,
             strict_targets=False,
             learner_feedback=text,
+            within_level=within_level,
+            hint_reason=hint.reason if within_level else "",
             learner_focus="、".join(
                 item.strip() for item in profile.weaknesses if item and item.strip()
             ),
