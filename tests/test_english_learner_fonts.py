@@ -14,7 +14,13 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from english_learner.gui import fonts  # noqa: E402
 from english_learner.gui.theme import build_stylesheet  # noqa: E402
-from english_learner.services.config_store import AIConfig, ConfigStore, UiConfig  # noqa: E402
+from english_learner.services.config_store import (  # noqa: E402
+    REVIEW_MODE_RECOGNITION,
+    REVIEW_MODE_SPELLING,
+    AIConfig,
+    ConfigStore,
+    UiConfig,
+)
 
 _APP: QApplication | None = None
 
@@ -110,6 +116,36 @@ def test_ui_config_reads_legacy_key(tmp_path: Path) -> None:
 def test_load_ui_defaults_when_file_missing(tmp_path: Path) -> None:
     store = ConfigStore(tmp_path / "missing.json")
     assert store.load_ui().english_font == ""
+    assert store.load_ui().review_mode == REVIEW_MODE_RECOGNITION
+
+
+def test_ui_config_review_mode_roundtrip_and_invalid_fallback(tmp_path: Path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+
+    store.save_ui(UiConfig(review_mode=REVIEW_MODE_SPELLING))
+    assert store.load_ui().review_mode == REVIEW_MODE_SPELLING
+
+    payload = store._read_payload()
+    payload["ui"] = {"review_mode": "typing"}
+    store._write_payload(payload)
+    assert store.load_ui().review_mode == REVIEW_MODE_RECOGNITION
+
+
+def test_settings_font_change_preserves_review_mode(tmp_path: Path) -> None:
+    """改字体只改字体字段，不能把复习模式偏好冲掉。"""
+    get_app()
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(make_config())
+    store.save_ui(UiConfig(review_mode=REVIEW_MODE_SPELLING))
+
+    from english_learner.gui.pages.settings import SettingsPage
+
+    page = SettingsPage(store.load(), store)
+    page._font_combo.setCurrentIndex(1)
+
+    ui = store.load_ui()
+    assert ui.english_font == fonts.ENGLISH_FONT_CHOICES[1].key
+    assert ui.review_mode == REVIEW_MODE_SPELLING
 
 
 def test_settings_page_switches_and_saves_english_font(tmp_path: Path) -> None:

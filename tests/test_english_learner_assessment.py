@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from english_learner.services.ai_client import AIError
-from english_learner.services.assessment_bank import UNKNOWN_ANSWER, get_set
+from english_learner.services.assessment_bank import ASSESSMENT_SETS, UNKNOWN_ANSWER, get_set
 from english_learner.services.assessment_service import (
     AnswerSheet,
     AssessmentService,
@@ -47,6 +47,13 @@ def perfect_sheet() -> AnswerSheet:
         vocabulary=tuple(q.answer_index for q in assessment_set.vocabulary),
         translation="Small habits are easy to start.",
     )
+
+
+def test_all_assessment_translations_are_english_to_chinese() -> None:
+    """摸底测评的输入题也统一成英译中，不要求用户写英文。"""
+    for item in ASSESSMENT_SETS.values():
+        assert "翻译成中文" in item.translation_prompt
+        assert "翻译成英文" not in item.translation_prompt
 
 
 def test_score_answers() -> None:

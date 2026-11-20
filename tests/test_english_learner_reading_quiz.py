@@ -16,6 +16,7 @@ from english_learner.models.entities import (
     now_iso,
 )
 from english_learner.services.ai_client import AIError
+from english_learner.services.prompts import build_quiz_grading_messages
 from english_learner.services.quiz_calibration import (
     difficulty_stats,
     question_outcomes,
@@ -128,21 +129,26 @@ def stage_two_payload(
     questions.append(
         {
             "kind": "short",
-            "prompt": "In 1-2 sentences, summarize the main idea.",
-            "skill": "writing",
+            "prompt": (
+                'Translate the following sentence into Chinese: "Small habits add up over time."'
+            ),
+            "skill": "translation",
             "difficulty": difficulty,
-            "reference_answer": "Small habits add up over time.",
-            "explanation": "评分要点：抓住习惯累积的观点。",
+            "reference_answer": "小习惯会随着时间不断累积。",
+            "explanation": "评分要点：add up 译为累积。",
         }
     )
     questions.append(
         {
             "kind": "short",
-            "prompt": "Rewrite the sentence in your own words.",
-            "skill": "rewrite",
+            "prompt": (
+                "Translate the following sentence into Chinese: "
+                '"They change our lives in ways we rarely notice."'
+            ),
+            "skill": "translation",
             "difficulty": target,
-            "reference_answer": "Small habits gradually change our lives.",
-            "explanation": "评分要点：意思保留、语法、用词。",
+            "reference_answer": "它们以我们很少察觉的方式改变生活。",
+            "explanation": "评分要点：in ways 表示方式；rarely 是很少。",
         }
     )
     return json.dumps({"questions": questions}, ensure_ascii=False)
@@ -171,7 +177,7 @@ def grading_payload(
         "explanations": explanations or [f"讲评第 {index} 题" for index in range(1, 8)],
         "error_types": error_types or ["none"] * 7,
         "production_scores": list(production_scores),
-        "production_feedbacks": ["短答基本达意。", "改写保留了意思。"],
+        "production_feedbacks": ["译文准确。", "关键词译对。"],
     }
     data.update(overrides)
     return json.dumps(data, ensure_ascii=False)
@@ -237,7 +243,7 @@ def complete_quiz(
     level: str = "B1",
     stage_one_answers: tuple[int, int, int] = (1, 1, 1),
     all_answers: tuple[int, int, int, int, int] = (1, 1, 1, 1, 1),
-    production_texts: tuple[str, str] = ("Habits add up.", "Small habits change lives."),
+    production_texts: tuple[str, str] = ("小习惯会不断累积。", "小习惯会改变生活。"),
 ):
     quiz = service.get_or_create(article, level)
     quiz = service.advance_stage(article, quiz, stage_one_answers)
@@ -288,31 +294,75 @@ def test_parse_stage_one_requires_three_choices() -> None:
         parse_stage_one_questions(stage_one_payload(count=2), "B1")
 
 
-def test_parse_stage_two_requires_two_choices_and_two_productions() -> None:
+def test_parse_stage_two_requires_two_choices_and_two_translations() -> None:
     questions = parse_stage_two_questions(stage_two_payload("B2"), "B1", "B2")
 
     assert len(questions) == 4
     assert sum(1 for question in questions if question.is_short) == 2
     assert questions[0].difficulty == "B2"
-    assert {question.skill for question in questions if question.is_short} == {
-        "writing",
-        "rewrite",
-    }
+    productions = [question for question in questions if question.is_short]
+    assert {question.skill for question in productions} == {"translation"}
+    assert all(question.is_translation for question in productions)
 
     only_choices = json.dumps(
         {"questions": question_payload(2, difficulty="B2")}, ensure_ascii=False
     )
-    with pytest.raises(InvalidQuizError, match="产出题"):
+    with pytest.raises(InvalidQuizError, match="英译中"):
         parse_stage_two_questions(only_choices, "B1", "B2")
 
 
-def test_parse_treats_rewrite_kind_as_production() -> None:
+def test_parse_stage_two_rejects_english_writing_production() -> None:
+    """模型退回英文短答时判不合格，触发重试，避免用户重新练写作。"""
+    payload = json.loads(stage_two_payload("B2"))
+    payload["questions"][3] = {
+        "kind": "short",
+        "prompt": "In 1-2 sentences, summarize the main idea.",
+        "skill": "writing",
+        "difficulty": "B2",
+        "reference_answer": "Small habits add up.",
+        "explanation": "评分要点：内容 / 语法 / 词汇。",
+    }
+
+    with pytest.raises(InvalidQuizError, match="英译中"):
+        parse_stage_two_questions(json.dumps(payload, ensure_ascii=False), "B1", "B2")
+
+
+def test_parse_stage_two_forces_translation_skill() -> None:
+    """模型漏标 skill 或写成 rewrite 时，只要题面要求译成中文就按英译中处理。"""
     payload = json.loads(stage_two_payload("B2"))
     payload["questions"][3]["kind"] = "rewrite"
+    payload["questions"][3].pop("skill")
 
     questions = parse_stage_two_questions(json.dumps(payload, ensure_ascii=False), "B1", "B2")
 
-    assert sum(1 for question in questions if question.is_short) == 2
+    productions = [question for question in questions if question.is_short]
+    assert len(productions) == 2
+    assert all(question.skill == "translation" for question in productions)
+
+
+def test_is_translation_requires_chinese_direction() -> None:
+    chinese = QuizQuestion(
+        prompt='Translate into Chinese: "Small habits add up."',
+        skill="translation",
+        kind="short",
+    )
+    assert chinese.is_translation is True
+
+    # 旧缓存的“翻译成英文”不能被误判成英译中。
+    english = QuizQuestion(
+        prompt="Translate into English: 小习惯会不断累积。",
+        skill="translation",
+        kind="short",
+    )
+    assert english.is_translation is False
+
+    # 不是 translation 技能的产出题（旧短答/改写）也不算。
+    writing = QuizQuestion(
+        prompt='Translate into Chinese: "Small habits add up."',
+        skill="writing",
+        kind="short",
+    )
+    assert writing.is_translation is False
 
 
 def test_parse_question_review_filters_bad_indices() -> None:
@@ -545,8 +595,9 @@ def test_advance_stage_appends_boundary_questions(db: Database) -> None:
     assert advanced.short_total == 2
     assert advanced.answers == (1, 1, 1)
     assert "stage_two" in fake.calls
-    assert advanced.questions[-2].skill == "writing"
-    assert advanced.questions[-1].skill == "rewrite"
+    assert advanced.questions[-2].skill == "translation"
+    assert advanced.questions[-1].skill == "translation"
+    assert all(question.is_translation for question in advanced.production_questions)
 
     again = service.advance_stage(article, advanced, (1, 1, 1))
     assert again.questions == advanced.questions
@@ -601,6 +652,56 @@ def test_stage_two_targets_lower_level_after_poor_stage_one(db: Database) -> Non
         if "边界探测题" in messages[-1]["content"]
     )
     assert "A2" in stage_two_prompt
+
+
+def test_stage_two_prompt_asks_for_chinese_translation(db: Database) -> None:
+    article = make_article(db)
+    fake = RoutingCompleter()
+    service = make_service(db, fake)
+
+    quiz = service.get_or_create(article, "B1")
+    service.advance_stage(article, quiz, (1, 1, 1))
+
+    prompt = next(
+        messages[-1]["content"]
+        for messages in fake.messages
+        if "边界探测题" in messages[-1]["content"]
+    )
+    assert "英译中" in prompt
+    assert "翻译成中文" in prompt
+    assert "不要要求学习者写英文" in prompt
+    assert "reference_answer 必须给中文参考翻译" in prompt
+
+
+def test_grading_prompt_uses_comprehension_rubric_for_translation(
+    db: Database, profile: Profile
+) -> None:
+    article = make_article(db)
+    quiz = make_quiz()
+    translation = QuizQuestion(
+        prompt='Translate the following sentence into Chinese: "Small habits add up."',
+        skill="translation",
+        difficulty="B1",
+        kind="short",
+        reference_answer="小习惯会不断累积。",
+    )
+    quiz = replace(quiz, questions=quiz.questions[:-1] + (translation,))
+
+    messages = build_quiz_grading_messages(
+        profile,
+        article,
+        quiz,
+        (1, 1, 1, 1, 1),
+        5,
+        production_texts=("小习惯会不断累积。",),
+    )
+    prompt = messages[-1]["content"]
+
+    assert "英译中" in prompt
+    assert "理解准确 / 中文通顺" in prompt
+    assert "不因中文文采" in prompt
+    assert "参考翻译：小习惯会不断累积。" in prompt
+    assert "学习者译文：小习惯会不断累积。" in prompt
 
 
 # ------------------------------------------------------------------ 提交
@@ -837,6 +938,47 @@ def test_weak_skills_are_computed_from_recent_quizzes(db: Database) -> None:
     assert service._weak_skills() == ("inference",)
 
 
+def test_weak_skills_ignore_production_only_skills(db: Database) -> None:
+    """英译中/写作是产出题技能，选择题无法覆盖，不能喂进选择题的出题提示。"""
+    article = make_article(db)
+    questions = (
+        QuizQuestion(
+            prompt="Inference 1?",
+            options=("A", "B", "C", "D"),
+            answer_index=1,
+            skill="inference",
+            difficulty="B1",
+        ),
+        QuizQuestion(
+            prompt="Inference 2?",
+            options=("A", "B", "C", "D"),
+            answer_index=1,
+            skill="inference",
+            difficulty="B1",
+        ),
+        QuizQuestion(
+            prompt='Translate into Chinese: "Small habits add up."',
+            skill="translation",
+            difficulty="B1",
+            kind="short",
+            reference_answer="小习惯会不断累积。",
+        ),
+    )
+    db.quizzes.insert(
+        ReadingQuiz(
+            article_id=article.id,
+            article_date=TODAY,
+            level="B1",
+            questions=questions,
+            answers=(0, 0),
+            completed_at=now_iso(),
+        )
+    )
+    service = make_service(db, RoutingCompleter())
+
+    assert service._weak_skills() == ("inference",)
+
+
 def test_error_types_are_aligned_and_correct_is_none(db: Database, profile: Profile) -> None:
     article = make_article(db)
     fake = RoutingCompleter(
@@ -847,8 +989,8 @@ def test_error_types_are_aligned_and_correct_is_none(db: Database, profile: Prof
                 "inference",
                 "detail",
                 "careless",
-                "short_answer",
-                "short_answer",
+                "translation",
+                "translation",
             ]
         )
     )
@@ -861,14 +1003,14 @@ def test_error_types_are_aligned_and_correct_is_none(db: Database, profile: Prof
         quiz,
         (1, 0, 1, 1, 1),
         profile,
-        production_texts=("Habits add up.", "Small habits change lives."),
+        production_texts=("小习惯会不断累积。", "小习惯会改变生活。"),
     )
 
     assert len(outcome.quiz.error_types) == 7
     assert outcome.quiz.error_types[0] == "none"
     assert outcome.quiz.error_types[1] == "vocabulary"
     assert outcome.quiz.error_types[2] == "none"
-    assert outcome.quiz.error_types[-1] == "short_answer"
+    assert outcome.quiz.error_types[-1] == "translation"
 
 
 def test_bad_grading_json_keeps_profile_and_allows_retry(db: Database, profile: Profile) -> None:

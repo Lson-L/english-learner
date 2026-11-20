@@ -171,11 +171,13 @@ class AIUsageDialog(QDialog):
             ("total_tokens", "总 tokens"),
             ("prompt_tokens", "输入 tokens"),
             ("completion_tokens", "输出 tokens"),
-            ("avg_latency", "平均耗时"),
+            ("avg_latency", "平均耗时 (ms)"),
         )
         for column, (key, caption) in enumerate(metrics):
             grid.addWidget(self._build_metric(key, caption), 0, column)
-        grid.setColumnStretch(len(metrics) - 1, 1)
+        # 六列等宽，数字之间的间距才均匀；否则列宽由标题文字撑开，看起来“歪”。
+        for column in range(len(metrics)):
+            grid.setColumnStretch(column, 1)
         summary_card.body.addLayout(grid)
 
         self._summary_note = QLabel("")
@@ -190,7 +192,8 @@ class AIUsageDialog(QDialog):
         task_title.setObjectName("cardTitle")
         task_card.body.addWidget(task_title)
         self._task_table = self._make_table(
-            ("任务", "调用", "失败", "总 tokens", "平均耗时"),
+            ("任务", "调用", "失败", "总 tokens", "平均耗时 (ms)"),
+            numeric_columns=(1, 2, 3, 4),
         )
         self._task_table.setMinimumHeight(80)
         self._task_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -203,7 +206,8 @@ class AIUsageDialog(QDialog):
         detail_title.setObjectName("cardTitle")
         detail_card.body.addWidget(detail_title)
         self._detail_table = self._make_table(
-            ("时间", "任务", "模型", "输入", "输出", "总计", "耗时", "状态"),
+            ("时间", "任务", "模型", "输入", "输出", "总计", "耗时 (ms)", "状态"),
+            numeric_columns=(3, 4, 5, 6),
         )
         self._detail_table.setMinimumHeight(120)
         self._detail_table.horizontalHeader().setSectionResizeMode(
@@ -250,10 +254,19 @@ class AIUsageDialog(QDialog):
         return box
 
     @staticmethod
-    def _make_table(headers: tuple[str, ...]) -> _CompactTable:
+    def _make_table(
+        headers: tuple[str, ...], *, numeric_columns: tuple[int, ...] = ()
+    ) -> _CompactTable:
         table = _CompactTable(0, len(headers))
         table.setObjectName("dataTable")
         table.setHorizontalHeaderLabels(list(headers))
+        # 表头与单元格使用相同的对齐方式，数字列才不会有“头左尾右”的错位感。
+        for column in numeric_columns:
+            header_item = table.horizontalHeaderItem(column)
+            if header_item is not None:
+                header_item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -309,7 +322,7 @@ class AIUsageDialog(QDialog):
         self._metric_labels["total_tokens"].setText(f"{summary.total_tokens:,}")
         self._metric_labels["prompt_tokens"].setText(f"{summary.prompt_tokens:,}")
         self._metric_labels["completion_tokens"].setText(f"{summary.completion_tokens:,}")
-        self._metric_labels["avg_latency"].setText(f"{summary.avg_latency_ms:,} ms")
+        self._metric_labels["avg_latency"].setText(f"{summary.avg_latency_ms:,}")
 
         range_label = RANGE_OPTIONS[self._range_combo.currentIndex()][0]
         self._summary_note.setText(
@@ -327,7 +340,7 @@ class AIUsageDialog(QDialog):
                 f"{item.calls:,}",
                 f"{item.failed_calls:,}",
                 f"{item.total_tokens:,}",
-                f"{item.avg_latency_ms:,} ms",
+                f"{item.avg_latency_ms:,}",
             )
             for column, text in enumerate(values):
                 cell = QTableWidgetItem(text)
@@ -353,7 +366,7 @@ class AIUsageDialog(QDialog):
                 _format_tokens(call.prompt_tokens),
                 _format_tokens(call.completion_tokens),
                 _format_tokens(call.total_tokens),
-                f"{call.latency_ms:,} ms",
+                f"{call.latency_ms:,}",
                 status,
             )
             for column, text in enumerate(values):

@@ -393,6 +393,11 @@ QLabel#reviewMeaning {
     font-size: 18px;
     color: #111827;
 }
+QLabel#reviewPrompt {
+    font-size: 22px;
+    font-weight: 600;
+    color: #111827;
+}
 QLabel#reviewContext {
     color: #4B5563;
     font-size: 14px;

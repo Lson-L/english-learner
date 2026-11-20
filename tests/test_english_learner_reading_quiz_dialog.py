@@ -2,7 +2,7 @@
 
 Phase 3 起弹窗有两轮：
 - 第一轮 3 道当前等级选择题；
-- 第二轮锁定第一轮答案，补 2 道边界选择题 + 2 道产出题。
+- 第二轮锁定第一轮答案，补 2 道边界选择题 + 2 道英译中题。
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, Qt  # noqa: E402
 from PySide6.QtGui import QKeyEvent  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
 from english_learner.gui.reading_quiz_dialog import (  # noqa: E402
     MODE_QUIZ,
@@ -78,7 +78,18 @@ def choice_question(index: int, *, difficulty: str = "B1") -> QuizQuestion:
     )
 
 
-def production_question(index: int, *, skill: str = "writing") -> QuizQuestion:
+def production_question(index: int, *, skill: str = "translation") -> QuizQuestion:
+    if skill == "translation":
+        return QuizQuestion(
+            prompt=(
+                'Translate the following sentence into Chinese: "Small habits add up over time."'
+            ),
+            skill="translation",
+            difficulty="B1",
+            kind="short",
+            reference_answer="小习惯会随着时间的推移不断累积。",
+            explanation="评分要点：add up 译为累积。",
+        )
     return QuizQuestion(
         prompt=(
             "Rewrite the sentence in your own words."
@@ -108,7 +119,7 @@ def make_stage_one_quiz(article: Article) -> ReadingQuiz:
 def make_stage_two_quiz(article: Article, *, answers: tuple[int, ...] = (1, 1, 1)) -> ReadingQuiz:
     questions = tuple(choice_question(index) for index in range(1, 6)) + (
         production_question(6),
-        production_question(7, skill="rewrite"),
+        production_question(7),
     )
     return ReadingQuiz(
         id=1,
@@ -132,12 +143,12 @@ def make_completed_quiz(
         quiz,
         answers=(1, 1, 1, 1, 0),
         explanations=tuple(f"讲评第 {index} 题" for index in range(1, 8)),
-        error_types=("none", "none", "none", "none", "careless", "short_answer", "short_answer"),
-        short_answer_text="Small habits add up over time.",
+        error_types=("none", "none", "none", "none", "careless", "translation", "translation"),
+        short_answer_text="小习惯会随着时间的推移不断累积。",
         short_answer_score=1,
         productions=(
-            QuizProduction("Small habits add up over time.", 1, "抓住了主旨。"),
-            QuizProduction("Small habits change lives.", 1, "意思保留，语法正确。"),
+            QuizProduction("小习惯会随着时间的推移不断累积。", 1, "译文准确。"),
+            QuizProduction("它们以我们很少察觉的方式改变生活。", 1, "关键词译对。"),
         ),
         self_report="ok",
         score=6,
@@ -277,6 +288,45 @@ def test_cached_stage_two_locks_first_round_answers(tmp_path: Path) -> None:
     db.close()
 
 
+def test_stage_two_shows_chinese_translation_inputs(tmp_path: Path) -> None:
+    get_app()
+    db = Database(tmp_path / "data.db")
+    article = make_article(db)
+    service = StubQuizService(cached=make_stage_two_quiz(article))
+
+    dialog = ReadingQuizDialog(make_context(db, tmp_path), article, service=service)  # type: ignore[arg-type]
+
+    assert len(dialog._production_edits) == 2
+    assert all("中文" in edit.placeholderText() for edit in dialog._production_edits)
+    label_texts = [label.text() for label in dialog.findChildren(QLabel)]
+    assert any("英译中" in text for text in label_texts)
+    assert all("英文" not in edit.placeholderText() for edit in dialog._production_edits)
+    dialog.close()
+    db.close()
+
+
+def test_legacy_writing_question_keeps_english_placeholder(tmp_path: Path) -> None:
+    """旧缓存的英文短答/改写仍按原标签展示，不能误标成英译中。"""
+    get_app()
+    db = Database(tmp_path / "data.db")
+    article = make_article(db)
+    quiz = make_stage_two_quiz(article)
+    legacy = replace(
+        quiz,
+        questions=quiz.questions[:-1] + (production_question(7, skill="writing"),),
+    )
+    service = StubQuizService(cached=legacy)
+
+    dialog = ReadingQuizDialog(make_context(db, tmp_path), article, service=service)  # type: ignore[arg-type]
+
+    assert len(dialog._production_edits) == 2
+    assert "English" in dialog._production_edits[1].placeholderText()
+    label_texts = [label.text() for label in dialog.findChildren(QLabel)]
+    assert any("[短答]" in text for text in label_texts)
+    dialog.close()
+    db.close()
+
+
 def test_stage_one_requires_all_answers(tmp_path: Path) -> None:
     get_app()
     db = Database(tmp_path / "data.db")
@@ -341,7 +391,7 @@ def test_stage_two_requires_production_text(tmp_path: Path) -> None:
     dialog._submit_answers()
 
     assert dialog._worker is None
-    assert "产出题" in dialog._quiz_status.text()
+    assert "英译中" in dialog._quiz_status.text()
     assert service.submit_calls == 0
     dialog.close()
     db.close()

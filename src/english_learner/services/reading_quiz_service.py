@@ -17,7 +17,8 @@ Phase 2（本地证据模型）：
 Phase 3（自适应与更强诊断）：
 - 两阶段出题：先 3 道当前等级题，再按正确率出 2 道边界题；
 - 出题后增加“题目审核”pass，不合格题丢弃/重出；
-- 1 道短答 + 1 道句子改写/翻译，固定「内容 / 语法 / 词汇」rubric；
+- 2 道英译中题（从原文选句翻译成中文），按「理解准确 / 中文通顺」评分；
+  不再要求学习者写英文，检测目标聚焦阅读理解；
 - 等级盲评（不看当前等级）与讲评分两次调用；
 - 同一天只允许一次正式检测，第二次只练手、不调级。
 
@@ -115,6 +116,16 @@ BLIND_MAX_TOKENS = 1000
 WEAK_SKILL_MIN_SAMPLES = 2
 WEAK_SKILL_MAX_ACCURACY = 0.6
 WEAK_SKILL_LIMIT = 3
+
+# 产出题专用技能：选择题无法覆盖，不喂给选择题的“优先覆盖薄弱技能”规则。
+_PRODUCTION_SKILLS = {
+    "writing",
+    "rewrite",
+    "sentence_rewrite",
+    "translation",
+    "translate",
+    "short_answer",
+}
 
 LEVEL_ORDER = CEFR_LEVELS
 
@@ -320,11 +331,15 @@ def parse_stage_two_questions(
     level: str = "B1",
     target_level: str = "B1",
 ) -> tuple[QuizQuestion, ...]:
-    """第二轮：2 道边界选择题 + 2 道产出题（短答 + 改写/翻译）。
+    """第二轮：2 道边界选择题 + 2 道英译中题。
 
-    选择题一律回写为边界等级 `target`；产出题保留模型给出的难度，但收敛到
+    选择题一律回写为边界等级 `target`；英译中题保留模型给出的难度，但收敛到
     “当前等级 ~ 边界等级”区间内；模型漏标时用 target 兜底。
     这样既不让自报标签乱跳，也避免模型把上一轮的等级复制过来污染证据。
+
+    产出题的 skill 一律强制为 `translation`，并要求题面明确要求译成中文：
+    模型偶尔会退回“英文短答/改写”，这类题会让用户重新开始练写作，
+    与当前产品目标（只练阅读理解）冲突，直接判为不合格并触发重试。
     """
     try:
         data = parse_json_object(text)
@@ -359,7 +374,7 @@ def parse_stage_two_questions(
                 difficulty = CEFR_LEVELS[index]
             else:
                 difficulty = target
-            productions.append(replace(question, difficulty=difficulty))
+            productions.append(replace(question, difficulty=difficulty, skill="translation"))
         elif MIN_QUIZ_OPTIONS <= len(question.options) <= MAX_QUIZ_OPTIONS:
             choices.append(replace(question, difficulty=target))
 
@@ -367,11 +382,15 @@ def parse_stage_two_questions(
         raise InvalidQuizError(
             f"第二轮需要 {STAGE_TWO_CHOICE_COUNT} 道选择题（实际 {len(choices)}）"
         )
-    if len(productions) < STAGE_TWO_PRODUCTION_COUNT:
+
+    # 只接受题面明确要求“译成中文”的产出题；英文短答/改写会让用户重新练写作。
+    translations = [question for question in productions if question.is_translation]
+    if len(translations) < STAGE_TWO_PRODUCTION_COUNT:
         raise InvalidQuizError(
-            f"第二轮需要 {STAGE_TWO_PRODUCTION_COUNT} 道产出题（实际 {len(productions)}）"
+            f"第二轮需要 {STAGE_TWO_PRODUCTION_COUNT} 道英译中题"
+            f"（题面必须要求翻译成中文，实际 {len(translations)}）"
         )
-    return tuple(choices[:STAGE_TWO_CHOICE_COUNT] + productions[:STAGE_TWO_PRODUCTION_COUNT])
+    return tuple(choices[:STAGE_TWO_CHOICE_COUNT] + translations[:STAGE_TWO_PRODUCTION_COUNT])
 
 
 def parse_question_review(
@@ -769,7 +788,7 @@ class ReadingQuizService:
         level: str,
         target_level: str,
     ) -> tuple[QuizQuestion, ...]:
-        """生成第二轮 2 道边界题 + 2 道产出题；校验/审核失败时带原因重试一次。"""
+        """生成第二轮 2 道边界题 + 2 道英译中题；校验/审核失败时带原因重试一次。"""
         weak_skills = self._weak_skills()
         last_reason = ""
         for attempt in range(2):
@@ -845,6 +864,7 @@ class ReadingQuizService:
             for stat in stats
             if stat.skill
             and stat.skill != "unknown"
+            and stat.skill.lower() not in _PRODUCTION_SKILLS
             and stat.total >= WEAK_SKILL_MIN_SAMPLES
             and stat.accuracy < WEAK_SKILL_MAX_ACCURACY
         ]
@@ -1582,7 +1602,7 @@ def _parse_error_types(
     choice_position = 0
     for index, question in enumerate(quiz.questions):
         if question.is_short:
-            result.append("short_answer")
+            result.append("translation" if question.is_translation else "short_answer")
             continue
         chosen = answers[choice_position] if choice_position < len(answers) else -1
         choice_position += 1

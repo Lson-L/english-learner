@@ -3,7 +3,7 @@
 交互流程（Phase 3）：
 1. 打开时先查缓存：同一篇文章每一阶段只出一次题；
 2. 没有缓存 → 第一轮 3 道当前等级题；
-3. 用户答完第一轮 → 按正确率生成 2 道边界题 + 2 道产出题；
+3. 用户答完第一轮 → 按正确率生成 2 道边界题 + 2 道英译中题；
 4. 用户补完第二轮（第一轮答案锁定展示）→ 盲评 + 讲评 + 本地后验；
 5. 结果页展示得分、置信度、逐题解析与等级变化；
 6. 已完成的检测再次打开时直接展示结果，不重复判分。
@@ -55,10 +55,26 @@ _ERROR_LABELS = {
     "detail": "细节没抓住",
     "main_idea": "主旨把握不准",
     "grammar": "语法 / 句子结构",
+    "translation": "英译中理解偏差",
+    "short_answer": "表达不够准确",
+    "rewrite": "改写不准确",
     "careless": "粗心",
     "unknown": "原因不明",
 }
 _SELF_REPORT_TEXT = {"easy": "轻松", "ok": "刚好", "hard": "吃力"}
+
+
+def _production_label(question: QuizQuestion) -> str:
+    """产出题的中文标签；兼容旧缓存里的英文短答 / 改写。"""
+    if question.is_translation:
+        return "英译中"
+    if (question.skill or "").strip().lower() in {
+        "rewrite",
+        "sentence_rewrite",
+        "translation",
+    }:
+        return "句子改写 / 翻译"
+    return "短答"
 
 
 class ReadingQuizDialog(QDialog):
@@ -122,7 +138,7 @@ class ReadingQuizDialog(QDialog):
         root.addWidget(title)
 
         self._subtitle = QLabel(
-            "检测分两轮：先答 3 道当前等级题，再根据表现出 2 道边界题和 2 道产出题；"
+            "检测分两轮：先答 3 道当前等级题，再根据表现出 2 道边界题和 2 道英译中题；"
             "最后按本地后验与 AI 讲评调整等级。"
         )
         self._subtitle.setObjectName("pageSubtitle")
@@ -276,19 +292,33 @@ class ReadingQuizDialog(QDialog):
             self._stage_one_answers = tuple(quiz.answers[: quiz.choice_total])
         self._practice_hint = self._detect_practice_hint(quiz)
 
+        productions = [question for question in quiz.questions if question.is_short]
+        all_translation = bool(productions) and all(
+            question.is_translation for question in productions
+        )
+
         intro = Card()
         if stage == 1:
             title = QLabel(f"第 1 轮 · {quiz.choice_total} 道当前等级题")
             hint = (
                 "先做 3 道当前等级的选择题。提交后系统会按正确率决定第二轮"
-                "往上一档还是往下一档探测，并补 2 道产出题。"
+                "往上一档还是往下一档探测，并补 2 道英译中题。"
             )
         else:
-            title = QLabel(f"第 2 轮 · {quiz.choice_total} 道选择题 + {quiz.short_total} 道产出题")
-            hint = (
-                "第一轮的答案已锁定；请完成边界选择题，并用英文写 1~2 句短答、"
-                "完成句子改写/翻译。AI 会逐题讲评，等级由本地后验综合决定。"
+            production_label = "英译中" if all_translation else "产出题"
+            title = QLabel(
+                f"第 2 轮 · {quiz.choice_total} 道选择题 + {quiz.short_total} 道{production_label}"
             )
+            if all_translation:
+                hint = (
+                    "第一轮的答案已锁定；请完成边界选择题，并把英文句子翻译成中文。"
+                    "AI 会逐题讲评，等级由本地后验综合决定。"
+                )
+            else:
+                hint = (
+                    "第一轮的答案已锁定；请完成边界选择题和产出题。"
+                    "AI 会逐题讲评，等级由本地后验综合决定。"
+                )
         title.setObjectName("cardTitle")
         intro.body.addWidget(title)
         hint_label = QLabel(hint)
@@ -351,8 +381,9 @@ class ReadingQuizDialog(QDialog):
             )
             self._set_mode(MODE_QUIZ, "提交第一轮", primary_enabled=True)
         else:
+            production_label = "英译中" if all_translation else "产出题"
             self._subtitle.setText(
-                f"共 {quiz.choice_total} 道选择题 + {quiz.short_total} 道产出题；"
+                f"共 {quiz.choice_total} 道选择题 + {quiz.short_total} 道{production_label}；"
                 "提交后 AI 会讲评，等级由本地后验与盲评综合决定。"
             )
             self._set_mode(MODE_QUIZ, "提交答案", primary_enabled=True)
@@ -399,28 +430,41 @@ class ReadingQuizDialog(QDialog):
 
     def _build_production_input_card(self, index: int, question: QuizQuestion) -> QWidget:
         card = Card()
-        is_rewrite = (question.skill or "").lower() in {"rewrite", "translation"}
-        label = "句子改写 / 翻译" if is_rewrite else "短答"
+        label = _production_label(question)
         prompt = QLabel(f"{index}. [{label}] {question.prompt}")
         prompt.setObjectName("questionPrompt")
         prompt.setWordWrap(True)
         card.body.addWidget(prompt)
 
         difficulty = question.difficulty or "B1"
-        meta = QLabel(
-            f"题型：{question.skill or 'writing'} · 难度：{difficulty} · "
-            "用英文完成，AI 按「内容 / 语法 / 词汇」给 0/1 分。"
-        )
+        if question.is_translation:
+            meta_text = (
+                f"题型：英译中 · 难度：{difficulty} · "
+                "用中文翻译这句话，AI 按「理解准确 / 中文通顺」给 0/1 分。"
+            )
+            placeholder = "用中文写出这句话的意思。例如：这句话的意思是……"
+        else:
+            meta_text = (
+                f"题型：{question.skill or 'writing'} · 难度：{difficulty} · "
+                "用英文完成，AI 按「内容 / 语法 / 词汇」给 0/1 分。"
+            )
+            is_rewrite = (question.skill or "").lower() in {
+                "rewrite",
+                "sentence_rewrite",
+                "translation",
+            }
+            placeholder = (
+                "Rewrite the sentence in your own words."
+                if is_rewrite
+                else "Write 1-2 sentences in English. 例如：The passage mainly argues that ..."
+            )
+        meta = QLabel(meta_text)
         meta.setObjectName("muted")
         meta.setWordWrap(True)
         card.body.addWidget(meta)
 
         edit = QPlainTextEdit()
-        edit.setPlaceholderText(
-            "Rewrite the sentence in your own words."
-            if is_rewrite
-            else "Write 1-2 sentences in English. 例如：The passage mainly argues that ..."
-        )
+        edit.setPlaceholderText(placeholder)
         edit.setFixedHeight(88)
         card.body.addWidget(edit)
         self._production_edits.append(edit)
@@ -487,11 +531,11 @@ class ReadingQuizDialog(QDialog):
 
         productions = self._collect_productions()
         if quiz.short_total and any(not text for text in productions):
-            set_status(
-                self._quiz_status,
-                "请完成每道英文产出题（短答和句子改写/翻译）；写不出也可以写关键词。",
-                "error",
-            )
+            if all(question.is_translation for question in quiz.production_questions):
+                message = "请完成每道英译中题；写不出也可以写出你理解到的关键词。"
+            else:
+                message = "请完成每道产出题；写不出也可以写关键词。"
+            set_status(self._quiz_status, message, "error")
             if self._production_edits:
                 for edit, text in zip(self._production_edits, productions, strict=False):
                     if not text:
@@ -762,8 +806,7 @@ class ReadingQuizDialog(QDialog):
         production,
     ) -> Card:
         card = Card()
-        is_rewrite = (question.skill or "").lower() in {"rewrite", "translation"}
-        label = "句子改写 / 翻译" if is_rewrite else "短答"
+        label = _production_label(question)
         score = production.score if production is not None else 0
         scored = production.scored if production is not None else True
         if scored:
@@ -774,9 +817,7 @@ class ReadingQuizDialog(QDialog):
         heading.setObjectName("cardTitle")
         card.body.addWidget(heading)
 
-        meta = QLabel(
-            f"题型：{question.skill or 'writing'} · 难度：{question.difficulty or quiz.level}"
-        )
+        meta = QLabel(f"题型：{label} · 难度：{question.difficulty or quiz.level}")
         meta.setObjectName("muted")
         meta.setWordWrap(True)
         card.body.addWidget(meta)
@@ -787,14 +828,16 @@ class ReadingQuizDialog(QDialog):
         card.body.addWidget(prompt)
 
         text = production.text if production is not None else ""
-        answer = QLabel(f"你的回答：{text or '未作答'}")
+        answer_title = "你的译文" if question.is_translation else "你的回答"
+        answer = QLabel(f"{answer_title}：{text or '未作答'}")
         answer.setObjectName("muted")
         answer.setWordWrap(True)
         answer.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         card.body.addWidget(answer)
 
         if question.reference_answer:
-            reference = QLabel(f"参考思路：{question.reference_answer}")
+            reference_title = "参考翻译" if question.is_translation else "参考思路"
+            reference = QLabel(f"{reference_title}：{question.reference_answer}")
             reference.setObjectName("muted")
             reference.setWordWrap(True)
             reference.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)

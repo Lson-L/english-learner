@@ -13,7 +13,17 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from english_learner.gui.pages.review import ReviewPage  # noqa: E402
 from english_learner.models.entities import Word, now_iso, today_str  # noqa: E402
 from english_learner.services.app_context import AppContext  # noqa: E402
-from english_learner.services.config_store import AIConfig, ConfigStore  # noqa: E402
+from english_learner.services.config_store import (  # noqa: E402
+    REVIEW_MODE_RECOGNITION,
+    REVIEW_MODE_SPELLING,
+    AIConfig,
+    ConfigStore,
+)
+from english_learner.services.recall import (  # noqa: E402
+    STATUS_CORRECT,
+    STATUS_NEAR,
+    STATUS_WRONG,
+)
 from english_learner.services.srs import (  # noqa: E402
     RATING_FORGOT,
     RATING_KNOWN,
@@ -215,3 +225,217 @@ def test_session_respects_queue_limit(db: Database, tmp_path: Path) -> None:
 
     assert len(page._session) == 200
     assert page._progress_label.text() == "第 1 / 200 个"
+
+
+# ---------------------------------------------------------------- 拼写模式
+def make_spelling_word(lemma: str = "alpha", **overrides) -> Word:
+    """拼写模式测试词：释义里不带英文原词，避免题面泄题。"""
+    values = {
+        "meaning_cn": "第一个字母",
+        "example_en": f"This is {lemma}.",
+        "context_sentence": f"A sentence with {lemma} in it.",
+    }
+    values.update(overrides)
+    return make_word(lemma, **values)
+
+
+def enable_spelling(page: ReviewPage) -> None:
+    """通过下拉框切换到拼写模式（会顺带验证偏好落盘）。"""
+    page._mode_combo.setCurrentIndex(page._mode_combo.findData(REVIEW_MODE_SPELLING))
+
+
+def test_spelling_mode_persists_and_shows_prompt(db: Database, tmp_path: Path) -> None:
+    get_app()
+    db.words.upsert(make_spelling_word())
+    context = make_context(db, tmp_path)
+    page = ReviewPage(context)
+    page.on_activated()
+    assert page._mode_combo.currentData() == REVIEW_MODE_RECOGNITION
+
+    enable_spelling(page)
+
+    assert context.store.load_ui().review_mode == REVIEW_MODE_SPELLING
+    assert page._review_mode == REVIEW_MODE_SPELLING
+
+    page._start_session()
+    assert page._spelling_active is True
+    assert page._spelling_box.isHidden() is False
+    assert page._word_label.isHidden() is True
+    assert page._phonetic_label.isHidden() is True
+    assert page._prompt_meaning.text() == "第一个字母"
+    assert page._prompt_context.text() == "This is ____."
+    assert "alpha" not in page._prompt_context.text()
+    assert page._mode_combo.isEnabled() is False
+
+
+def test_spelling_correct_suggests_known_and_rates(db: Database, tmp_path: Path) -> None:
+    get_app()
+    stored = db.words.upsert(make_spelling_word())
+    assert stored.id is not None
+
+    page = ReviewPage(make_context(db, tmp_path))
+    page.on_activated()
+    enable_spelling(page)
+    page._start_session()
+
+    page._spelling_input.setText("  ALPHA ")
+    page._submit_spelling()
+
+    assert page._recall_result is not None
+    assert page._recall_result.status == STATUS_CORRECT
+    assert page._revealed is True
+    assert "拼写正确" in page._spelling_result.text()
+    assert "建议评分：认识（3）" in page._rating_hint.text()
+    assert page._answer_box.isHidden() is False
+    assert page._word_label.isHidden() is False
+    assert page._spelling_submit.isHidden() is True
+
+    page._rate(RATING_KNOWN)
+    assert page._stack.currentWidget() is page._summary_page
+    assert db.stats.get().reviews_done == 1
+
+
+def test_spelling_near_miss_suggests_vague(db: Database, tmp_path: Path) -> None:
+    get_app()
+    db.words.upsert(make_spelling_word())
+
+    page = ReviewPage(make_context(db, tmp_path))
+    page.on_activated()
+    enable_spelling(page)
+    page._start_session()
+
+    page._spelling_input.setText("alphx")
+    page._submit_spelling()
+
+    assert page._recall_result is not None
+    assert page._recall_result.status == STATUS_NEAR
+    assert "差一点" in page._spelling_result.text()
+    assert "建议评分：模糊（2）" in page._rating_hint.text()
+
+
+def test_spelling_wrong_suggests_forgot(db: Database, tmp_path: Path) -> None:
+    get_app()
+    db.words.upsert(make_spelling_word())
+
+    page = ReviewPage(make_context(db, tmp_path))
+    page.on_activated()
+    enable_spelling(page)
+    page._start_session()
+
+    page._spelling_input.setText("beta")
+    page._submit_spelling()
+
+    assert page._recall_result is not None
+    assert page._recall_result.status == STATUS_WRONG
+    assert "不对" in page._spelling_result.text()
+    assert "建议评分：忘记（1）" in page._rating_hint.text()
+
+
+def test_spelling_empty_answer_keeps_card(db: Database, tmp_path: Path) -> None:
+    get_app()
+    db.words.upsert(make_spelling_word())
+
+    page = ReviewPage(make_context(db, tmp_path))
+    page.on_activated()
+    enable_spelling(page)
+    page._start_session()
+
+    page._submit_spelling()
+
+    assert page._revealed is False
+    assert page._recall_result is None
+    assert "先输入" in page._status.text()
+
+
+def test_spelling_skip_reveals_without_suggestion(db: Database, tmp_path: Path) -> None:
+    get_app()
+    db.words.upsert(make_spelling_word())
+
+    page = ReviewPage(make_context(db, tmp_path))
+    page.on_activated()
+    enable_spelling(page)
+    page._start_session()
+
+    page._reveal()
+
+    assert page._recall_result is None
+    assert page._revealed is True
+    assert "已跳过" in page._spelling_result.text()
+    assert page._rating_hint.text() == "按 1~4 或点击按钮：忘记 / 模糊 / 认识 / 太简单"
+    assert page._answer_box.isHidden() is False
+
+
+def test_spelling_mode_disables_shortcuts_until_reveal(db: Database, tmp_path: Path) -> None:
+    """输入阶段不能让空格/回车/数字被 QShortcut 抢走。"""
+    get_app()
+    db.words.upsert(make_spelling_word())
+
+    page = ReviewPage(make_context(db, tmp_path))
+    page.on_activated()
+    enable_spelling(page)
+    page._start_session()
+
+    assert all(not shortcut.isEnabled() for shortcut in page._shortcuts)
+
+    page._spelling_input.setText("alpha")
+    page._submit_spelling()
+    assert all(shortcut.isEnabled() for shortcut in page._shortcuts)
+
+
+def test_phrase_word_falls_back_to_recognition(db: Database, tmp_path: Path) -> None:
+    get_app()
+    db.words.upsert(make_word("look up", meaning_cn="查阅", example_en="Look up the word."))
+
+    page = ReviewPage(make_context(db, tmp_path))
+    page.on_activated()
+    enable_spelling(page)
+    page._start_session()
+
+    assert page._spelling_active is False
+    assert page._spelling_box.isHidden() is True
+    assert page._word_label.isHidden() is False
+
+
+def test_mode_combo_reenabled_after_session(db: Database, tmp_path: Path) -> None:
+    get_app()
+    db.words.upsert(make_word("alpha"))
+
+    page = ReviewPage(make_context(db, tmp_path))
+    page.on_activated()
+    page._start_session()
+    assert page._mode_combo.isEnabled() is False
+
+    page._reveal()
+    page._rate(RATING_KNOWN)
+    assert page._mode_combo.isEnabled() is True
+
+
+def test_spelling_enter_submits(db: Database, tmp_path: Path) -> None:
+    """回车必须走 QLineEdit.returnPressed，而不是页面级 Return 快捷键。"""
+    get_app()
+    db.words.upsert(make_spelling_word())
+
+    page = ReviewPage(make_context(db, tmp_path))
+    page.on_activated()
+    enable_spelling(page)
+    page._start_session()
+
+    page._spelling_input.setText("alpha")
+    page._spelling_input.returnPressed.emit()
+
+    assert page._revealed is True
+    assert page._recall_result is not None
+    assert page._recall_result.status == STATUS_CORRECT
+
+
+def test_spelling_mode_reloads_from_config(db: Database, tmp_path: Path) -> None:
+    """下次启动时复习页要从 config.json 恢复上次选的模式。"""
+    get_app()
+    context = make_context(db, tmp_path)
+    first = ReviewPage(context)
+    enable_spelling(first)
+
+    second = ReviewPage(context)
+
+    assert second._review_mode == REVIEW_MODE_SPELLING
+    assert second._mode_combo.currentData() == REVIEW_MODE_SPELLING

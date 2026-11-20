@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from PySide6.QtWidgets import (
 from ...models.entities import today_str
 from ...services.ai_client import AIClient, ConnectionResult
 from ...services.app_context import AppContext
-from ...services.config_store import AIConfig, ConfigError, ConfigStore, UiConfig
+from ...services.config_store import AIConfig, ConfigError, ConfigStore
 from ...services.export_service import ExportResult
 from ...services.log_files import log_directory
 from ..ai_usage_dialog import AIUsageDialog
@@ -206,7 +207,8 @@ class SettingsPage(QWidget):
 
     def _on_english_font_changed(self, index: int) -> None:
         key = str(self._font_combo.itemData(index) or "")
-        self._ui = UiConfig(english_font=key)
+        # 用 replace 只改字体字段，保留 review_mode 等其他界面偏好。
+        self._ui = replace(self._ui, english_font=key)
         try:
             self._store.save_ui(self._ui)
         except (ConfigError, OSError) as exc:

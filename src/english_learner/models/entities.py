@@ -388,10 +388,12 @@ class AssessmentResult:
 # --------------------------------------------------------------- 阅读检测
 @dataclass(frozen=True)
 class QuizQuestion:
-    """阅读检测的一道题：选择题（kind=choice）或短答题（kind=short）。
+    """阅读检测的一道题：选择题（kind=choice）或主动产出题（kind=short）。
 
-    选择题用 `options + answer_index` 本地判分；短答题没有选项，
+    选择题用 `options + answer_index` 本地判分；产出题没有选项，
     由 AI 按 0/1 评分，`reference_answer` 只用于讲评与展示。
+    产出题用 `skill` 区分类型：`translation` = 英译中（当前默认），
+    `writing` / `rewrite` = 旧版英文短答 / 改写（兼容历史缓存）。
     """
 
     prompt: str
@@ -406,6 +408,18 @@ class QuizQuestion:
     @property
     def is_short(self) -> bool:
         return self.kind == "short"
+
+    @property
+    def is_translation(self) -> bool:
+        """是否是英译中题。
+
+        新题的 `skill` 固定为 `translation`，题面必须明确要求译成中文；
+        旧缓存的英文短答/改写不会被误认成英译中。
+        """
+        if (self.skill or "").strip().lower() not in {"translation", "translate"}:
+            return False
+        prompt = self.prompt or ""
+        return "中文" in prompt or "chinese" in prompt.lower()
 
     @classmethod
     def from_dict(cls, data: Any) -> QuizQuestion | None:

@@ -1,7 +1,7 @@
 """首次启动的摸底测评对话框。
 
 流程（对应 HISTORY.md M1-3）：
-1. 展示固定题库（默认 B1 套）：短文 + 5 道理解题 + 5 道词汇题 + 1 道翻译题；
+1. 展示固定题库（默认 B1 套）：短文 + 5 道理解题 + 5 道词汇题 + 1 道英译中题；
 2. 用户作答后，后台线程调用 AI 只做评分；
 3. 成功 → 结果页展示 CEFR / 词汇量 / 优势 / 薄弱点，写 profile；
 4. AI 失败 → 结果页切换成“手动选级”，保证流程不卡死。
@@ -178,7 +178,7 @@ class AssessmentDialog(QDialog):
         )
 
         translation_card = Card()
-        translation_title = QLabel("三、翻译")
+        translation_title = QLabel("三、翻译（英译中）")
         translation_title.setObjectName("cardTitle")
         translation_card.body.addWidget(translation_title)
         prompt = QLabel(self._set.translation_prompt)
@@ -186,7 +186,7 @@ class AssessmentDialog(QDialog):
         prompt.setWordWrap(True)
         translation_card.body.addWidget(prompt)
         self._translation_edit = QPlainTextEdit()
-        self._translation_edit.setPlaceholderText("在这里写下你的翻译…")
+        self._translation_edit.setPlaceholderText("在这里写下中文译文…")
         self._translation_edit.setFixedHeight(110)
         translation_card.body.addWidget(self._translation_edit)
         layout.addWidget(translation_card)
@@ -328,7 +328,7 @@ class AssessmentDialog(QDialog):
             self._title_label.setText("先做一次 5 分钟的摸底测评")
             self._subtitle_label.setText(
                 f"这套题按 {self._set.level_hint} 难度设计；"
-                "选择题本地计分，翻译题交给 AI 评分。"
+                "选择题本地计分，英译中题交给 AI 评分。"
                 "每道选择题都要作答，不会就选「不知道」；"
                 "选完可以在题目下写一句哪里看不懂，AI 评分时会参考。"
             )

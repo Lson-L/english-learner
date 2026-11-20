@@ -32,6 +32,11 @@ APP_DIR_NAME = "EnglishLearner"
 CONFIG_FILE_NAME = "config.json"
 CONFIG_VERSION = 1
 
+# 复习卡片模式：看词回忆（默认）/ 拼写回忆。
+REVIEW_MODE_RECOGNITION = "recognition"
+REVIEW_MODE_SPELLING = "spelling"
+REVIEW_MODES = (REVIEW_MODE_RECOGNITION, REVIEW_MODE_SPELLING)
+
 
 class ConfigError(RuntimeError):
     """配置文件损坏或内容不合法。"""
@@ -156,9 +161,13 @@ class UiConfig:
     `english_font` 是英文字体 key，留空表示“用户没选过”，默认值由界面层
     （`gui.fonts.DEFAULT_ENGLISH_FONT`）决定 —— services 层不依赖 PySide6，
     也不该知道有哪些可选字体。
+
+    `review_mode` 是复习卡片模式：`recognition`（看词回忆，默认）或
+    `spelling`（看释义拼写）。非法值一律回退默认，避免坏配置把复习页搞挂。
     """
 
     english_font: str = ""
+    review_mode: str = REVIEW_MODE_RECOGNITION
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -169,7 +178,10 @@ class UiConfig:
             return cls()
         # 兼容旧字段 reading_font：早期版本只把字体作用在正文上。
         raw = data.get("english_font") or data.get("reading_font") or ""
-        return cls(english_font=str(raw).strip().lower())
+        mode = str(data.get("review_mode") or REVIEW_MODE_RECOGNITION).strip().lower()
+        if mode not in REVIEW_MODES:
+            mode = REVIEW_MODE_RECOGNITION
+        return cls(english_font=str(raw).strip().lower(), review_mode=mode)
 
 
 class ConfigStore:

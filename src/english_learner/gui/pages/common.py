@@ -15,6 +15,7 @@ STATUS_COLORS = {
     "error": "#DC2626",
     "success": "#059669",
     "loading": "#2563EB",
+    "warning": "#B45309",
 }
 
 

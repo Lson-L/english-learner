@@ -511,3 +511,58 @@ tests/（共 313 个用例，全部 mock AI、无网络）
   全局 QSS 决定（CLAUDE.md 第 9 条），即使是日志窗口也不单独设等宽字体；
 - **导出**：`ai_calls` 是第十一张表；`ExportService` 的构造参数新增
   `ai_calls`（可选，默认 None），旧测试/调用方不传也能工作。
+
+### 6.24 M3.16：复习拼写回忆
+
+- **分层**：判分与题面生成放在 `services/recall.py`，纯函数、不依赖 PySide6 / AI；
+  `gui/pages/review.py` 只负责展示和交互。新增题型时先改这里，不要往 UI 里塞规则；
+- **判分**：`normalize_spelling()` 统一大小写、空白、首尾标点与弯引号；
+  `accepted_forms()` 返回 `lemma + display_form`，两者都算对；
+  `edit_distance()` 是标准 Levenshtein，距离 1 且长度 ≥ 3 才算“差一点”；
+  结果里的 `suggested_rating` 只用于界面提示，SM-2 仍由用户按 1~4 决定；
+- **题面**：`build_spelling_prompt()` 优先中文释义 + `example_en`，例句没出现目标词时
+  退回 `context_sentence`；两者都无法挖空就只给释义，宁可不给例句也不泄题。
+  `mask_occurrences()` 用 `\b` 单词边界和大小写不敏感替换，避免把 go 挖进 good；
+  释义里出现的英文原词也会被挖掉。含空格的短语、缺少释义的词返回 None，
+  复习页自动回退到看词回忆；
+- **UI 状态**：`_spelling_active` 表示当前卡片是否走拼写；拼写正面隐藏
+  `_word_label / _lemma_label / _phonetic_label / _pos_label / _context_label`，
+  翻面后再显示。输入框只读后保留用户答案，提交按钮隐藏；
+- **快捷键**：拼写输入阶段 `_set_shortcuts_enabled(False)` 禁用全部 QShortcut，
+  否则 QLineEdit 里的空格、回车和数字会被页面级快捷键抢走；判分翻面后恢复。
+  回车提交走 `QLineEdit.returnPressed`，不走 Return 快捷键；
+- **偏好**：`ui.review_mode`（`recognition` / `spelling`）由复习页直接保存；
+  设置页改字体必须用 `dataclasses.replace` 只改 `english_font`，否则会冲掉模式；
+- **不做的事**：不落新表、不调 AI、不自动改调度。想统计拼写正确率时再考虑给
+  `review_logs` 加列（需要 schema 升级 + 导出列同步）。
+
+### 6.25 M3.17：阅读检测产出题改为英译中
+
+- **产品约束**：阅读检测只练“读懂”，不练英语写作。第二轮产出题统一是
+  「原文选句 → 翻译成中文」，不再出现英文短答 / 改写；
+- **题型表示**：仍用 `kind=short`（产出题），`skill=translation` 区分类型；
+  `QuizQuestion.is_translation` 的判断是「skill 为 translation/translate 且
+  题面包含“中文”或“Chinese”」。UI、讲评、盲评、错因统计都复用这个属性，
+  不要各自写一套字符串判断；
+- **出题**：`build_quiz_stage_two_messages()` 要求 2 道英译中题，
+  第 1 道选关键信息/主旨句，第 2 道选含指代/转折/因果的句子；
+  直接引用原文，12~35 词，`reference_answer` 必须是中文；
+  `PROMPT_VERSION` 已升到 `m3-17`；
+- **解析校验**：`parse_stage_two_questions()` 把产出题 skill 强制写成
+  `translation`，再用 `is_translation` 过滤；不足 2 道就抛
+  `InvalidQuizError`，由服务层带原因重试。模型退回英文写作时不能放行；
+- **评分**：讲评 prompt 按题型给不同口径。英译中按「理解准确 / 中文通顺」：
+  准确传达原句意思给 1；关键词义、指代、否定、逻辑关系译错/漏译/译反给 0；
+  中文生硬不扣分。旧缓存里的 writing/rewrite 题仍按「内容 / 语法 / 词汇」；
+  `build_quiz_grading_messages()` 里的 `production_notes` 会作为
+  【产出题评分口径】逐题写进 prompt；
+- **兼容**：旧 `reading_quizzes.questions` JSON 不需要迁移；
+  `is_translation` 为 False 的产出题继续按旧标签展示与旧 rubric 评分；
+- **统计**：`question_outcomes()` 把英译中记到 `translation` 技能桶；
+  `_weak_skills()` 用 `_PRODUCTION_SKILLS` 过滤 writing/rewrite/translation
+  等产出题技能，避免选择题出题提示出现“优先覆盖 translation”这种无效要求；
+- **错因**：`_parse_error_types()` 对英译中固定写 `translation`，
+  旧产出题仍写 `short_answer`；结果页 `_ERROR_LABELS` 增加对应中文标签。
+- **摸底测评同步**：`assessment_bank.SET_A` 原来那道中译英改成英译中；
+  `build_assessment_messages()` 明确说明“重点看理解准确度，不要求英文写作”。
+  B1/B2 套本来就是英译中，改完后全应用没有要求写英文的输入题。

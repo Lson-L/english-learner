@@ -28,11 +28,11 @@ from .assessment_bank import OPTION_LETTERS, AssessmentSet, Question
 if TYPE_CHECKING:  # 避免与 assessment_service 循环导入
     from .assessment_service import AnswerSheet, ObjectiveScore
 
-PROMPT_VERSION = "m3-14"
+PROMPT_VERSION = "m3-17"
 
 # ---------------------------------------------------------------- 摸底测评
 ASSESSMENT_SYSTEM = (
-    "你是一名严谨的英语水平评估专家。你会根据用户的客观题作答和翻译表现，"
+    "你是一名严谨的英语水平评估专家。你会根据用户的客观题作答和英译中表现，"
     "判断其 CEFR 等级（A2/B1/B2/C1）。你只输出 JSON 对象，"
     "不输出解释、Markdown 标题或代码围栏。"
 )
@@ -70,7 +70,9 @@ def build_assessment_messages(
             "“题意没读懂”的参考，不要把它当成答案。"
         ),
         (
-            "请综合客观题正确率与翻译质量给出评级，并输出 JSON：\n"
+            "说明：翻译题是英译中，重点看是否准确理解原句的关键词、指代与逻辑关系，"
+            "不要求英文写作；中文表达稍生硬不影响评级。\n"
+            "请综合客观题正确率与英译中的理解准确度给出评级，并输出 JSON：\n"
             "{\n"
             '  "cefr": "B1",\n'
             '  "vocab_estimate": 3800,\n'
@@ -359,10 +361,11 @@ def build_reading_quiz_messages(
     level: str,
     question_count: int = QUIZ_QUESTION_COUNT,
 ) -> list[dict[str, str]]:
-    """根据今日文章出混合难度选择题 + 1 道短答题，供“阅读完成”后自测。
+    """旧版整卷出题：混合难度选择题 + 1 道英文短答。
 
-    混合难度是第一阶段的核心：同档题看当前水平，低档题排查粗心，
-    高档/高两档题探上限；短答题补充“产出能力”信号。
+    当前自适应流程已改用 `build_quiz_stage_one_messages` /
+    `build_quiz_stage_two_messages`；本函数只保留给历史回放与回归测试，
+    产出题仍是英文短答，不要在新流程里调用。
     """
     content = article.content.strip()
     if len(content) > 4000:
@@ -511,10 +514,12 @@ def build_quiz_stage_two_messages(
     weak_skills: Sequence[str] = (),
     repair_note: str = "",
 ) -> list[dict[str, str]]:
-    """第二轮：2 道边界难度选择题 + 1 道短答 + 1 道句子改写。
+    """第二轮：2 道边界难度选择题 + 2 道英译中题。
 
-    `target_level` 由第一轮正确率决定：答得好往上一档探测，答得差别往下确认。
-    `weak_skills` 让新题优先覆盖薄弱技能；`repair_note` 用于重试时带回失败原因。
+    产出题统一改成「从原文选句子 → 翻译成中文」，只检验阅读理解，
+    不再要求学习者用英文写作。`target_level` 由第一轮正确率决定：
+    答得好往上一档探测，答得差别往下确认。`weak_skills` 让选择题优先
+    覆盖薄弱技能；`repair_note` 用于重试时带回失败原因。
     """
     content = article.content.strip()
     if len(content) > 4000:
@@ -542,20 +547,23 @@ def build_quiz_stage_two_messages(
 
     user = (
         f"学习者刚刚完成了 {QUIZ_STAGE_ONE_COUNT} 道 {current} 难度的基础题。"
-        f"现在请根据这篇文章再出 {choice_count} 道边界探测题和 2 道产出题。\n\n"
+        f"现在请根据这篇文章再出 {choice_count} 道边界探测题和 2 道英译中题。\n\n"
         f"【标题】{article.title}\n"
         f"【主题】{article.topic or '未标注'}\n"
         f"【正文】\n{content}\n\n"
         "题目要求（严格遵守）：\n"
         f"1. 恰好 {choice_count} 道单项选择题，难度统一为 {target}，每题 4 个选项；\n"
-        "2. 再加 2 道主动产出题，都用 kind=short：\n"
-        "   - 第 1 道：英文短答（skill=writing），用 1~2 句概括观点或解释句子，"
-        f"难度 {current}~{target}；\n"
-        f"   - 第 2 道：句子改写或翻译（skill=rewrite），给出一句原文，要求改写或翻译成英文，"
-        f"难度 {current}~{target}；\n"
+        "2. 再加 2 道英译中题，都用 kind=short、skill=translation：\n"
+        "   - 每道题从文章中选 1 句完整的英文句子，要求学习者翻译成中文；\n"
+        "   - 第 1 道选包含关键信息或主旨的句子；第 2 道选包含指代、转折、因果等逻辑关系的句子；\n"
+        "   - 每句控制在 12~35 个英文单词，不要选整段，也不要把句子拆得太碎；\n"
+        '   - 题面写成 "Translate the following sentence into Chinese: \\"<原文句子>\\""；\n'
+        "   - reference_answer 必须给中文参考翻译，不要给英文；\n"
+        "   - 不要要求学习者写英文，不要出成选择题；\n"
+        f"   - 两道题难度分别标为 {current} 和 {target}（至少落在 {current}~{target} 之间）；\n"
         "3. 选择题要覆盖不同技能，干扰项合理；\n"
         "4. answer_index 用 0~3 的整数；explanation 用中文写依据/评分要点；\n"
-        "5. 两道产出题都要给 reference_answer；不要出成选择题；\n"
+        "5. 两道英译中题都要给 reference_answer；不要出成选择题；\n"
         f"{focus_rule}"
         f"{repair_rule}"
         "\n只输出 JSON：\n"
@@ -572,19 +580,21 @@ def build_quiz_stage_two_messages(
         "    },\n"
         "    {\n"
         '      "kind": "short",\n'
-        '      "prompt": "In 1-2 sentences, summarize ...",\n'
-        '      "skill": "writing",\n'
-        f'      "difficulty": "{target}",\n'
-        '      "reference_answer": "...",\n'
-        '      "explanation": "评分要点：内容 / 语法 / 词汇。"\n'
+        '      "prompt": "Translate the following sentence into Chinese: '
+        '\\"Small habits add up over time.\\"",\n'
+        '      "skill": "translation",\n'
+        f'      "difficulty": "{current}",\n'
+        '      "reference_answer": "小习惯会随着时间的推移不断累积。",\n'
+        '      "explanation": "评分要点：add up 译为“累积”，over time 译为“随着时间推移”。"\n'
         "    },\n"
         "    {\n"
         '      "kind": "short",\n'
-        '      "prompt": "Rewrite the sentence ... / Translate into English: ...",\n'
-        '      "skill": "rewrite",\n'
-        f'      "difficulty": "{current}",\n'
-        '      "reference_answer": "...",\n'
-        '      "explanation": "评分要点：意思是否保留、语法、用词。"\n'
+        '      "prompt": "Translate the following sentence into Chinese: '
+        '\\"They change our lives in ways we rarely notice.\\"",\n'
+        '      "skill": "translation",\n'
+        f'      "difficulty": "{target}",\n'
+        '      "reference_answer": "它们以我们很少察觉的方式改变着我们的生活。",\n'
+        '      "explanation": "评分要点：in ways 表示方式；rarely 是“很少、几乎不”。"\n'
         "    }\n"
         "  ]\n"
         "}"
@@ -625,7 +635,8 @@ def build_question_review_messages(
             lines.append(f"[{index}] 选择题：{prompt}\n{option_lines}")
         else:
             reference = str(getattr(question, "reference_answer", "") or "（未提供）")
-            lines.append(f"[{index}] 产出题：{prompt}\n   参考要点：{reference}")
+            label = "英译中" if getattr(question, "is_translation", False) else "产出题"
+            lines.append(f"[{index}] {label}：{prompt}\n   参考要点：{reference}")
 
     content = article.content.strip()
     if len(content) > 3000:
@@ -657,8 +668,8 @@ def build_question_review_messages(
 
 
 QUIZ_GRADING_SYSTEM = (
-    "你是一名英语阅读老师。你会根据学习者的答题情况讲评，并结合文章难度"
-    "重新判断他当前适合的 CEFR 等级。客观题得分已经由系统算好，不要重新计算。"
+    "你是一名英语阅读老师。你会根据学习者的答题情况讲评，重点判断英译中是否"
+    "真正理解了原文。客观题得分已经由系统算好，不要重新计算。"
     "你只输出 JSON 对象，不输出解释或代码围栏。"
 )
 
@@ -712,6 +723,18 @@ def _format_difficulty_stats(stats: Sequence[object]) -> str:
     return "【历史难度正确率】" + "；".join(items) + "\n"
 
 
+_SKILL_LABELS = {
+    "main_idea": "主旨",
+    "detail": "细节",
+    "inference": "推断",
+    "vocabulary": "语境词义",
+    "translation": "英译中",
+    "writing": "英文短答",
+    "rewrite": "句子改写",
+    "grammar": "语法",
+}
+
+
 def _format_skill_stats(stats: Sequence[object]) -> str:
     items = []
     for stat in stats:
@@ -720,7 +743,8 @@ def _format_skill_stats(stats: Sequence[object]) -> str:
         correct = int(getattr(stat, "correct", 0) or 0)
         if not skill or not total:
             continue
-        items.append(f"{skill} {correct}/{total}")
+        label = _SKILL_LABELS.get(skill, skill)
+        items.append(f"{label} {correct}/{total}")
     if not items:
         return ""
     return "【历史技能正确率】" + "；".join(items) + "\n"
@@ -768,18 +792,35 @@ def build_quiz_grading_messages(
                 texts[production_position].strip() if production_position < len(texts) else ""
             )
             production_position += 1
-            kind_label = "句子改写/翻译" if skill in {"rewrite", "translation"} else "短答"
             reference = question.reference_answer or "（未提供）"
-            lines.append(
-                f"第 {index} 题（{kind_label}，难度 {difficulty}，技能 {skill}）："
-                f"{question.prompt}\n"
-                f"   参考要点：{reference}\n"
-                f"   学习者作答：{answer_text or '（未作答）'}"
-            )
-            production_notes.append(
-                f"第 {index} 题（{kind_label}）按「内容 / 语法 / 词汇」三项评分，"
-                "达意且基本正确给 1，否则给 0。"
-            )
+            if question.is_translation:
+                lines.append(
+                    f"第 {index} 题（英译中，难度 {difficulty}，技能 translation）："
+                    f"{question.prompt}\n"
+                    f"   参考翻译：{reference}\n"
+                    f"   学习者译文：{answer_text or '（未作答）'}"
+                )
+                production_notes.append(
+                    f"第 {index} 题（英译中）按「理解准确 / 中文通顺」评分："
+                    "准确传达原句意思给 1；关键词义、指代、否定或逻辑关系译错、"
+                    "漏译、译反给 0；中文稍生硬不扣分。"
+                )
+            else:
+                kind_label = (
+                    "句子改写/翻译"
+                    if skill in {"rewrite", "sentence_rewrite", "translation"}
+                    else "短答"
+                )
+                lines.append(
+                    f"第 {index} 题（{kind_label}，难度 {difficulty}，技能 {skill}）："
+                    f"{question.prompt}\n"
+                    f"   参考要点：{reference}\n"
+                    f"   学习者作答：{answer_text or '（未作答）'}"
+                )
+                production_notes.append(
+                    f"第 {index} 题（{kind_label}）按「内容 / 语法 / 词汇」三项评分，"
+                    "达意且基本正确给 1，否则给 0。"
+                )
             continue
 
         chosen = answers[choice_position] if choice_position < len(answers) else -1
@@ -811,9 +852,12 @@ def build_quiz_grading_messages(
             "请严格按上面的 JSON 结构重新输出完整结果。"
         )
 
+    rubric_block = (
+        "【产出题评分口径】\n" + "\n".join(production_notes) + "\n\n" if production_notes else ""
+    )
     user = (
         "学习者读完了下面这篇文章，并完成了一套阅读检测"
-        "（自适应选择题 + 主动产出题）。\n\n"
+        "（自适应选择题 + 英译中题）。\n\n"
         f"【当前等级】{current}\n"
         f"【文章】《{article.title}》（{article.level}，{article.word_count} 词）\n"
         f"【选择题本地得分】{choice_correct}/{quiz.choice_total}\n"
@@ -825,21 +869,26 @@ def build_quiz_grading_messages(
         + "【题目与作答】\n"
         + "\n\n".join(lines)
         + "\n\n"
-        "请完成三件事：\n"
+        + rubric_block
+        + "请完成三件事：\n"
         "1. 逐题用中文讲评，重点解释答错的题；\n"
         "2. 给每道主动产出题打 0 或 1 分，并给一句中文反馈；\n"
         "3. 总结优势与薄弱点（不判断等级，等级由另一次盲评 + 本地后验决定）。\n\n"
         "评分规则：\n"
         "- 选择题得分已由系统算好，不要重新计算；\n"
-        "- 主动产出题固定按「内容 / 语法 / 词汇」三项看：意思达意、语法基本正确给 1；\n"
+        "- 英译中题按「理解准确 / 中文通顺」评分：准确传达原句意思给 1；"
+        "关键词义、指代、否定或逻辑关系译错、漏译、译反给 0；"
+        "不要求逐字直译，也不因中文文采或个别措辞扣分；\n"
+        "- 旧题里的短答/改写（如果出现）仍按「内容 / 语法 / 词汇」评分："
+        "意思达意、语法基本正确给 1；\n"
         "- 未作答或完全跑题给 0；\n"
         "- 历史正确率只用于解释趋势，不要因为历史分数直接下结论。\n\n"
         "只输出 JSON：\n"
         "{\n"
         '  "vocab_estimate": 3900,\n'
         '  "strengths": ["细节理解"],\n'
-        '  "weaknesses": ["推断题", "主动表达"],\n'
-        '  "comment": "选择题 4/5，短答基本达意，但推断题不稳定。",\n'
+        '  "weaknesses": ["推断题", "英译中关键词"],\n'
+        '  "comment": "选择题 4/5，英译中基本准确，但推断题不稳定。",\n'
         '  "explanations": ["第 1 题：……", "第 2 题：……"],\n'
         '  "error_types": ["none", "vocabulary", "..."],\n'
         f'  "production_scores": [{production_score_example}],\n'
@@ -849,7 +898,7 @@ def build_quiz_grading_messages(
         "- explanations 与题目顺序一一对应，每题一条（共 " + str(len(quiz.questions)) + " 条）；\n"
         "- error_types 与题目顺序一一对应，选择题用 "
         "none/vocabulary/inference/detail/main_idea/grammar/careless/unknown，"
-        "产出题统一用 short_answer；\n"
+        "英译中用 translation，旧短答/改写用 short_answer/rewrite；\n"
         "- production_scores 与产出题顺序一一对应（共 "
         + str(production_total)
         + " 条，每条 0 或 1）；\n"
@@ -890,8 +939,11 @@ def build_blind_level_messages(
                 else ""
             )
             production_position += 1
+            label = "英译中" if question.is_translation else "产出题"
+            answer_label = "学习者译文" if question.is_translation else "学习者作答"
             lines.append(
-                f"第 {index} 题（产出题）：{question.prompt}\n   学习者作答：{text or '（未作答）'}"
+                f"第 {index} 题（{label}）：{question.prompt}\n"
+                f"   {answer_label}：{text or '（未作答）'}"
             )
             continue
         chosen = answers[choice_position] if choice_position < len(answers) else -1

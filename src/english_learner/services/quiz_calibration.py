@@ -35,7 +35,7 @@ class DifficultyStat:
 
 @dataclass(frozen=True)
 class SkillStat:
-    """某个技能标签（main_idea / inference / writing…）下的正确率。"""
+    """某个技能标签（main_idea / inference / translation…）下的正确率。"""
 
     skill: str
     correct: int

@@ -10,6 +10,7 @@ M1 的职责：
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -28,7 +29,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..services.app_context import AppContext
-from ..services.config_store import AIConfig, ConfigStore, UiConfig
+from ..services.config_store import AIConfig, ConfigStore
 from ..storage.db import Database
 from .assessment_dialog import AssessmentDialog
 from .onboarding import OnboardingDialog
@@ -212,7 +213,7 @@ class MainWindow(QMainWindow):
         QSS 换掉后 Qt 会自动重刷所有控件；但文章正文是 QTextDocument 的默认字体，
         不受 QSS 管，必须单独调 ArticleView.set_english_font。
         """
-        self._ui = UiConfig(english_font=key)
+        self._ui = replace(self._ui, english_font=key)
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(build_stylesheet(key))

@@ -53,7 +53,7 @@ class Question:
 
 @dataclass(frozen=True)
 class AssessmentSet:
-    """一整套测评：短文 + 5 道理解题 + 5 道词汇题 + 1 道翻译题。"""
+    """一整套测评：短文 + 5 道理解题 + 5 道词汇题 + 1 道英译中题。"""
 
     key: str
     level_hint: str
@@ -157,7 +157,8 @@ SET_A = AssessmentSet(
         ),
     ),
     translation_prompt=(
-        "请把下面这句话翻译成英文：安娜每天坐公交车去上班，但今天下雨了，她没有带伞。"
+        "请把下面这句话翻译成中文：When Anna got off the bus, she found she had left "
+        "her umbrella at home."
     ),
 )
 

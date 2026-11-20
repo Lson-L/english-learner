@@ -1,8 +1,8 @@
 # Daily English 开发进度（当前看板）
 
 - 最后更新：2026-11-19
-- 当前阶段：**M3.15 完成**（AI 调用记录与日志查看）；M0 ~ M3.14 全部完成
-- 当前基线：**314 passed**（`uv run pytest`）；SQLite schema **v7**
+- 当前阶段：**M3.17 完成**（阅读检测产出题改为英译中）；M0 ~ M3.16 全部完成
+- 当前基线：**349 passed**（`uv run pytest`）；SQLite schema **v7**
 - 产品方向：[PRODUCT.md](PRODUCT.md)
 
 > **文档怎么读（重要，避免污染上下文）**
@@ -36,11 +36,15 @@
 | M3.13 | 兼容 opencode 网关（自动附加 `x-opencode-session`），404 提示补充协议不匹配说明 | ✅ 2026-11-19 |
 | M3.14 | 测评选择题加“不知道”选项与每题补充说明（交给 AI 评分参考），选择题必答 | ✅ 2026-11-19 |
 | M3.15 | AI 调用记录落库（任务 / token / 耗时 / 错误，不存 prompt 与回复）、设置页用量摘要、调用记录弹窗、应用内日志查看器 | ✅ 2026-11-19 |
+| M3.16 | 复习拼写回忆：看释义输入英文、本地判分与建议评分、模式偏好持久化 | ✅ 2026-11-19 |
+| M3.17 | 阅读检测产出题改为英译中：从原文选句翻译成中文、按理解准确评分，不再要求写英文 | ✅ 2026-11-19 |
 | M4 | 深色模式、安装器 / 自动更新（可选，未排期） | ⬜ 未开始 |
 
-当前能力（M3.15 后）：配置 AI → 测评 → 每日文章 → 双击查词 / 悬浮释义卡 →
-加入生词本 → 阅读检测（两轮自适应 + 盲评 + 本地后验 + 产出题）→ 每周复盘；
-SM-2 复习可完全离线；设置页可导出 JSON / CSV、查看 AI 调用记录与运行日志。
+当前能力（M3.17 后）：配置 AI → 测评 → 每日文章 → 双击查词 / 悬浮释义卡 →
+加入生词本 → 阅读检测（两轮自适应 + 盲评 + 本地后验 + 英译中产出题）→ 每周复盘；
+SM-2 复习可完全离线，支持「看词回忆」与「拼写回忆」两种卡片
+（拼写模式看中文释义输入英文，本地判分只给评分建议，不改调度）；
+设置页可导出 JSON / CSV、查看 AI 调用记录与运行日志。
 所有 AI 请求都带任务标签并写入 `ai_calls`（token / 耗时 / 错误，
 不保存提示词与模型回复）。
 
@@ -82,6 +86,10 @@ uv run pyinstaller --noconfirm --clean DailyEnglish.spec
 日志：`%APPDATA%\EnglishLearner\logs\app.log`
 想重演首次启动：删除上面的 `config.json`，或加 `--reconfigure`。
 
+> 本机 `uv run pytest -q` 偶发在 Qt offscreen 退出阶段返回 127（用例仍全部通过）；
+> 可尝试 `uv run pytest -q -p no:cacheprovider`。这是本机 Qt 清理与 pytest 的
+> 兼容问题，与业务代码无关；判断结果看用例输出，不要只看退出码。
+
 ## 4. M4 可选任务（未排期）
 
 - **深色模式**：把 `gui/theme.py` 的颜色抽成两套 palette，`config.json` 的
@@ -96,7 +104,7 @@ uv run pyinstaller --noconfirm --clean DailyEnglish.spec
 
 ```text
 继续 py-learn 的 english_learner。先读 CLAUDE.md 与 docs/english_learner/PROGRESS.md
-（当前看板，约 150 行），确认 M3.15 已完成、基线 314 passed。需要改 AI 客户端 /
+（当前看板，约 150 行），确认 M3.17 已完成、基线 349 passed。需要改 AI 客户端 /
 存储 / 阅读检测 / 导出时，再定向读 ARCHITECTURE.md 对应小节；HISTORY.md 只在查
 “以前为什么这么改”时看，不要默认加载；技术债见 TECH_DEBT.md。下一步优先做真实
 环境调优：混合难度与自适应出题质量、置信度阈值校准、每周复盘文案、真实网关的
