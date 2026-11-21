@@ -703,11 +703,25 @@ class ReaderPage(QWidget):
         self._panel.raise_()
 
     def _hide_word_card(self) -> None:
-        """收起卡片，并让进行中的查词结果作废（避免迟到的结果又弹出来）。"""
+        """收起卡片，并让进行中的查词结果作废（避免迟到的结果又弹出来）。
+
+        查词是最常见的“等不及”场景：用户关掉卡片后应当能立刻双击下一个词。
+        所以这里要把仍在运行的查词任务移出 `_worker` 槽位（`retire_worker`），
+        否则 `_on_word_selected` 会因为“槽位被占用”直接返回，直到 AI 返回前
+        双击任何单词都没反应。
+        """
         had_pending = self._pending is not None
         self._panel.hide()
         self._pending = None
         self._current_word_id = None
+
+        if self._busy_phase == "lookup":
+            worker = self._worker
+            if worker is not None and not worker.isFinished() and retire_worker(worker):
+                self._worker = None
+                self._busy_phase = ""
+                self._set_busy(False)
+
         if had_pending:
             set_status(self._status, "已收起释义卡。", "hint")
 

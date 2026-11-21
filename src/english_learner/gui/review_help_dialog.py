@@ -228,7 +228,8 @@ class ReviewHelpDialog(QDialog):
         for index, reason in enumerate(_QUICK_REASONS):
             button = QPushButton(reason)
             button.setObjectName("secondaryButton")
-            button.clicked.connect(lambda _checked=False, text=reason: self._append_reason(text))
+            # 点击时读按钮当前显示文本：低调模式下原因框也填英文。
+            button.clicked.connect(lambda _checked=False, b=button: self._append_reason(b.text()))
             self._reason_buttons.append(button)
             grid.addWidget(button, index // 3, index % 3)
         return grid

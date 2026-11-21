@@ -18,7 +18,9 @@ from __future__ import annotations
 import re
 
 from PySide6.QtCore import QEvent, QObject
-from PySide6.QtWidgets import QApplication, QPushButton, QWidget
+from PySide6.QtWidgets import QAbstractButton, QApplication, QWidget
+
+# 覆盖 QPushButton / QCheckBox / QRadioButton 等所有按钮类控件。
 
 # 低调模式开关。MainWindow 构造/切主题时会同步，保证全局一致。
 _low_profile = False
@@ -51,6 +53,14 @@ BUTTON_EN: dict[str, str] = {
     "重新生成记忆方法": "Regenerate mnemonic",
     "AI 生成记忆方法": "AI mnemonic",
     "按本句重查": "Look up in sentence",
+    "查询中…": "Looking up…",
+    # 复选框 / 单选项
+    "只看失败": "Failed only",
+    "自动刷新": "Auto refresh",
+    "显示": "Show",
+    "打开文章后自动预查生词": "Prefetch words after opening",
+    "复习时要求默写英文单词": "Type answers during review",
+    "不知道": "I don't know",
     # 生词本
     "删除": "Delete",
     "删除选中": "Delete selected",
@@ -66,6 +76,10 @@ BUTTON_EN: dict[str, str] = {
     "模糊": "Vague",
     "认识": "Known",
     "简单": "Easy",
+    "忘记 (1)": "Forgot (1)",
+    "模糊 (2)": "Vague (2)",
+    "认识 (3)": "Known (3)",
+    "太简单 (4)": "Too easy (4)",
     "继续": "Continue",
     "结束本轮": "End session",
     "撤销上一张": "Undo last",
@@ -102,6 +116,18 @@ BUTTON_EN: dict[str, str] = {
     "应用建议等级": "Apply suggested level",
     "重新评估并换一篇": "Re-evaluate & replace",
     "生成本周复盘": "Generate weekly review",
+    # 阅读难度反馈的快捷选项
+    "太难了，生词太多": "Too hard, too many new words",
+    "有点难，读得吃力": "A bit hard, slow going",
+    "难度刚好": "About right",
+    "有点简单，想要难一点": "A bit easy, make it harder",
+    # 复习求助的快捷原因
+    "和近义词混淆": "Confused with synonyms",
+    "只记得大概意思": "Only remember the gist",
+    "发音或拼写记不住": "Spelling or sound",
+    "不会在句子里用": "Can't use it in a sentence",
+    "完全没印象": "No memory of it",
+    "换个语境就不认识": "Lost in another context",
     "查看本周复盘": "View weekly review",
     "查看最近复盘": "View last review",
     "返回修改": "Back to edit",
@@ -133,7 +159,7 @@ BUTTON_EN_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^继续复习（还差 (\d+) 个）$"), r"Continue (\1 left)"),
 )
 
-_ORIGINAL_SET_TEXT = QPushButton.setText
+_ORIGINAL_SET_TEXT = QAbstractButton.setText
 
 
 def set_low_profile(value: bool) -> None:
@@ -155,17 +181,17 @@ def translate_button(text: str) -> str:
     return text
 
 
-def _patched_set_text(self: QPushButton, text: str) -> None:
+def _patched_set_text(self: QAbstractButton, text: str) -> None:
     """拦截页面代码的 setText：记住中文原文，显示翻译后的文本。"""
     self._source_text = text
     _ORIGINAL_SET_TEXT(self, translate_button(text))
 
 
 # 导入本模块即生效。默认模式是浅色/中文，translate 直接返回原文。
-QPushButton.setText = _patched_set_text  # type: ignore[method-assign]
+QAbstractButton.setText = _patched_set_text  # type: ignore[method-assign]
 
 
-def _source_text(button: QPushButton) -> str:
+def _source_text(button: QAbstractButton) -> str:
     """取按钮的中文原文；C++ 构造参数没有记录时用当前文本兜底。"""
     source = getattr(button, "_source_text", None)
     if source is None:
@@ -176,8 +202,8 @@ def _source_text(button: QPushButton) -> str:
 
 def refresh_buttons(root: QWidget) -> None:
     """切主题后刷新控件树里所有按钮的显示文本（原文保持不变）。"""
-    buttons: list[QPushButton] = [root] if isinstance(root, QPushButton) else []
-    buttons.extend(root.findChildren(QPushButton))
+    buttons: list[QAbstractButton] = [root] if isinstance(root, QAbstractButton) else []
+    buttons.extend(root.findChildren(QAbstractButton))
     for button in buttons:
         _ORIGINAL_SET_TEXT(button, translate_button(_source_text(button)))
 
@@ -186,7 +212,7 @@ class _ButtonTranslator(QObject):
     """兜底：`QPushButton("中文")` 的初始文本由 C++ 写入，不经 setText。"""
 
     def eventFilter(self, obj: object, event: QEvent) -> bool:  # noqa: N802 - Qt 约定
-        if event.type() == QEvent.Type.Show and isinstance(obj, QPushButton):
+        if event.type() == QEvent.Type.Show and isinstance(obj, QAbstractButton):
             _ORIGINAL_SET_TEXT(obj, translate_button(_source_text(obj)))
         return False
 

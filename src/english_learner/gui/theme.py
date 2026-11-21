@@ -288,6 +288,28 @@ QRadioButton {
     spacing: 8px;
     padding: 2px 0;
 }
+/* 选择题单选框：显式画 indicator，不依赖系统主题的默认圆点。
+   深色背景下默认样式几乎看不见，这里用强调色圆环 + 白色内点。 */
+/* 选中/未选中都用 5px 边框，保证总尺寸一致，勾选时选项行不会跳动。 */
+QRadioButton::indicator {
+    width: 6px;
+    height: 6px;
+    border: 5px solid __RADIO_BORDER__;
+    border-radius: 8px;
+    background: __RADIO_BG__;
+}
+QRadioButton::indicator:hover {
+    border-color: __ACCENT__;
+}
+QRadioButton::indicator:checked {
+    border-color: __ACCENT__;
+    background: __RADIO_DOT__;
+}
+/* 选中项文字同步加粗提亮，扫一眼就能看出选了哪个。 */
+QRadioButton:checked {
+    color: __TEXT_STRONG__;
+    font-weight: 600;
+}
 
 /* ---------- 阅读器与释义卡 ---------- */
 QTextEdit#articleView {
@@ -541,6 +563,9 @@ LIGHT_PALETTE: dict[str, str] = {
     "ON_ACCENT_DISABLED": "#F3F6FD",
     "SELECTION": "#BFD6FF",
     "SELECTION_TEXT": "#1F2937",
+    "RADIO_BORDER": "#C7CFDB",
+    "RADIO_BG": "#FFFFFF",
+    "RADIO_DOT": "#FFFFFF",
     "HOVER_BG": "#F3F4F6",
     "SCROLL_HANDLE": "#D3D9E4",
     "SCROLL_HANDLE_HOVER": "#B8C1D1",
@@ -602,6 +627,9 @@ LOW_PROFILE_PALETTE: dict[str, str] = {
     "ON_ACCENT_DISABLED": "#A7B8C8",
     "SELECTION": "#264F78",
     "SELECTION_TEXT": "#FFFFFF",
+    "RADIO_BORDER": "#6E7681",
+    "RADIO_BG": "#252526",
+    "RADIO_DOT": "#FFFFFF",
     "HOVER_BG": "#3A3A3A",
     "SCROLL_HANDLE": "#424242",
     "SCROLL_HANDLE_HOVER": "#4F4F4F",

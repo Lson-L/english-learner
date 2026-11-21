@@ -11,7 +11,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtGui import QTextCharFormat  # noqa: E402
-from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
+from PySide6.QtWidgets import QApplication, QCheckBox, QPushButton  # noqa: E402
 
 from english_learner.gui import fonts  # noqa: E402
 from english_learner.gui.i18n import refresh_buttons, set_low_profile  # noqa: E402
@@ -67,6 +67,15 @@ def test_low_profile_stylesheet_is_dark_and_mono() -> None:
     assert '"Consolas"' in css
     # 低调主题强制等宽，用户选的无衬线/衬线字体不再出现在字体链里。
     assert '"Literata"' not in css and '"Lexend"' not in css
+
+
+def test_radio_indicators_have_explicit_checked_style() -> None:
+    """选择题的选中态不能依赖系统默认圆点：两套主题都要有显式 indicator 样式。"""
+    for low_profile in (False, True):
+        css = build_stylesheet("lexend", low_profile=low_profile)
+        assert "QRadioButton::indicator:checked" in css
+        assert "QRadioButton::indicator:hover" in css
+        assert "QRadioButton:checked" in css
 
 
 def test_mono_stack_keeps_chinese_fallback() -> None:
@@ -171,6 +180,20 @@ def test_low_profile_translates_buttons_and_restores() -> None:
     set_low_profile(False)
     refresh_buttons(button)
     assert button.text() == "加练一轮（5 个）"
+
+
+def test_checkbox_labels_are_translated_too() -> None:
+    """复选框同样属于按钮类控件，低调模式下也要英文。"""
+    get_app()
+    checkbox = QCheckBox()
+    checkbox.setText("自动刷新")
+    set_low_profile(True)
+    try:
+        refresh_buttons(checkbox)
+        assert checkbox.text() == "Auto refresh"
+    finally:
+        set_low_profile(False)
+        refresh_buttons(checkbox)
 
 
 def test_untranslated_button_text_is_left_alone() -> None:

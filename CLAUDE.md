@@ -113,8 +113,9 @@ uv run ruff format src/english_learner tests
   （`ui.low_profile`）。`theme.py` 的颜色已抽成 `LIGHT_PALETTE` /
   `LOW_PROFILE_PALETTE`，QSS 模板只写 `__KEY__` 占位符，**新样式不要写死
   颜色**；低调模式下窗口标题与侧边栏文案中性化，生词本页顶部大标题也隐藏
-  （`PageHeader.set_title_visible`），所有 `QPushButton` 走 `gui/i18n.py`
-  转英文（新增按钮文案记得补 `BUTTON_EN`），英文字体统一为等宽链
+  （`PageHeader.set_title_visible`），所有 `QAbstractButton`
+  （QPushButton / QCheckBox / QRadioButton）走 `gui/i18n.py` 转英文
+  （新增按钮文案记得补 `BUTTON_EN`），英文字体统一为等宽链
   （用户选的 `english_font` 保留但不生效），正文由
   `ArticleView.set_english_font(key, mono=True)` 同步；生词高亮颜色随主题成对
   切换（暗色 `#5C4A22 / #FFE9A8`），主题变化时调

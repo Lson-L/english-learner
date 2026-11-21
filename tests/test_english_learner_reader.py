@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -452,6 +453,44 @@ def test_reader_page_uses_floating_word_card(db: Database) -> None:
     page._on_lookup_ready(object())
     assert page._pending is None
     assert page._panel.isHidden() is True
+
+
+def test_closing_word_card_releases_running_lookup(db: Database) -> None:
+    """查词进行中关闭卡片，要立刻释放 _worker 槽位，否则下一次双击被吞掉。"""
+    get_app()
+    db.articles.insert(make_article())
+    context = AppContext(
+        AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
+        ConfigStore(Path("unused.json")),
+        db,
+    )
+    page = ReaderPage(context)
+    page.on_activated()
+
+    started = threading.Event()
+
+    def slow_lookup() -> None:
+        started.set()
+        time.sleep(0.2)
+
+    worker = TaskWorker(slow_lookup)
+    worker.start()
+    assert started.wait(1)
+
+    # 模拟“AI 还没返回”的状态：槽位被占用、卡片处于加载中。
+    page._worker = worker
+    page._busy_phase = "lookup"
+    page._pending = ("word", 0, 4, "")
+    page._panel.show_loading("word")
+    page._show_word_card()
+
+    page._hide_word_card()
+
+    assert page._worker is None
+    assert page._busy_phase == ""
+    assert page._pending is None
+    assert page._panel.isHidden() is True
+    worker.wait(2000)
 
 
 def test_article_view_renders_highlights(db: Database) -> None:

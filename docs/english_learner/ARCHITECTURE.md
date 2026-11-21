@@ -240,11 +240,14 @@ tests/（共 522 个用例，全部 mock AI、无网络）
   切换，不重新读配置文件；导航按钮始终保留，只换文案。生词本页顶部的大标题
   由 `PageHeader.set_title_visible(False)` 隐藏（说明文字保留），主窗口在
   构造与切换主题时调用 `VocabularyPage.set_low_profile()`。
-- **按钮英文**：`gui/i18n.py` 用中文原文作 key 翻译 `QPushButton`。它 patch 了
-  `QPushButton.setText`（页面代码照旧写中文），并用应用级 Show 事件过滤器兜底
-  C++ 构造参数写入的初始文本；切换主题时 `refresh_buttons()` 重刷整棵控件树。
+- **按钮英文**：`gui/i18n.py` 用中文原文作 key 翻译所有 `QAbstractButton`
+  （QPushButton / QCheckBox / QRadioButton）。它 patch 了 `QAbstractButton.setText`
+  （页面代码照旧写中文），并用应用级 Show 事件过滤器兜底 C++ 构造参数写入的
+  初始文本；切换主题时 `refresh_buttons()` 重刷整棵控件树。
   **新增按钮文案要把中文原文补进 `BUTTON_EN`**（带数字的进 `BUTTON_EN_PATTERNS`），
-  漏了只会保持中文，不会报错。只覆盖 QPushButton，QLabel/状态提示不在范围内。
+  漏了只会保持中文，不会报错。QLabel/说明文字/输入框占位符不在范围内。
+  快捷选项按钮（阅读反馈、复习求助）点击时读 `button.text()` 回填输入框，
+  保证低调模式下输入框也是英文。
 - **生词高亮**：正文高亮是 `QTextDocument` 的 ExtraSelection，也不归 QSS 管。
   颜色必须按主题成对给出：浅色 `#FDE68A / #111827`，暗色 `#5C4A22 / #FFE9A8`
   （`article_view.HIGHLIGHT_COLORS`）——只换背景不换前景，暗色主题下浅灰字

@@ -173,7 +173,8 @@ class LevelFeedbackDialog(QDialog):
             button = QPushButton(text)
             button.setObjectName("linkButton")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.clicked.connect(lambda _checked=False, value=text: self._fill_feedback(value))
+            # 点击时读按钮当前显示文本：低调模式下填入英文，默认模式仍是中文。
+            button.clicked.connect(lambda _checked=False, b=button: self._fill_feedback(b.text()))
             quick_row.addWidget(button)
             self._quick_buttons.append(button)
         quick_row.addStretch(1)
