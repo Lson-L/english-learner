@@ -38,6 +38,10 @@ DEFAULT_DAILY_REVIEW_LIMIT = 20
 MIN_DAILY_REVIEW_LIMIT = 5
 MAX_DAILY_REVIEW_LIMIT = 200
 
+# 主窗口首次启动的默认尺寸；之后由 config.json 的 `window` 段覆盖。
+DEFAULT_WINDOW_WIDTH = 1240
+DEFAULT_WINDOW_HEIGHT = 800
+
 
 class ConfigError(RuntimeError):
     """配置文件损坏或内容不合法。"""
@@ -207,6 +211,36 @@ class UiConfig:
 
 
 @dataclass(frozen=True)
+class WindowState:
+    """主窗口几何快照，放在 config.json 的 `window` 段。
+
+    `geometry` 是 `QMainWindow.saveGeometry()` 结果的 base64 文本。没有拆成
+    `width/x/maximized` 这类可读字段，是因为 Qt 的几何坐标带窗口框架
+    （标题栏、边框），而 `setGeometry()` 用的是客户区坐标；自己换算会每次
+    启动偏移一个标题栏高度。`saveGeometry()/restoreGeometry()` 由 Qt 负责
+    框架换算、最大化和多屏兜底（旧位置不在任何屏幕上时会自动挪回来）。
+
+    空字符串表示“没有记录过”，界面层回退默认尺寸。services 层不依赖
+    PySide6，因此这里只当成一段不透明文本保存。
+    """
+
+    geometry: str = ""
+
+    def normalized(self) -> WindowState:
+        raw = self.geometry if isinstance(self.geometry, str) else ""
+        return WindowState(geometry=raw.strip())
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"geometry": self.normalized().geometry}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> WindowState:
+        if not isinstance(data, dict):
+            return cls()
+        return cls(geometry=str(data.get("geometry") or "")).normalized()
+
+
+@dataclass(frozen=True)
 class ReviewConfig:
     """复习偏好，放在 config.json 的 `review` 段。
 
@@ -324,6 +358,19 @@ class ConfigStore:
         payload["ui"] = ui.to_dict()
         self._write_payload(payload)
         return ui
+
+    def load_window_state(self) -> WindowState:
+        """读取主窗口几何；文件缺失或字段异常一律回退默认尺寸，不能挡住启动。"""
+        return WindowState.from_dict(self._read_payload().get("window", {}))
+
+    def save_window_state(self, state: WindowState) -> WindowState:
+        """只更新 `window` 段，其它段原样保留（和 `save_ui` 一样）。"""
+        normalized = state.normalized()
+        payload = self._strip_legacy_ai_fields(self._read_payload())
+        payload.setdefault("version", CONFIG_VERSION)
+        payload["window"] = normalized.to_dict()
+        self._write_payload(payload)
+        return normalized
 
     def load_review(self) -> ReviewConfig:
         """读取复习偏好；文件缺失或格式损坏一律回退默认值。"""

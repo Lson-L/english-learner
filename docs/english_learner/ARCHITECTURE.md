@@ -68,6 +68,7 @@ src/english_learner/
     ├── ai_usage_dialog.py      AI 调用记录弹窗（范围汇总 / 按任务 / 明细 / 清空）
     ├── log_viewer_dialog.py    运行日志查看器（轮转文件 / 关键字筛选 / 自动刷新）
     ├── main_window.py          导航 + 页面栈 + AppContext + 首次测评触发
+    ├── window_state.py         窗口几何保存 / 恢复（saveGeometry ↔ config.json）
     ├── widgets/
     │   ├── article_view.py     只读 QTextEdit：双击取词、高亮、17px/1.8 行距
     │   └── word_panel.py       悬浮释义卡（可滚动/关闭）+ 加入生词本按钮
@@ -113,6 +114,7 @@ tests/（共 522 个用例，全部 mock AI、无网络）
 ├── test_english_learner_workers.py       TaskWorker 成功/失败/取消/关闭等待
 ├── test_english_learner_settings_export.py 设置页导出入口与状态提示
 ├── test_english_learner_fonts.py         字体文件/字体链/Qt 注册/偏好读写/设置页切换
+├── test_english_learner_window_state.py  窗口几何快照读写/损坏兜底/关闭保存与重启恢复
 └── test_english_learner_gui_smoke.py     offscreen 冒烟（主窗口/导航/测评/反馈/脏检查）
 ```
 
@@ -954,3 +956,26 @@ tests/（共 522 个用例，全部 mock AI、无网络）
   `test_english_learner_article.py`（prompt / metrics / 重试）、
   `test_english_learner_feedback.py`（反馈优先）、
   `test_english_learner_gui_smoke.py`（空状态与 AppContext 接线）。
+
+### 6.37 窗口状态记忆（2026-11-21）
+
+- **存什么**：`config.json` 的 `window` 段只有一个 `geometry` 字段，内容是
+  `QMainWindow.saveGeometry()` 的 base64 文本；尺寸、位置、最大化 / 全屏状态、
+  所在屏幕信息都在快照里。`services/config_store.py` 的 `WindowState` 把它当成
+  不透明字符串，services 层仍然不依赖 PySide6；
+- **为什么不用 width/x/maximized**：Qt 的窗口几何带框架（标题栏、边框），
+  而 `setGeometry()` / `move()` 用的是客户区坐标。自己存框架坐标再
+  `setGeometry()` 会**每次启动偏移一个标题栏高度**（offscreen 测试里是 2px，
+  真实 Windows 上是 30px 左右）。`saveGeometry()/restoreGeometry()` 内部保存了
+  框架边距并负责换算，还自带多屏兜底：旧位置不在任何现有屏幕上时会挪回可见区域；
+- **时机**：`MainWindow.closeEvent` 在页面 `can_deactivate()` 通过后、等待后台
+  线程之前保存（写盘失败只记 warning）；`app.main()` 在 `app.exec()` 返回后
+  再调一次，覆盖「导入数据库 → 立即重启」用 `QApplication.quit()` 退出、
+  closeEvent 不触发的路径。重复写同一份数据没有副作用；
+- **兜底**：快照为空、base64 非法或 `restoreGeometry()` 返回 False 时，
+  `gui/window_state.restore_window_state()` 显式 `resize(1240, 800)`，
+  不会停在 Qt 的默认小窗口；首次启动与旧配置走的都是这条路径；
+- **测试注意**：offscreen 平台只有 800x800 的虚拟屏幕，`restoreGeometry()`
+  会把超宽窗口夹到屏幕内（`MainWindow` 再被 1080 最小宽度兜底）。所以
+  `test_english_learner_window_state.py` 用不受最小尺寸限制的 `ModelWindow`
+  验证精确往返，并比较 `frameGeometry()`（客户区 `pos()` 会差框架边距）。

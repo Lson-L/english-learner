@@ -37,6 +37,7 @@ from .onboarding import OnboardingDialog
 from .pages import ReaderPage, ReviewPage, SettingsPage, TodayPage, VocabularyPage
 from .theme import build_stylesheet
 from .weekly_review_dialog import WeeklyReviewDialog
+from .window_state import capture_window_state, restore_window_state
 from .workers import TaskWorker, wait_for_orphans
 
 logger = logging.getLogger(__name__)
@@ -100,7 +101,8 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(str(self._texts["window_title"]))
         self.setMinimumSize(1080, 680)
-        self.resize(1240, 800)
+        # 恢复上次关闭时的大小 / 位置 / 最大化状态；首次启动用默认尺寸。
+        restore_window_state(self, self._store.load_window_state())
 
         central = QWidget()
         root = QHBoxLayout(central)
@@ -313,6 +315,18 @@ class MainWindow(QMainWindow):
             self._settings_page.apply_config(self._config)
 
     # ---------------------------------------------------------------- 关闭
+    def save_window_state(self) -> None:
+        """记住窗口几何。
+
+        写盘失败只记日志：配置文件只读 / 磁盘满时用户仍然应该能关掉窗口。
+        `closeEvent` 与 `app.main()`（`QApplication.quit()` 不触发 closeEvent）
+        都会调用，重复写同一份数据没有副作用。
+        """
+        try:
+            self._store.save_window_state(capture_window_state(self))
+        except OSError as exc:
+            logger.warning("保存窗口状态失败：%s", exc)
+
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt 约定
         current_page = self._pages[self._stack.currentIndex()]
         can_deactivate = getattr(current_page, "can_deactivate", None)
@@ -320,6 +334,8 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
 
+        # 先存几何：后面的线程收尾可能等待网络超时，不应影响这次写入。
+        self.save_window_state()
         self._stop_worker_threads()
         # 被“取消”的任务还在后台等 HTTP 返回；它们仍可能写库，先等完再关连接。
         wait_for_orphans()

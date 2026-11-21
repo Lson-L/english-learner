@@ -753,6 +753,26 @@ M6.5（档内难度浮动）完成（2026-11-20）：
 - **测试**：新增查词槽位释放、单选样式、复选框翻译 3 个用例，
   全量 633 passed，`ruff check` 与 `ruff format --check` 通过。
 
+窗口状态记忆完成（2026-11-21，体验项）：
+
+- **场景**：每次启动窗口都回到 1240x800 居中，用户习惯最大化或拖到副屏后
+  需要重新摆一次；
+- **方案**：`MainWindow` 关闭时把 `QMainWindow.saveGeometry()` 的 base64 文本
+  写进 `config.json` 的 `window` 段，启动时在 `show()` 之前
+  `restoreGeometry()` 恢复；没有记录（首次启动 / 配置损坏）则回退
+  1240x800。services 层的 `WindowState` 只当不透明字符串保存，仍不依赖 Qt；
+- **为什么不用可读的 width/x/maximized**：窗口几何带框架（标题栏、边框），
+  而 `setGeometry()` 用客户区坐标，手写换算会**每次启动偏移一个标题栏高度**；
+  `saveGeometry()/restoreGeometry()` 由 Qt 负责框架换算、最大化 / 全屏状态和
+  多屏兜底（换显示器后旧位置不可见时自动挪回可见区域）；
+- **保存时机**：`closeEvent` 在页面脏检查通过后、等待后台线程之前写盘；
+  `app.main()` 在 `app.exec()` 返回后再调一次 `save_window_state()`，
+  覆盖「导入数据库 → 立即重启」走 `QApplication.quit()`（不触发 closeEvent）
+  的路径。写盘失败只记 warning，不阻塞退出；
+- **测试**：新增 16 个用例——配置段往返与保留其它段、空 / 损坏快照回退默认、
+  几何与最大化往返、关闭被页面拦截时不写盘、`MainWindow` 关闭后重新启动
+  能读到快照。全量 649 passed，`ruff check` 与 `ruff format --check` 通过。
+
 ## 5. 验证记录
 
 ### 5.1 M0（2026-11-18）

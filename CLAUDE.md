@@ -120,6 +120,11 @@ uv run ruff format src/english_learner tests
   `ArticleView.set_english_font(key, mono=True)` 同步；生词高亮颜色随主题成对
   切换（暗色 `#5C4A22 / #FFE9A8`），主题变化时调
   `ArticleView.set_low_profile()` 重绘。
+- **窗口状态记忆（2026-11-21）**：关闭时把 `QMainWindow.saveGeometry()` 快照
+  写入 `config.json` 的 `window` 段，启动时恢复大小 / 位置 / 最大化状态；
+  `WindowState` 只存不透明 base64，Qt 换算在 `gui/window_state.py`。
+  **不要改回手写 width/x + setGeometry**：框架坐标与客户区坐标差一个标题栏，
+  每次启动都会偏移。
 - **剩余为 M6.6 / M6.7**（强证据升级与边界文案）、可选 M4（深色模式、
   安装器 / 自动更新）与真实环境调优。当前看板见
   `docs/english_learner/PROGRESS.md`，已知技术债见 `TECH_DEBT.md`。

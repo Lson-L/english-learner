@@ -165,6 +165,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     # 首次使用（profile 为空）时弹测评；用户取消也不影响进入主界面。
     window.maybe_show_assessment()
     exit_code = app.exec()
+    # `QApplication.quit()`（导入数据库后的“立即重启”）不会触发 closeEvent，
+    # 这里补一次，保证窗口大小 / 最大化状态不会丢。
+    window.save_window_state()
     # 被取消但仍在等 HTTP 返回的任务可能还会写库，先等它们结束再关连接。
     wait_for_orphans()
     # 正常退出时显式释放连接，WAL 能干净合并，下次启动的备份/导入不受影响。
