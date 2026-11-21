@@ -51,7 +51,8 @@ from ..ai_usage_dialog import AIUsageDialog
 from ..app_restart import restart_application
 from ..fonts import ENGLISH_FONT_CHOICES, get_english_font
 from ..log_viewer_dialog import LogViewerDialog
-from ..workers import TaskWorker
+from ..widgets import busy_progress_bar
+from ..workers import TaskWorker, retire_worker
 from .common import Card, PageHeader, set_status
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,8 @@ class SettingsPage(QWidget):
     reconfigure_requested = Signal()
     # 英文字体切换：由主窗口负责重建全局 QSS 并同步阅读页。
     english_font_changed = Signal(str)
+    # 主题切换（True = 低调深色）：由主窗口重建 QSS 并更新窗口/侧边栏文案。
+    theme_changed = Signal(bool)
 
     def __init__(
         self,
@@ -138,8 +141,11 @@ class SettingsPage(QWidget):
         buttons.setSpacing(10)
         self._test_button = QPushButton("测试连接")
         self._test_button.setObjectName("secondaryButton")
-        self._test_button.clicked.connect(self._test_connection)
+        self._test_button.setToolTip("测试中可再次点击取消")
+        self._test_button.clicked.connect(self._on_test_clicked)
         buttons.addWidget(self._test_button)
+        self._test_progress = busy_progress_bar(width=96)
+        buttons.addWidget(self._test_progress)
 
         reconfigure_button = QPushButton("重新配置")
         reconfigure_button.setObjectName("primaryButton")
@@ -329,12 +335,21 @@ class SettingsPage(QWidget):
         form.setHorizontalSpacing(24)
         form.setVerticalSpacing(10)
 
+        self._theme_combo = QComboBox()
+        self._theme_combo.addItem("默认（浅色）", False)
+        self._theme_combo.addItem("低调（深色等宽）", True)
+        # 先设好选中项再连信号，避免构造期间误触发一次保存。
+        self._theme_combo.setCurrentIndex(1 if self._ui.low_profile else 0)
+        self._theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        form.addRow(self._form_label("界面主题"), self._theme_combo)
+
         self._font_combo = QComboBox()
         for choice in ENGLISH_FONT_CHOICES:
             self._font_combo.addItem(choice.label, choice.key)
         current_index = self._font_combo.findData(get_english_font(self._ui.english_font).key)
-        # 先设好选中项再连信号，避免构造期间误触发一次保存。
         self._font_combo.setCurrentIndex(max(current_index, 0))
+        # 低调主题强制等宽，字体选择此时不生效，置灰避免误解。
+        self._font_combo.setEnabled(not self._ui.low_profile)
         self._font_combo.currentIndexChanged.connect(self._on_english_font_changed)
         form.addRow(self._form_label("英语字体"), self._font_combo)
         card.body.addLayout(form)
@@ -350,11 +365,26 @@ class SettingsPage(QWidget):
         self._font_status = QLabel("")
         card.body.addWidget(self._font_status)
 
-        note = QLabel("作用于整个应用里所有英文：界面、文章、测评、释义卡；中文统一使用系统雅黑。")
+        note = QLabel(
+            "作用于整个应用里所有英文：界面、文章、测评、释义卡；中文统一使用系统雅黑。"
+            "低调主题会改用深色等宽字体，并把窗口标题与侧边栏换成中性文案。"
+        )
         note.setObjectName("muted")
         note.setWordWrap(True)
         card.body.addWidget(note)
         return card
+
+    def _on_theme_changed(self, index: int) -> None:
+        low_profile = bool(self._theme_combo.itemData(index))
+        self._ui = replace(self._ui, low_profile=low_profile)
+        try:
+            self._store.save_ui(self._ui)
+        except (ConfigError, OSError) as exc:
+            set_status(self._font_status, f"主题已切换，但偏好保存失败：{exc}", "error")
+        else:
+            set_status(self._font_status, "已保存，立即生效。", "hint")
+        self._font_combo.setEnabled(not low_profile)
+        self.theme_changed.emit(low_profile)
 
     def _on_english_font_changed(self, index: int) -> None:
         key = str(self._font_combo.itemData(index) or "")
@@ -726,12 +756,24 @@ class SettingsPage(QWidget):
         self._key_value.setText(self._config.masked_key())
         set_status(self._status, "修改配置后建议先测试一次连接。", "hint")
 
+    def _on_test_clicked(self) -> None:
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            if retire_worker(worker):
+                self._worker = None
+                self._on_test_finished()
+                set_status(self._status, "已取消连接测试。", "hint")
+            return
+        self._test_connection()
+
     def _test_connection(self) -> None:
         if self._worker is not None and self._worker.isRunning():
             return
 
-        self._test_button.setEnabled(False)
-        self._test_button.setText("测试中…")
+        # 保持按钮可点：测试中再点一次用于取消。
+        self._test_button.setEnabled(True)
+        self._test_button.setText("取消测试")
+        self._test_progress.setVisible(True)
         set_status(self._status, "正在连接，请稍候…", "loading")
 
         config = self._config
@@ -760,6 +802,7 @@ class SettingsPage(QWidget):
     def _on_test_finished(self) -> None:
         self._test_button.setEnabled(True)
         self._test_button.setText("测试连接")
+        self._test_progress.setVisible(False)
         self._worker = None
         # 连接测试本身也会产生一条调用记录，摘要要跟着变。
         self._refresh_usage_summary()

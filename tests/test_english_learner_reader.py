@@ -653,6 +653,47 @@ def test_word_panel_shows_original_form_and_mnemonic() -> None:
     assert panel._mnemonic.isHidden() is False
 
 
+def test_reader_cancel_generation_frees_ui_immediately(db: Database) -> None:
+    """点取消后旧请求转入后台，界面立刻恢复并露出「重试生成」。"""
+    get_app()
+    context = AppContext(
+        AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
+        ConfigStore(Path("unused.json")),
+        db,
+    )
+    page = ReaderPage(context)
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def task() -> str:
+        started.set()
+        release.wait(3)
+        return "done"
+
+    worker = TaskWorker(task)
+    worker.start()
+    assert started.wait(2.0) is True
+
+    page._worker = worker
+    page._busy_phase = "generate"
+    page._set_busy(True)
+    assert page._cancel_button.isHidden() is False
+
+    page._on_cancel_clicked()
+
+    assert page._worker is None
+    assert worker.is_cancelled() is True
+    assert page._generation_failed is True
+    assert page._generate_button.isHidden() is False
+    assert page._generate_button.text() == "重试生成"
+    assert page._cancel_button.isHidden() is True
+    assert "已取消生成" in page._status.text()
+
+    release.set()
+    assert worker.wait(3000) is True
+
+
 def test_reader_shutdown_returns_worker_that_ignores_cancel(db: Database) -> None:
     """关闭页面时先等宽限期；任务卡住时把 worker 交回主窗口兜底等待。"""
     get_app()

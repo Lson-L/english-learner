@@ -32,11 +32,12 @@ from ..services.app_context import AppContext
 from ..services.config_store import AIConfig, ConfigStore
 from ..storage.db import Database
 from .assessment_dialog import AssessmentDialog
+from .i18n import refresh_buttons, set_low_profile
 from .onboarding import OnboardingDialog
 from .pages import ReaderPage, ReviewPage, SettingsPage, TodayPage, VocabularyPage
 from .theme import build_stylesheet
 from .weekly_review_dialog import WeeklyReviewDialog
-from .workers import TaskWorker
+from .workers import TaskWorker, wait_for_orphans
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,34 @@ PAGE_READER = 1
 PAGE_VOCABULARY = 2
 PAGE_REVIEW = 3
 PAGE_SETTINGS = 4
+
+# 侧边栏与窗口文案：默认 / 低调主题两套。
+# 低调模式刻意避开“英语”“生词本”这类字眼，导航保持英文短词，远看像一个
+# 普通的本地工作台；窗口标题用中性的 "Workspace"，不冒充具体软件。
+_SIDEBAR_TEXTS: dict[bool, dict[str, object]] = {
+    False: {
+        "window_title": "Daily English · 每日英语",
+        "title": "Daily English",
+        "subtitle": "每天读一点，就会不一样",
+        "section": "学习",
+        "other_section": "其他",
+        "nav": ("今日", "阅读", "生词本", "复习"),
+        "settings": "设置",
+        "footer": None,
+        "app_display_name": "Daily English",
+    },
+    True: {
+        "window_title": "Workspace",
+        "title": "Workspace",
+        "subtitle": "local",
+        "section": "WORKSPACE",
+        "other_section": "SYSTEM",
+        "nav": ("Today", "Docs", "Words", "Review"),
+        "settings": "Settings",
+        "footer": "local · offline",
+        "app_display_name": "Workspace",
+    },
+}
 
 
 class MainWindow(QMainWindow):
@@ -63,8 +92,13 @@ class MainWindow(QMainWindow):
         self._db = db if db is not None else Database()
         self._context = AppContext(config, store, self._db)
         self._assessment_dialog: AssessmentDialog | None = None
+        # 低调主题影响窗口标题、侧边栏文案与按钮语言；QSS 由 app.main() 按同一偏好生成。
+        self._low_profile = self._ui.low_profile
+        self._texts = _SIDEBAR_TEXTS[self._low_profile]
+        # 全局开关必须在子控件创建前同步：之后构造的按钮会直接显示英文。
+        set_low_profile(self._low_profile)
 
-        self.setWindowTitle("Daily English · 每日英语")
+        self.setWindowTitle(str(self._texts["window_title"]))
         self.setMinimumSize(1080, 680)
         self.resize(1240, 800)
 
@@ -83,8 +117,11 @@ class MainWindow(QMainWindow):
         self._settings_page = SettingsPage(config, store, self._context)
         self._settings_page.reconfigure_requested.connect(self._open_reconfigure)
         self._settings_page.english_font_changed.connect(self._apply_english_font)
-        # 全局 QSS 已在 app.main() 按偏好生成；这里只需同步正文文档字体。
-        self._reader_page.apply_english_font(self._ui.english_font)
+        self._settings_page.theme_changed.connect(self._apply_low_profile)
+        # 全局 QSS 已在 app.main() 按偏好生成；这里只需同步正文文档字体与高亮配色。
+        self._reader_page.apply_english_font(self._ui.english_font, mono=self._low_profile)
+        self._reader_page.apply_low_profile(self._low_profile)
+        self._vocabulary_page.set_low_profile(self._low_profile)
 
         self._today_page.read_requested.connect(lambda: self._go(PAGE_READER))
         self._today_page.assessment_requested.connect(self.run_assessment)
@@ -104,6 +141,8 @@ class MainWindow(QMainWindow):
         root.addWidget(self._stack, 1)
         self.setCentralWidget(central)
         self._go(PAGE_TODAY)
+        # 构造参数写进 C++ 的初始文本不经过 setText，这里统一补一次翻译。
+        refresh_buttons(self)
 
     # ------------------------------------------------------------------ UI
     def _build_sidebar(self) -> QFrame:
@@ -115,37 +154,47 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 24, 16, 18)
         layout.setSpacing(6)
 
-        title = QLabel("Daily English")
-        title.setObjectName("appTitle")
-        layout.addWidget(title)
+        self._brand_label = QLabel(str(self._texts["title"]))
+        self._brand_label.setObjectName("appTitle")
+        layout.addWidget(self._brand_label)
 
-        subtitle = QLabel("每天读一点，就会不一样")
-        subtitle.setObjectName("appSubtitle")
-        layout.addWidget(subtitle)
+        self._subtitle_label = QLabel(str(self._texts["subtitle"]))
+        self._subtitle_label.setObjectName("appSubtitle")
+        layout.addWidget(self._subtitle_label)
         layout.addSpacing(22)
 
-        section = QLabel("学习")
-        section.setObjectName("sidebarSection")
-        layout.addWidget(section)
+        self._section_label = QLabel(str(self._texts["section"]))
+        self._section_label.setObjectName("sidebarSection")
+        layout.addWidget(self._section_label)
 
         self._nav_group = QButtonGroup(self)
         self._nav_group.setExclusive(True)
-        for index, text in enumerate(("今日", "阅读", "生词本", "复习")):
-            layout.addWidget(self._nav_button(text, index))
+        self._nav_buttons: list[QPushButton] = []
+        for index, text in enumerate(self._texts["nav"]):
+            button = self._nav_button(str(text), index)
+            self._nav_buttons.append(button)
+            layout.addWidget(button)
 
         layout.addSpacing(18)
-        settings_section = QLabel("其他")
-        settings_section.setObjectName("sidebarSection")
-        layout.addWidget(settings_section)
-        layout.addWidget(self._nav_button("设置", PAGE_SETTINGS))
+        self._other_section_label = QLabel(str(self._texts["other_section"]))
+        self._other_section_label.setObjectName("sidebarSection")
+        layout.addWidget(self._other_section_label)
+        self._settings_button = self._nav_button(str(self._texts["settings"]), PAGE_SETTINGS)
+        layout.addWidget(self._settings_button)
 
         layout.addStretch(1)
 
-        footer = QLabel(f"M3.11 · v{__version__}\n数据仅保存在本机")
-        footer.setObjectName("sidebarFooter")
-        footer.setWordWrap(True)
-        layout.addWidget(footer)
+        self._footer_label = QLabel(self._footer_text())
+        self._footer_label.setObjectName("sidebarFooter")
+        self._footer_label.setWordWrap(True)
+        layout.addWidget(self._footer_label)
         return sidebar
+
+    def _footer_text(self) -> str:
+        """低调模式不展示版本号与“本地运行”这类学习产品话术。"""
+        if self._low_profile:
+            return str(self._texts["footer"])
+        return f"v{__version__} · 本地运行\n数据仅保存在本机"
 
     def _nav_button(self, text: str, index: int) -> QPushButton:
         button = QPushButton(text)
@@ -216,8 +265,44 @@ class MainWindow(QMainWindow):
         self._ui = replace(self._ui, english_font=key)
         app = QApplication.instance()
         if app is not None:
-            app.setStyleSheet(build_stylesheet(key))
-        self._reader_page.apply_english_font(key)
+            app.setStyleSheet(build_stylesheet(key, low_profile=self._low_profile))
+        self._reader_page.apply_english_font(key, mono=self._low_profile)
+
+    def _apply_low_profile(self, low_profile: bool) -> None:
+        """设置页切换主题：重建 QSS，并同步窗口标题与侧边栏文案。
+
+        低调模式下英文字体固定为等宽，用户原先选的字体保留在配置里，
+        关掉低调主题后自动恢复。
+        """
+        self._low_profile = bool(low_profile)
+        self._texts = _SIDEBAR_TEXTS[self._low_profile]
+        # 字体变化由 english_font_changed 同步；这里只更新主题字段，
+        # 不重新读文件——保存失败时也不会把界面切回旧主题。
+        self._ui = replace(self._ui, low_profile=self._low_profile)
+
+        self.setWindowTitle(str(self._texts["window_title"]))
+        self._brand_label.setText(str(self._texts["title"]))
+        self._subtitle_label.setText(str(self._texts["subtitle"]))
+        self._section_label.setText(str(self._texts["section"]))
+        self._other_section_label.setText(str(self._texts["other_section"]))
+        for button, text in zip(self._nav_buttons, self._texts["nav"], strict=False):
+            button.setText(str(text))
+        self._settings_button.setText(str(self._texts["settings"]))
+        self._footer_label.setText(self._footer_text())
+
+        # 按钮语言跟随主题：set_low_profile 决定后续新按钮，refresh 更新已有按钮。
+        set_low_profile(self._low_profile)
+        refresh_buttons(self)
+
+        app = QApplication.instance()
+        if app is not None:
+            app.setApplicationDisplayName(str(self._texts["app_display_name"]))
+            app.setStyleSheet(
+                build_stylesheet(self._ui.english_font, low_profile=self._low_profile)
+            )
+        self._reader_page.apply_english_font(self._ui.english_font, mono=self._low_profile)
+        self._reader_page.apply_low_profile(self._low_profile)
+        self._vocabulary_page.set_low_profile(self._low_profile)
 
     # -------------------------------------------------------------- 配置变更
     def _open_reconfigure(self) -> None:
@@ -236,6 +321,8 @@ class MainWindow(QMainWindow):
             return
 
         self._stop_worker_threads()
+        # 被“取消”的任务还在后台等 HTTP 返回；它们仍可能写库，先等完再关连接。
+        wait_for_orphans()
         self._context.close()
         self._db.close()
         super().closeEvent(event)

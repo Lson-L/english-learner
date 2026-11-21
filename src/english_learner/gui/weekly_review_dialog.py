@@ -28,7 +28,8 @@ from ..models.entities import Profile, WeeklyReview
 from ..services.app_context import AppContext
 from ..services.weekly_review_service import WeeklyReviewService
 from .pages.common import Card, divider
-from .workers import TaskWorker
+from .widgets import busy_progress_bar
+from .workers import TaskWorker, retire_worker
 
 
 class WeeklyReviewDialog(QDialog):
@@ -92,6 +93,13 @@ class WeeklyReviewDialog(QDialog):
 
         footer = QHBoxLayout()
         footer.setSpacing(10)
+        self._busy_progress = busy_progress_bar(width=110)
+        footer.addWidget(self._busy_progress)
+        self._cancel_button = QPushButton("取消")
+        self._cancel_button.setObjectName("secondaryButton")
+        self._cancel_button.setToolTip("生成中可以取消；本次不会修改任何数据")
+        self._cancel_button.clicked.connect(self._on_cancel_clicked)
+        footer.addWidget(self._cancel_button)
         self._retry_button = QPushButton("重试")
         self._retry_button.setObjectName("secondaryButton")
         self._retry_button.setVisible(False)
@@ -133,6 +141,8 @@ class WeeklyReviewDialog(QDialog):
         self._body_layout.addStretch(1)
         self._keep_button.setEnabled(False)
         self._apply_button.setEnabled(False)
+        self._cancel_button.setText("取消请求")
+        self._busy_progress.setVisible(True)
 
         service = self._service
         worker = TaskWorker(lambda: service.get_or_generate(profile))
@@ -264,6 +274,18 @@ class WeeklyReviewDialog(QDialog):
     def _on_worker_finished(self) -> None:
         self._worker = None
         self._keep_button.setEnabled(True)
+        self._cancel_button.setText("取消")
+        self._busy_progress.setVisible(False)
+
+    def _on_cancel_clicked(self) -> None:
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            if retire_worker(worker):
+                self._worker = None
+                self._on_worker_finished()
+                self._show_error("已取消生成复盘；本次没有修改任何数据。")
+            return
+        self.reject()
 
     # ------------------------------------------------------------ 关闭保护
     def reject(self) -> None:  # noqa: D401 - Qt 约定

@@ -596,7 +596,7 @@ class WordRepo(_BaseRepo):
 
 
 class ReviewRepo(_BaseRepo):
-    """复习历史（review_logs）：只追加，不修改。"""
+    """复习历史（review_logs）：只追加；界面“撤销上一张”是唯一删除入口。"""
 
     def log(
         self,
@@ -646,6 +646,11 @@ class ReviewRepo(_BaseRepo):
             verdict=verdict.strip(),
             distance=max(0, int(distance)),
         )
+
+    def delete(self, log_id: int) -> bool:
+        """删除一条复习记录（仅供“撤销上一张”回滚刚写入的日志）。"""
+        cursor = self._db.execute("DELETE FROM review_logs WHERE id = ?", (int(log_id),))
+        return cursor.rowcount > 0
 
     def list_for_word(self, word_id: int, limit: int = 20) -> list[ReviewLog]:
         rows = self._db.query_all(

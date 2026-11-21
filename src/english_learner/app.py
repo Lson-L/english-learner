@@ -22,9 +22,12 @@ from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from . import __version__
 from .gui.fonts import load_application_fonts
+from .gui.i18n import install as install_button_translator
+from .gui.i18n import set_low_profile
 from .gui.main_window import MainWindow
 from .gui.onboarding import OnboardingDialog
 from .gui.theme import build_stylesheet
+from .gui.workers import wait_for_orphans
 from .services.backup_service import run_startup_backup
 from .services.config_store import AIConfig, ConfigError, ConfigStore, log_dir
 from .services.database_transfer import apply_pending_import
@@ -111,10 +114,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     app.setStyle("Fusion")
     # 字体必须在应用样式表之前注册，否则 QSS 里的族名会被解析成“不存在的字体”而回退。
     load_application_fonts()
+    # 按钮文案翻译要在任何窗口（含配置向导）创建之前生效。
+    install_button_translator(app)
 
     store = ConfigStore()
-    # 英文字体是纯界面偏好：文件缺失或字段异常都回退默认值，不能阻塞启动。
-    app.setStyleSheet(build_stylesheet(store.load_ui().english_font))
+    # 字体/主题是纯界面偏好：文件缺失或字段异常都回退默认值，不能阻塞启动。
+    ui = store.load_ui()
+    set_low_profile(ui.low_profile)
+    app.setApplicationDisplayName("Workspace" if ui.low_profile else "Daily English")
+    app.setStyleSheet(build_stylesheet(ui.english_font, low_profile=ui.low_profile))
     _install_excepthook()
 
     existing: AIConfig | None = None
@@ -157,6 +165,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     # 首次使用（profile 为空）时弹测评；用户取消也不影响进入主界面。
     window.maybe_show_assessment()
     exit_code = app.exec()
+    # 被取消但仍在等 HTTP 返回的任务可能还会写库，先等它们结束再关连接。
+    wait_for_orphans()
     # 正常退出时显式释放连接，WAL 能干净合并，下次启动的备份/导入不受影响。
     db.close()
     return exit_code

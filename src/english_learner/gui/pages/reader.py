@@ -41,8 +41,8 @@ from ..back_translation_dialog import BackTranslationDialog
 from ..level_feedback_dialog import LevelFeedbackDialog
 from ..reading_quiz_dialog import ReadingQuizDialog
 from ..regenerate_dialog import RegenerateDialog
-from ..widgets import ArticleView, WordPanel
-from ..workers import TaskWorker
+from ..widgets import ArticleView, WordPanel, busy_progress_bar
+from ..workers import TaskWorker, retire_worker
 from .common import PageHeader, set_status
 
 logger = logging.getLogger(__name__)
@@ -63,8 +63,10 @@ class ReaderPage(QWidget):
         # 后台补全：加入生词本后把预生成简释补成完整查词，串行执行。
         self._enrich_worker: TaskWorker | None = None
         self._enrich_queue: list[tuple[int, str]] = []
-        # 本次会话里自动生成失败过：切页回来不再自动重发，等用户点“重试生成”。
+        # 本次会话里自动生成失败/取消过：切页回来不再自动重发，等用户点“重试生成”。
         self._generation_failed = False
+        # 当前 UI 槽位里的任务类型，取消后据此恢复不同状态。
+        self._busy_phase = ""
 
         self._build_ui()
 
@@ -127,8 +129,19 @@ class ReaderPage(QWidget):
         self._meta_label.setObjectName("mutedCompact")
         layout.addWidget(self._meta_label)
 
+        status_row = QHBoxLayout()
+        status_row.setSpacing(10)
         self._status = QLabel("")
-        layout.addWidget(self._status)
+        status_row.addWidget(self._status, 1)
+        self._busy_progress = busy_progress_bar()
+        status_row.addWidget(self._busy_progress, 0)
+        self._cancel_button = QPushButton("取消")
+        self._cancel_button.setObjectName("linkButton")
+        self._cancel_button.setToolTip("取消正在进行的 AI 请求；已生成的内容不会丢失")
+        self._cancel_button.clicked.connect(self._on_cancel_clicked)
+        self._cancel_button.hide()
+        status_row.addWidget(self._cancel_button, 0)
+        layout.addLayout(status_row)
 
         # 正文占满整页；释义卡是浮在页面上的子控件，不再占用固定右栏。
         self._view = ArticleView()
@@ -160,9 +173,13 @@ class ReaderPage(QWidget):
         set_status(self._status, "进入本页会自动准备今天的文章。", "hint")
 
     # ------------------------------------------------------------------ 字体
-    def apply_english_font(self, key: str | None = None) -> None:
-        """设置页切换英文字体后由主窗口调用（QSS 管不到 QTextDocument）。"""
-        self._view.set_english_font(key)
+    def apply_english_font(self, key: str | None = None, *, mono: bool = False) -> None:
+        """设置页切换字体/主题后由主窗口调用（QSS 管不到 QTextDocument）。"""
+        self._view.set_english_font(key, mono=mono)
+
+    def apply_low_profile(self, low_profile: bool) -> None:
+        """主题切换：同步正文生词高亮的配色（同一套逻辑见 ArticleView）。"""
+        self._view.set_low_profile(low_profile)
 
     # -------------------------------------------------------------- 生命周期
     def on_activated(self) -> None:
@@ -331,6 +348,7 @@ class ReaderPage(QWidget):
 
         service = self._context.article_service()
         if regenerate:
+            self._busy_phase = "regenerate"
             if user_request:
                 set_status(self._status, "正在按你的要求换一篇，请稍候…", "loading")
             else:
@@ -339,6 +357,7 @@ class ReaderPage(QWidget):
                 profile, user_request=user_request
             )
         else:
+            self._busy_phase = "generate"
             set_status(self._status, "正在生成今日文章，请稍候…", "loading")
             task = lambda: service.get_or_create_today(profile)  # noqa: E731
 
@@ -505,6 +524,7 @@ class ReaderPage(QWidget):
         article_id = self._article.id
         level = self._context.level()
         service = self._context.dictionary_service()
+        self._busy_phase = "lookup"
         self._panel.show_loading(word)
         self._show_word_card()
         set_status(
@@ -633,9 +653,44 @@ class ReaderPage(QWidget):
         self._feedback_button.setEnabled(
             (not busy) and has_article and self._context.profile() is not None
         )
+        self._busy_progress.setVisible(busy)
+        self._cancel_button.setVisible(busy)
+        self._cancel_button.setEnabled(busy)
+        self._cancel_button.setText("取消")
+
+    def _on_cancel_clicked(self) -> None:
+        """取消当前查词/生成：旧请求转入后台自行结束，界面立刻可继续操作。"""
+        worker = self._worker
+        if worker is None or worker.isFinished():
+            self._set_busy(False)
+            return
+
+        phase = self._busy_phase
+        if not retire_worker(worker):
+            return
+        self._worker = None
+        self._busy_phase = ""
+        self._set_busy(False)
+
+        if phase == "lookup":
+            self._pending = None
+            self._current_word_id = None
+            self._panel.hide()
+            set_status(self._status, "已取消查词。", "hint")
+            return
+        if self._article is None:
+            # 没有旧文章时，取消后必须把“重试生成”亮出来，否则用户没有入口。
+            self._generation_failed = True
+            self._generate_button.setText("重试生成")
+            self._generate_button.setVisible(True)
+            self._generate_button.setEnabled(True)
+            set_status(self._status, "已取消生成，可以点「重试生成」再试一次。", "hint")
+        else:
+            set_status(self._status, "已取消换一篇，当前文章保留。", "hint")
 
     def _on_worker_finished(self) -> None:
         self._worker = None
+        self._busy_phase = ""
         self._set_busy(False)
         if self._article is not None:
             self._regenerate_button.setEnabled(True)

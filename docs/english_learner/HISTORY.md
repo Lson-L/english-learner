@@ -701,6 +701,41 @@ M6.5（档内难度浮动）完成（2026-11-20）：
   拒绝导入当前库、放弃暂存、设置页导入三种选择（稍后 / 回退 / 重启）与导出落盘。
   全量 609 passed，`ruff check` 与 `ruff format --check` 通过。
 
+低调主题完成（2026-11-21，体验项）：
+
+- **场景**：在办公环境打开应用时，窗口标题、侧边栏“生词本/复习”和浅色大字号
+  正文一眼就能看出是英语学习工具，容易被误认为在摸鱼；
+- **方案**：新增「低调（深色等宽）」主题，不新增 AI 调用、不改业务逻辑。
+  `gui/theme.py` 把颜色抽成 `LIGHT_PALETTE` / `LOW_PROFILE_PALETTE` 两份
+  dict，QSS 模板改用 `__KEY__` 占位符统一替换——加新控件只写占位符，
+  不会在深色主题里漏出浅色块；
+- **外观**：低调主题采用 VS Code 风格深色（窗口 `#1E1E1E`、卡片 `#252526`），
+  全局字体切换为 `Consolas → Cascadia Mono → Courier New → 雅黑 → monospace`
+  的等宽链（`gui.fonts.font_stack(mono=True)`）；文章正文是 QTextDocument，
+  由 `ArticleView.set_english_font(key, mono=True)` 单独同步；
+- **文案**：低调模式下窗口标题与 `setApplicationDisplayName` 改为中性
+  “Workspace”，侧边栏品牌改为 Workspace / WORKSPACE / SYSTEM，导航改为
+  Today / Docs / Words / Review，页脚去掉版本号与“本地运行”话术；
+  **生词本页顶部的大标题「生词本」也隐藏**（`PageHeader.set_title_visible`），
+  只保留下面那句功能介绍；关掉主题后原文案、页面标题与用户选的英文字体自动恢复；
+- **按钮英文**：低调模式下所有 `QPushButton` 显示英文。新增 `gui/i18n.py`，
+  以中文原文为 key 做查表翻译；patch `QPushButton.setText` 让页面代码继续写
+  中文，并用应用级 Show 事件过滤器补翻 C++ 构造参数写入的初始文本；
+  带数字的「加练一轮（N 个）」等动态文案用正则替换。未收录的文案原样保留
+  （不会变空白），切回默认主题按 `_source_text` 还原中文；
+- **配置**：`UiConfig` 新增 `ui.low_profile`（默认 False），沿用字符串布尔
+  兼容解析；设置页「外观」新增主题下拉，切换即保存并实时重建 QSS，
+  低调模式下英语字体下拉置灰；
+- **生词高亮**：暗色主题下正文默认是浅灰字，原来固定的浅黄高亮底会让
+  “已加入生词本”的词几乎看不清。`ArticleView` 改为按主题给高亮同时设置
+  背景与前景：浅色 `#FDE68A / #111827`，暗色 `#5C4A22 / #FFE9A8`；
+  `set_low_profile()` 在切主题时重绘已有标注。正文双击选中另补
+  `selection-color`，避免深蓝选中底叠加浅灰字；
+- **测试**：新增 14 个用例——两套调色板 key 一致、样式表无残留占位符、
+  深色/等宽字体链、正文等宽、配置解析与往返、设置页切换保存与禁用字体、
+  主窗口低调启动文案与实时切换、高亮双色随主题、按钮中英切换与未收录兜底。
+  全量 630 passed，`ruff check` 与 `ruff format --check` 通过。
+
 ## 5. 验证记录
 
 ### 5.1 M0（2026-11-18）

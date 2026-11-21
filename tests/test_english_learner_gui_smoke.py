@@ -12,7 +12,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
-from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox  # noqa: E402
 
 from english_learner.gui.assessment_dialog import AssessmentDialog  # noqa: E402
 from english_learner.gui.level_feedback_dialog import LevelFeedbackDialog  # noqa: E402
@@ -54,6 +54,25 @@ def make_config() -> AIConfig:
         api_key="sk-test",
         model="test-model",
     )
+
+
+def test_user_facing_copy_has_no_milestone_placeholders(tmp_path: Path) -> None:
+    """配置向导与侧边栏不再向用户暴露 M1/M2/M3.11 这类开发期文案。"""
+    get_app()
+    dialog = OnboardingDialog(ConfigStore(tmp_path / "config.json"))
+    joined = "\n".join(label.text() for label in dialog.findChildren(QLabel))
+    assert "M1" not in joined
+    assert "M2" not in joined
+
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(make_config())
+    db = Database(tmp_path / "data.db")
+    window = MainWindow(make_config(), store, db)
+    try:
+        assert "M3.11" not in window._footer_label.text()
+        assert "v" in window._footer_label.text()
+    finally:
+        db.close()
 
 
 def test_onboarding_requires_successful_test(tmp_path: Path) -> None:

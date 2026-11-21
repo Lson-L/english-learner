@@ -271,6 +271,59 @@ def test_unsaved_meaning_can_be_cancelled_discarded_or_saved(
     assert page._has_unsaved_changes() is False
 
 
+def test_switching_word_with_unsaved_meaning_asks_first(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """直接点另一行也不能静默丢弃当前释义：取消 / 放弃 / 保存三选一。"""
+    get_app()
+    alpha = db.words.upsert(make_word("alpha", created_at="2026-11-01T09:00:00"))
+    beta = db.words.upsert(make_word("beta", created_at="2026-11-02T09:00:00"))
+    assert alpha.id is not None and beta.id is not None
+
+    page = VocabularyPage(make_context(db, tmp_path))
+    page.on_activated()
+    alpha_row = page._row_of(alpha.id)
+    beta_row = page._row_of(beta.id)
+    assert alpha_row is not None and beta_row is not None
+
+    page._table.selectRow(alpha_row)
+    page._meaning_cn_edit.setPlainText("未保存的修改")
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Cancel,
+    )
+    page._table.selectRow(beta_row)
+    assert page._table.currentRow() == alpha_row
+    assert page._selected is not None and page._selected.id == alpha.id
+    assert page._has_unsaved_changes() is True
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Discard,
+    )
+    page._table.selectRow(beta_row)
+    assert page._selected is not None and page._selected.id == beta.id
+    assert page._has_unsaved_changes() is False
+
+    # 再改 alpha，切到 beta 时选「保存」：alpha 的释义应落库，界面停在 beta。
+    page._table.selectRow(alpha_row)
+    page._meaning_cn_edit.setPlainText("保存这个释义")
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Save,
+    )
+    page._table.selectRow(beta_row)
+
+    reloaded = db.words.get_by_id(alpha.id)
+    assert reloaded is not None and reloaded.meaning_cn == "保存这个释义"
+    assert page._selected is not None and page._selected.id == beta.id
+    assert page._has_unsaved_changes() is False
+
+
 def test_cancelled_filter_change_keeps_current_row(
     db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

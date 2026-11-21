@@ -79,12 +79,17 @@ _EASE_DELTA = {RATING_VAGUE: -0.15, RATING_KNOWN: 0.0, RATING_EASY: 0.15}
 
 @dataclass(frozen=True)
 class ReviewOutcome:
-    """一次复习的结果：落库后的词条 + 评分前后间隔，供界面与日志使用。"""
+    """一次复习的结果：落库后的词条 + 评分前后间隔，供界面与日志使用。
+
+    `log_id` 用于界面“撤销上一张”：撤销时删除刚写入的这条 review_logs，
+    并把词条调度恢复到评分前的状态。
+    """
 
     word: Word
     rating: int
     prev_interval: int
     next_interval: int
+    log_id: int | None = None
 
 
 def _clamp_ease(value: float) -> float:
@@ -201,8 +206,9 @@ class ReviewService:
         updated = schedule(word, rating, on=date.fromisoformat(self._today()))
         saved = self._words.save_schedule(updated)
 
+        log = None
         if self._logs is not None:
-            self._logs.log(
+            log = self._logs.log(
                 word_id=int(word.id),
                 rating=rating,
                 prev_interval=int(word.interval_days),
@@ -229,4 +235,37 @@ class ReviewService:
             rating=rating,
             prev_interval=int(word.interval_days),
             next_interval=int(saved.interval_days),
+            log_id=log.id if log is not None else None,
         )
+
+    def undo_review(
+        self,
+        previous_word: Word,
+        log_id: int | None,
+        *,
+        stat_date: str | None = None,
+    ) -> Word:
+        """撤销最近一次评分：恢复调度、删除刚写的日志、今日复习数 -1。
+
+        `previous_word` 必须是评分前的词条快照（界面在调用 `review()` 前保留）。
+        跨过午夜再撤销时用 `stat_date` 指回评分当天，避免把次数减到另一天。
+        """
+        if previous_word.id is None:
+            raise ValueError("undo_review() 需要评分前的已落库词条")
+        restored = self._words.save_schedule(previous_word)
+
+        if log_id is not None and self._logs is not None:
+            self._logs.delete(int(log_id))
+        if self._stats is not None:
+            day = stat_date or self._today()
+            # 撤销只减自己加过的那一次；先确认当天还有记录，避免出现负数。
+            if self._stats.get(day).reviews_done > 0:
+                self._stats.bump(day, reviews_done=-1)
+
+        logger.info(
+            "撤销复习 word=%s rating 回滚到 interval=%s due=%s",
+            restored.lemma,
+            restored.interval_days,
+            restored.due_date,
+        )
+        return restored

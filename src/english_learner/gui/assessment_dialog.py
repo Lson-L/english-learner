@@ -42,7 +42,8 @@ from ..services.assessment_bank import (
 )
 from ..services.assessment_service import AnswerSheet
 from .pages.common import Card, divider, set_status
-from .workers import TaskWorker
+from .widgets import busy_progress_bar
+from .workers import TaskWorker, retire_worker
 
 MODE_TEST = "test"
 MODE_SUCCESS = "success"
@@ -123,6 +124,14 @@ class AssessmentDialog(QDialog):
 
         footer = QHBoxLayout()
         footer.setSpacing(10)
+        self._busy_progress = busy_progress_bar(width=110)
+        footer.addWidget(self._busy_progress)
+        self._cancel_button = QPushButton("取消")
+        self._cancel_button.setObjectName("secondaryButton")
+        self._cancel_button.setToolTip("评分中可以取消并重新提交")
+        self._cancel_button.clicked.connect(self._on_cancel_clicked)
+        footer.addWidget(self._cancel_button)
+
         self._skip_button = QPushButton("跳过，手动选级")
         self._skip_button.setObjectName("secondaryButton")
         self._skip_button.clicked.connect(self._show_manual_page)
@@ -466,6 +475,20 @@ class AssessmentDialog(QDialog):
         self._skip_button.setEnabled(not busy)
         self._back_button.setEnabled(not busy)
         self._primary_button.setEnabled(not busy)
+        # 取消按钮始终可用：忙碌时放弃请求，空闲时退出测评。
+        self._cancel_button.setText("取消评分" if busy else "取消")
+        self._busy_progress.setVisible(busy)
+
+    def _on_cancel_clicked(self) -> None:
+        worker = self._worker
+        if worker is None or worker.isFinished():
+            self.reject()
+            return
+        if not retire_worker(worker):
+            return
+        self._worker = None
+        self._set_busy(False)
+        set_status(self._test_status, "已取消评分，可以重新提交。", "hint")
 
     # ------------------------------------------------------------ 关闭保护
     def reject(self) -> None:  # noqa: D401 - Qt 约定

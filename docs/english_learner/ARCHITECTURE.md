@@ -134,6 +134,9 @@ tests/（共 522 个用例，全部 mock AI、无网络）
   长循环可调用 `workers.is_cancellation_requested()`；HTTP 请求本身无法中断，
   靠超时兜底（业务调用 `BUSINESS_TIMEOUT`：连接 10s / 读 300s，连接测试 30s），
   关闭窗口时页面 `shutdown()` 先等 3 秒，主窗口再兜底等待。
+- 用户点「取消」时调 `workers.retire_worker(worker)`：把 worker 移出 UI 槽位、
+  断开所有结果信号，并放进全局 orphan 列表；界面立刻恢复可操作，旧线程继续
+  跑到请求返回后由 `wait_for_orphans()` 在退出时统一等待。
 
 ### 6.3 配置向导状态机
 
@@ -226,6 +229,27 @@ tests/（共 522 个用例，全部 mock AI、无网络）
 - 偏好存在 `config.json` 的 `ui.english_font`（旧字段 `reading_font` 仍可读），
   `ConfigStore.save_ui()` 只改 `ui` 段，`save()` 也会保留 `ui` 段，
   重配 AI 不会把字体选择冲掉；未知 key 一律回退默认。
+- **低调主题**（`ui.low_profile`，2026-11-21）：`theme.py` 的颜色已抽成
+  `LIGHT_PALETTE` / `LOW_PROFILE_PALETTE`，QSS 模板只写 `__KEY__` 占位符。
+  新增样式时**不要写死颜色**，否则深色主题会残留浅色块；测试会用
+  “样式表不含 `__`”兜底。低调模式把全局字体换成 `font_stack(mono=True)` 的
+  等宽链（Consolas → Cascadia → Courier New → 雅黑 → monospace），用户选的
+  `english_font` 保留但不生效；正文仍需 `ArticleView.set_english_font(key,
+  mono=True)`。窗口标题、`setApplicationDisplayName` 与侧边栏文案由
+  `main_window._SIDEBAR_TEXTS` 两套常量驱动，`_apply_low_profile()` 负责实时
+  切换，不重新读配置文件；导航按钮始终保留，只换文案。生词本页顶部的大标题
+  由 `PageHeader.set_title_visible(False)` 隐藏（说明文字保留），主窗口在
+  构造与切换主题时调用 `VocabularyPage.set_low_profile()`。
+- **按钮英文**：`gui/i18n.py` 用中文原文作 key 翻译 `QPushButton`。它 patch 了
+  `QPushButton.setText`（页面代码照旧写中文），并用应用级 Show 事件过滤器兜底
+  C++ 构造参数写入的初始文本；切换主题时 `refresh_buttons()` 重刷整棵控件树。
+  **新增按钮文案要把中文原文补进 `BUTTON_EN`**（带数字的进 `BUTTON_EN_PATTERNS`），
+  漏了只会保持中文，不会报错。只覆盖 QPushButton，QLabel/状态提示不在范围内。
+- **生词高亮**：正文高亮是 `QTextDocument` 的 ExtraSelection，也不归 QSS 管。
+  颜色必须按主题成对给出：浅色 `#FDE68A / #111827`，暗色 `#5C4A22 / #FFE9A8`
+  （`article_view.HIGHLIGHT_COLORS`）——只换背景不换前景，暗色主题下浅灰字
+  会与浅黄底糊在一起。主题切换时主窗口要调 `ArticleView.set_low_profile()`
+  重绘已有标注。
 
 ### 6.12 打包成 exe（PyInstaller）
 
@@ -298,7 +322,9 @@ tests/（共 522 个用例，全部 mock AI、无网络）
   自动建 `daily-english-export-<时间戳>/` 子目录，避免覆盖旧导出。
 - **取消的边界**：`cancelled` 信号不是“立刻停止”，只是“结果作废”。
   页面统一把 `cancelled` 接到自己的 `_on_worker_finished`，清理 busy 状态；
-  不要在 `cancel()` 之后假设线程已经结束。
+  不要在 `cancel()` 之后假设线程已经结束。界面层的「取消」按钮统一走
+  `workers.retire_worker()`，不要只调 `worker.cancel()` 后继续等信号，
+  否则用户仍要等到 HTTP 超时。
 - **页面关闭协议**：任何持有 worker 的页面实现
   `shutdown(timeout_ms=3000) -> TaskWorker | None`；返回仍存活的 worker 表示
   超时。`MainWindow._stop_worker_threads()` 收集这些返回值并最终 `wait()`，

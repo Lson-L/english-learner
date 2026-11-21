@@ -28,12 +28,13 @@ from ..services.ai_client import AIClient, ConnectionResult
 from ..services.config_store import AIConfig, ConfigError, ConfigStore
 from ..services.provider_presets import PRESETS
 from .pages.common import Card, divider, set_status
-from .workers import TaskWorker
+from .widgets import busy_progress_bar
+from .workers import TaskWorker, retire_worker
 
 STEP_TITLES = (
     ("欢迎使用 Daily English", "三步完成初始化，之后每天打开就能学。"),
     ("连接你的 AI 服务", "支持任何 OpenAI 兼容接口；连接测试通过后才能继续。"),
-    ("配置完成", "配置已保存到本机。下一步将进行水平测评（M1）。"),
+    ("配置完成", "配置已保存到本机。下一步会先做一次 5 分钟的水平测评。"),
 )
 
 
@@ -123,7 +124,8 @@ class OnboardingDialog(QDialog):
         for text in (
             "第 1 步：填写服务地址、API Key 和模型 id，也可以从常见服务商预设里选。",
             "第 2 步：点「测试连接」，会真实发一次极短的请求——成功后才能继续。",
-            "第 3 步：完成配置进入应用。水平测评、每日文章、生词本将在 M1/M2 接入。",
+            "第 3 步：完成配置进入应用，先做一次 5 分钟的水平测评，"
+            "之后每天读一篇按你水平生成的文章。",
         ):
             card.body.addWidget(self._bullet(text))
         layout.addWidget(card)
@@ -204,8 +206,11 @@ class OnboardingDialog(QDialog):
         test_row.setSpacing(12)
         self._test_button = QPushButton("测试连接")
         self._test_button.setObjectName("secondaryButton")
+        self._test_button.setToolTip("测试中可再次点击取消")
         self._test_button.clicked.connect(self._test_connection)
         test_row.addWidget(self._test_button)
+        self._test_progress = busy_progress_bar(width=96)
+        test_row.addWidget(self._test_progress)
 
         self._test_status = QLabel("")
         self._test_status.setWordWrap(True)
@@ -251,8 +256,8 @@ class OnboardingDialog(QDialog):
         next_title.setObjectName("cardTitle")
         next_card.body.addWidget(next_title)
         next_desc = QLabel(
-            "M1 将在此配置基础上加入：固定题库的摸底测评（CEFR 定级）、"
-            "每日文章生成与阅读器划词释义。主窗口已经搭好，可以先四处看看。"
+            "下一步会先做一次 5 分钟的水平测评，确定你的起始等级。"
+            "之后每天打开应用，读一篇按你水平生成的文章，标几个生词，第二天复习。"
         )
         next_desc.setObjectName("muted")
         next_desc.setWordWrap(True)
@@ -371,7 +376,12 @@ class OnboardingDialog(QDialog):
 
     # ----------------------------------------------------------- 连接测试
     def _test_connection(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            if retire_worker(worker):
+                self._worker = None
+                self._set_busy(False)
+                set_status(self._test_status, "已取消连接测试。", "hint")
             return
 
         config = self._collect_config()
@@ -433,10 +443,13 @@ class OnboardingDialog(QDialog):
             self._key_edit,
             self._model_edit,
             self._show_key_check,
-            self._test_button,
             self._back_button,
         ):
             widget.setEnabled(not busy)
+        # 测试按钮在忙碌时保持可点，用于取消请求。
+        self._test_button.setEnabled(True)
+        self._test_button.setText("取消测试" if busy else "测试连接")
+        self._test_progress.setVisible(busy)
         self._primary_button.setEnabled(
             (not busy) and (self._tested_config is not None)
             if self._stack.currentIndex() == 1

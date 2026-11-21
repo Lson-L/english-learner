@@ -45,7 +45,8 @@ from ..services.reading_quiz_service import (
     ReadingQuizService,
 )
 from .pages.common import Card, divider, set_status
-from .workers import TaskWorker
+from .widgets import busy_progress_bar
+from .workers import TaskWorker, retire_worker
 
 MODE_LOADING = "loading"
 MODE_QUIZ = "quiz"
@@ -96,6 +97,8 @@ class ReadingQuizDialog(QDialog):
         self._article = article
         self._service = service or context.reading_quiz_service()
         self._worker: TaskWorker | None = None
+        # 取消后据此把界面恢复到对应的可重试状态。
+        self._busy_phase = ""
         self._mode = MODE_LOADING
         self._primary_enabled = False
         self._quiz: ReadingQuiz | None = None
@@ -161,9 +164,12 @@ class ReadingQuizDialog(QDialog):
 
         footer = QHBoxLayout()
         footer.setSpacing(10)
+        self._busy_progress = busy_progress_bar(width=110)
+        footer.addWidget(self._busy_progress)
         self._cancel_button = QPushButton("取消")
         self._cancel_button.setObjectName("secondaryButton")
-        self._cancel_button.clicked.connect(self.reject)
+        self._cancel_button.setToolTip("AI 处理中可取消；已答的题和已生成的内容不会丢失")
+        self._cancel_button.clicked.connect(self._on_cancel_clicked)
         footer.addWidget(self._cancel_button)
         footer.addStretch(1)
 
@@ -259,6 +265,7 @@ class ReadingQuizDialog(QDialog):
         level = self._context.level()
         service = self._service
 
+        self._busy_phase = "loading"
         self._set_mode(MODE_LOADING, "请稍候", primary_enabled=False)
         set_status(self._loading_status, "正在根据文章出题，请稍候…", "loading")
         self._set_busy(True)
@@ -542,6 +549,7 @@ class ReadingQuizDialog(QDialog):
         self._stage_one_answers = answers
         article = self._article
         service = self._service
+        self._busy_phase = "stage"
         set_status(self._quiz_status, "正在根据第一轮表现生成边界题，请稍候…", "loading")
         self._set_busy(True)
         worker = TaskWorker(
@@ -613,6 +621,7 @@ class ReadingQuizDialog(QDialog):
         ) or "ok"
         service = self._service
 
+        self._busy_phase = "grading"
         set_status(self._quiz_status, "AI 正在批改并生成讲评，请稍候…", "loading")
         self._set_busy(True)
         worker = TaskWorker(
@@ -998,14 +1007,41 @@ class ReadingQuizDialog(QDialog):
 
     def _set_busy(self, busy: bool) -> None:
         self._stack.setEnabled(not busy)
-        self._cancel_button.setEnabled(not busy)
+        # 取消按钮在忙碌时反而最重要：点击后放弃当前请求，界面立即恢复。
+        self._cancel_button.setEnabled(True)
+        self._cancel_button.setText("取消请求" if busy else "取消")
+        self._busy_progress.setVisible(busy)
         if busy:
             self._primary_button.setEnabled(False)
         else:
             self._primary_button.setEnabled(self._primary_enabled)
 
+    def _on_cancel_clicked(self) -> None:
+        worker = self._worker
+        if worker is None or worker.isFinished():
+            self.reject()
+            return
+
+        phase = self._busy_phase
+        if not retire_worker(worker):
+            return
+        self._worker = None
+        self._busy_phase = ""
+        self._set_busy(False)
+
+        if phase == "loading":
+            set_status(self._loading_status, "已取消出题，可以重试。", "hint")
+            self._set_mode(MODE_LOADING, "重试出题", primary_enabled=True)
+        elif phase == "stage":
+            set_status(self._quiz_status, "已取消第二轮出题，可以重新生成。", "hint")
+            self._set_mode(MODE_QUIZ, "重新生成第二轮", primary_enabled=True)
+        else:
+            set_status(self._quiz_status, "已取消批改，可以重新提交。", "hint")
+            self._set_mode(MODE_QUIZ, "重新提交", primary_enabled=True)
+
     def _on_worker_finished(self) -> None:
         self._worker = None
+        self._busy_phase = ""
         self._set_busy(False)
 
     @staticmethod

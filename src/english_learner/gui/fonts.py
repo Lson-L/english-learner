@@ -36,6 +36,10 @@ FONT_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
 # 中文回退：Windows 10 自带雅黑。字体链里必须保留，否则中文会变成方块。
 CJK_FALLBACK_FAMILIES = ("Microsoft YaHei UI", "Microsoft YaHei")
 
+# 低调主题用的等宽字体链。Consolas 是 Windows 10 自带；后面两个是不同系统/
+# 不同版本上的兜底，最后统一回退到通用 monospace。
+MONO_FONT_FAMILIES = ("Consolas", "Cascadia Mono", "Courier New")
+
 
 @dataclass(frozen=True)
 class FontChoice:
@@ -81,6 +85,25 @@ def english_font_stack(key: str | None = None) -> str:
     choice = get_english_font(key)
     fallbacks = ", ".join(f'"{family}"' for family in CJK_FALLBACK_FAMILIES)
     return f'"{choice.family}", {fallbacks}, {choice.generic}'
+
+
+def font_families(key: str | None = None, *, mono: bool = False) -> list[str]:
+    """统一的族名列表，`mono=True` 时走等宽链（低调主题）。
+
+    低调主题强制等宽，此时用户选的英文字体不生效；中文仍回退雅黑。
+    """
+    if mono:
+        return [*MONO_FONT_FAMILIES, *CJK_FALLBACK_FAMILIES]
+    return english_font_families(key)
+
+
+def font_stack(key: str | None = None, *, mono: bool = False) -> str:
+    """统一的 `QSS font-family` 字体链，供全局 QSS 使用。"""
+    if not mono:
+        return english_font_stack(key)
+    families = ", ".join(f'"{family}"' for family in MONO_FONT_FAMILIES)
+    fallbacks = ", ".join(f'"{family}"' for family in CJK_FALLBACK_FAMILIES)
+    return f"{families}, {fallbacks}, monospace"
 
 
 def load_application_fonts() -> tuple[str, ...]:

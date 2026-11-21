@@ -27,7 +27,8 @@ from ..models.entities import Article, today_str
 from ..services.app_context import AppContext
 from ..services.level_feedback_service import LevelAdjustment
 from .pages.common import Card, divider, set_status
-from .workers import TaskWorker
+from .widgets import busy_progress_bar
+from .workers import TaskWorker, retire_worker
 
 QUICK_FEEDBACKS: tuple[str, ...] = (
     "太难了，生词太多",
@@ -94,9 +95,12 @@ class LevelFeedbackDialog(QDialog):
         footer = QHBoxLayout()
         footer.setSpacing(10)
         footer.addStretch(1)
+        self._busy_progress = busy_progress_bar(width=110)
+        footer.addWidget(self._busy_progress)
         self._cancel_button = QPushButton("取消")
         self._cancel_button.setObjectName("secondaryButton")
-        self._cancel_button.clicked.connect(self.reject)
+        self._cancel_button.setToolTip("重新评估中可以取消；当前等级与文章保持不变")
+        self._cancel_button.clicked.connect(self._on_cancel_clicked)
         footer.addWidget(self._cancel_button)
 
         self._submit_button = QPushButton("重新评估并换一篇")
@@ -226,7 +230,24 @@ class LevelFeedbackDialog(QDialog):
         for button in self._quick_buttons:
             button.setEnabled(not busy)
         self._submit_button.setEnabled(not busy)
-        self._cancel_button.setEnabled(not busy)
+        # 忙碌时取消按钮用于放弃请求，空闲时用于退出弹窗。
+        self._cancel_button.setEnabled(True)
+        self._cancel_button.setText("取消请求" if busy else "取消")
+        self._busy_progress.setVisible(busy)
+
+    def _on_cancel_clicked(self) -> None:
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            if retire_worker(worker):
+                self._worker = None
+                self._set_busy(False)
+                set_status(
+                    self._status,
+                    "已取消重新评估，当前等级与文章保持不变。",
+                    "hint",
+                )
+            return
+        self.reject()
 
     # ------------------------------------------------------------ 关闭保护
     def reject(self) -> None:  # noqa: D401 - Qt 约定

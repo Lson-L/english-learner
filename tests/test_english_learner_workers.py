@@ -15,7 +15,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from english_learner.gui.workers import TaskWorker, is_cancellation_requested  # noqa: E402
+from english_learner.gui.workers import (  # noqa: E402
+    TaskWorker,
+    is_cancellation_requested,
+    retire_worker,
+    wait_for_orphans,
+)
 from english_learner.services.ai_client import AIError  # noqa: E402
 
 _APP: QApplication | None = None
@@ -134,3 +139,36 @@ def test_cancellation_helper_is_false_outside_cancel() -> None:
     assert worker.wait(3000) is True
 
     assert events == [("ok", False)]
+
+
+def test_retire_worker_discards_late_result() -> None:
+    """取消后旧任务转入后台：结果信号断开，界面可以立刻开始新任务。"""
+    get_app()
+    started = threading.Event()
+
+    def task() -> str:
+        started.set()
+        time.sleep(0.2)
+        return "late result"
+
+    worker = TaskWorker(task)
+    events = collect(worker)
+    worker.start()
+    assert started.wait(2.0) is True
+
+    assert retire_worker(worker) is True
+    assert worker.wait(3000) is True
+    # succeeded / failed / cancelled 都已断开，迟到的结果不会再通知界面。
+    assert events == []
+
+    wait_for_orphans()
+
+
+def test_retire_finished_worker_is_noop() -> None:
+    get_app()
+    worker = TaskWorker(lambda: "done")
+    worker.start()
+    assert worker.wait(3000) is True
+
+    assert retire_worker(worker) is False
+    assert retire_worker(None) is False

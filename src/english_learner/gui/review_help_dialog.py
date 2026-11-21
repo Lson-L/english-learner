@@ -29,7 +29,8 @@ from ..services.app_context import AppContext
 from ..services.review_help_service import ReviewHelpResult, ReviewHelpService
 from ..services.srs import RATING_VAGUE
 from .pages.common import set_status
-from .workers import TaskWorker
+from .widgets import busy_progress_bar
+from .workers import TaskWorker, retire_worker
 
 # 弹窗与屏幕边缘的留白：窗口边框 + 任务栏，避免贴边。
 _SCREEN_MARGIN = 48
@@ -125,6 +126,9 @@ class ReviewHelpDialog(QDialog):
         buttons.setContentsMargins(0, 0, 0, 0)
         buttons.setSpacing(10)
         buttons.addStretch(1)
+
+        self._busy_progress = busy_progress_bar(width=96)
+        buttons.addWidget(self._busy_progress)
 
         self._skip_button = QPushButton("跳过，直接记录")
         self._skip_button.setObjectName("secondaryButton")
@@ -305,14 +309,29 @@ class ReviewHelpDialog(QDialog):
 
     def _set_busy(self, busy: bool) -> None:
         self._submit_button.setEnabled(not busy)
-        self._skip_button.setEnabled(not busy)
+        # 忙碌时「跳过」变成「取消请求」：放弃结果，界面立即恢复。
+        self._skip_button.setEnabled(True)
+        if busy:
+            self._skip_button.setText("取消请求")
+        else:
+            self._skip_button.setText("关闭" if self._result_ready else "跳过，直接记录")
         self._reason_edit.setEnabled(not busy)
         for button in self._reason_buttons:
             button.setEnabled(not busy)
+        self._busy_progress.setVisible(busy)
 
     # ------------------------------------------------------------------ 关闭
     def _skip(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            if retire_worker(worker):
+                self._worker = None
+                self._set_busy(False)
+                set_status(
+                    self._status,
+                    "已取消 AI 请求；可以重新请求，或直接跳过记录。",
+                    "hint",
+                )
             return
         # 已有 AI 建议时保留（按钮此时显示“关闭”），没有则按“跳过”处理。
         self.accept()

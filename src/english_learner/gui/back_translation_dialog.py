@@ -33,7 +33,8 @@ from ..services.app_context import AppContext
 from ..services.back_translation import SCORE_PER_SENTENCE, WRITING_ERROR_LABELS
 from ..services.back_translation_service import BackTranslationService
 from .pages.common import Card, divider, set_status
-from .workers import TaskWorker
+from .widgets import busy_progress_bar
+from .workers import TaskWorker, retire_worker
 
 
 class AttemptCard(Card):
@@ -232,9 +233,12 @@ class BackTranslationDialog(QDialog):
         footer = QHBoxLayout()
         footer.setSpacing(10)
         footer.addStretch(1)
+        self._busy_progress = busy_progress_bar(width=110)
+        footer.addWidget(self._busy_progress)
         self._close_button = QPushButton("关闭")
         self._close_button.setObjectName("secondaryButton")
-        self._close_button.clicked.connect(self.reject)
+        self._close_button.setToolTip("AI 处理中可取消；已写的内容不会丢失")
+        self._close_button.clicked.connect(self._on_close_clicked)
         footer.addWidget(self._close_button)
 
         self._submit_button = QPushButton("请稍候")
@@ -378,10 +382,26 @@ class BackTranslationDialog(QDialog):
     def _set_busy(self, busy: bool) -> None:
         for card in self._cards:
             card.set_busy(busy)
-        self._close_button.setEnabled(not busy)
+        # 忙碌时关闭按钮变成取消请求，避免只能干等。
+        self._close_button.setEnabled(True)
+        self._close_button.setText("取消请求" if busy else "关闭")
+        self._busy_progress.setVisible(busy)
         self._submit_button.setEnabled(not busy)
         if busy:
             self._submit_button.setText("正在批改…")
+
+    def _on_close_clicked(self) -> None:
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            if retire_worker(worker):
+                self._worker = None
+                # 出题阶段取消时要把“正在准备题目”卡片收掉，否则会一直挡在上面。
+                if not self._prepared:
+                    self._loading_card.hide()
+                self._on_worker_finished()
+                set_status(self._status, "已取消 AI 请求，可以重新提交或直接关闭。", "hint")
+            return
+        self.reject()
 
     def _on_worker_finished(self) -> None:
         self._worker = None

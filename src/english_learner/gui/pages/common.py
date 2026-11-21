@@ -51,16 +51,23 @@ class PageHeader(QWidget):
         layout.setSpacing(2 if compact else 6)
 
         # 标题可以留空：调用方只想要说明文字时不用自己拼 QLabel。
+        # 保留引用供低调模式动态隐藏（例如生词本页的“生词本”三个字）。
+        self._title_label: QLabel | None = None
         if title:
-            title_label = QLabel(title)
-            title_label.setObjectName("pageTitleCompact" if compact else "pageTitle")
-            layout.addWidget(title_label)
+            self._title_label = QLabel(title)
+            self._title_label.setObjectName("pageTitleCompact" if compact else "pageTitle")
+            layout.addWidget(self._title_label)
 
         if subtitle:
             subtitle_label = QLabel(subtitle)
             subtitle_label.setObjectName("pageSubtitleCompact" if compact else "pageSubtitle")
             subtitle_label.setWordWrap(True)
             layout.addWidget(subtitle_label)
+
+    def set_title_visible(self, visible: bool) -> None:
+        """显示/隐藏大标题（低调模式下用来去掉显眼的页面名）。"""
+        if self._title_label is not None:
+            self._title_label.setVisible(bool(visible))
 
 
 class StatCard(Card):

@@ -203,6 +203,68 @@ def test_session_reveal_rate_and_finish(db: Database, tmp_path: Path) -> None:
     assert alpha_log.distance == 0
 
 
+def test_undo_last_rating_restores_schedule_logs_and_stats(db: Database, tmp_path: Path) -> None:
+    """误按 1~4 后可撤销：词条排期、review_logs、今日复习数都要回滚。"""
+    get_app()
+    alpha = db.words.upsert(make_word("alpha"))
+    assert alpha.id is not None
+
+    page = ReviewPage(make_context(db, tmp_path))
+    page.on_activated()
+    page._start_session()
+    assert page._undo_button.isHidden() is True
+
+    page._reveal()
+    page._rate(RATING_KNOWN)
+    assert page._stack.currentWidget() is page._summary_page
+    assert page._undo_button.isHidden() is False
+    assert db.stats.get().reviews_done == 1
+    assert db.reviews.count_for_date(today_str()) == 1
+
+    page._undo_last_rating()
+
+    assert page._stack.currentWidget() is page._card_page
+    assert page._index == 0
+    assert page._current is not None and page._current.lemma == "alpha"
+    reloaded = db.words.get_by_id(alpha.id)
+    assert reloaded is not None
+    assert reloaded.interval_days == 0
+    assert reloaded.repetitions == 0
+    assert reloaded.status == "new"
+    assert db.reviews.list_for_word(alpha.id) == []
+    assert db.stats.get().reviews_done == 0
+    assert page._last_undo is None
+    assert page._undo_button.isHidden() is True
+
+    # 撤销后可以重新评分，统计只算一次。
+    page._reveal()
+    page._rate(RATING_KNOWN)
+    assert db.stats.get().reviews_done == 1
+    assert db.reviews.count_for_date(today_str()) == 1
+
+
+def test_undo_mid_session_returns_to_previous_card(db: Database, tmp_path: Path) -> None:
+    get_app()
+    db.words.upsert(make_word("alpha"))
+    db.words.upsert(make_word("beta"))
+
+    page = ReviewPage(make_context(db, tmp_path))
+    page.on_activated()
+    page._start_session()
+    page._reveal()
+    page._rate(RATING_KNOWN)
+
+    assert page._index == 1
+    assert page._current is not None and page._current.lemma == "beta"
+    assert page._undo_button.isHidden() is False
+
+    page._undo_last_rating()
+
+    assert page._index == 0
+    assert page._current is not None and page._current.lemma == "alpha"
+    assert db.stats.get().reviews_done == 0
+
+
 def test_no_due_words_disables_start(db: Database, tmp_path: Path) -> None:
     get_app()
     page = ReviewPage(make_context(db, tmp_path))

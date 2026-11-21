@@ -155,6 +155,17 @@ class AIConfig:
             raise ConfigError(f"配置内容格式不正确：{exc}") from exc
 
 
+def _coerce_bool(value: Any) -> bool:
+    """把 JSON 里的布尔偏好转成 bool。
+
+    手写配置里常见 `"false"` 字符串，直接 `bool("false")` 会得到 True，
+    所以字符串要按取值单独判断；其余类型走 Python 真值语义。
+    """
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 @dataclass(frozen=True)
 class UiConfig:
     """界面偏好，和 AI 连接配置一起放在 config.json 的 `ui` 段里。
@@ -169,10 +180,14 @@ class UiConfig:
 
     `prefetch_enabled`：打开文章后是否在后台批量预查生词并写入查词缓存。
     默认开启，让阅读时双击查词尽量不走网络；关闭后只在真正双击时调用 AI。
+
+    `low_profile`：低调主题（深色 + 等宽）。开启后窗口标题、侧边栏品牌与导航
+    文案都会中性化，避免在办公环境里一眼看出是英语学习工具。
     """
 
     english_font: str = ""
     prefetch_enabled: bool = True
+    low_profile: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -183,13 +198,12 @@ class UiConfig:
             return cls()
         # 兼容旧字段 reading_font：早期版本只把字体作用在正文上。
         raw = data.get("english_font") or data.get("reading_font") or ""
-        raw_prefetch = data.get("prefetch_enabled", True)
-        if isinstance(raw_prefetch, str):
-            # JSON 里写 "false" 时 bool("false") 是 True，字符串要单独判断。
-            prefetch = raw_prefetch.strip().lower() in ("1", "true", "yes", "on")
-        else:
-            prefetch = bool(raw_prefetch)
-        return cls(english_font=str(raw).strip().lower(), prefetch_enabled=prefetch)
+        # JSON 里写 "false" 时 bool("false") 是 True，字符串要单独判断。
+        return cls(
+            english_font=str(raw).strip().lower(),
+            prefetch_enabled=_coerce_bool(data.get("prefetch_enabled", True)),
+            low_profile=_coerce_bool(data.get("low_profile", False)),
+        )
 
 
 @dataclass(frozen=True)

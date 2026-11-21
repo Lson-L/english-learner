@@ -1,47 +1,51 @@
 """全局样式。
 
-M0 先用一份集中管理的 QSS（≈ Web 的全局 CSS），后续要做深色模式时
-再把颜色抽成 dict 生成两份样式即可，不用改各个页面。
+颜色统一抽在 `LIGHT_PALETTE` / `LOW_PROFILE_PALETTE` 两份 dict 里，模板用
+`__KEY__` 占位符，最后一次性替换。加新控件时只写占位符，不要写死色值，
+否则深色主题会漏掉一块浅色。
+
+低调主题（`low_profile=True`）：深色 + 等宽字体，观感接近编辑器/终端，
+适合在办公环境里不引人注意。它只改外观与侧边栏文案，不改业务逻辑。
 """
 
 from __future__ import annotations
 
-from .fonts import DEFAULT_ENGLISH_FONT, english_font_stack
+from .fonts import DEFAULT_ENGLISH_FONT, font_stack
 
-# QSS 里满是大括号，用不了 f-string；先用占位符写，最后统一替换成字体链。
+# QSS 里满是大括号，用不了 f-string；先用占位符写，最后统一替换。
 # 全应用只有这一处决定英文外观：所有控件都继承 `*` 的字体链，新页面自动生效。
 _STYLESHEET_TEMPLATE = """
 * {
     font-family: __ENGLISH_FONT__;
     font-size: 14px;
-    color: #1F2937;
+    color: __TEXT__;
 }
 QMainWindow, QDialog {
-    background: #F5F7FA;
+    background: __BG__;
 }
 QToolTip {
-    background: #1F2937;
-    color: #FFFFFF;
+    background: __TEXT__;
+    color: __ON_ACCENT__;
     border: none;
     padding: 6px 8px;
 }
 
 /* ---------- 左侧导航 ---------- */
 QFrame#sidebar {
-    background: #1D2433;
+    background: __SIDEBAR_BG__;
     border: none;
 }
 QLabel#appTitle {
-    color: #FFFFFF;
+    color: __SIDEBAR_TITLE__;
     font-size: 20px;
     font-weight: 600;
 }
 QLabel#appSubtitle {
-    color: #8E9AB0;
+    color: __SIDEBAR_SUBTITLE__;
     font-size: 11px;
 }
 QLabel#sidebarSection {
-    color: #5F6B80;
+    color: __SIDEBAR_SECTION__;
     font-size: 11px;
     padding: 4px 14px;
 }
@@ -50,21 +54,21 @@ QPushButton#navButton {
     padding: 10px 14px;
     border: none;
     border-radius: 8px;
-    color: #A9B4C8;
+    color: __SIDEBAR_TEXT__;
     background: transparent;
     font-size: 14px;
 }
 QPushButton#navButton:hover {
-    background: #262F40;
-    color: #FFFFFF;
+    background: __SIDEBAR_HOVER__;
+    color: __SIDEBAR_ACTIVE_TEXT__;
 }
 QPushButton#navButton:checked {
-    background: #2B364A;
-    color: #FFFFFF;
+    background: __SIDEBAR_ACTIVE__;
+    color: __SIDEBAR_ACTIVE_TEXT__;
     font-weight: 600;
 }
 QLabel#sidebarFooter {
-    color: #6C7890;
+    color: __SIDEBAR_FOOTER__;
     font-size: 11px;
 }
 
@@ -72,24 +76,24 @@ QLabel#sidebarFooter {
 QLabel#pageTitle {
     font-size: 24px;
     font-weight: 600;
-    color: #111827;
+    color: __TEXT_STRONG__;
 }
 QLabel#pageSubtitle {
-    color: #6B7280;
+    color: __TEXT_MUTED__;
     font-size: 13px;
 }
 /* 紧凑页头（复习页）：标题/说明各降一档，把高度让给正文卡片。 */
 QLabel#pageTitleCompact {
     font-size: 20px;
     font-weight: 600;
-    color: #111827;
+    color: __TEXT_STRONG__;
 }
 QLabel#pageSubtitleCompact {
-    color: #6B7280;
+    color: __TEXT_MUTED__;
     font-size: 12px;
 }
 QLabel#mutedCompact {
-    color: #6B7280;
+    color: __TEXT_MUTED__;
     font-size: 12px;
 }
 QLabel#cardTitle {
@@ -102,17 +106,17 @@ QLabel#articleTitle {
     font-weight: 600;
 }
 QLabel#muted {
-    color: #6B7280;
+    color: __TEXT_MUTED__;
     font-size: 13px;
 }
 QLabel#fieldLabel {
     font-size: 13px;
-    color: #374151;
+    color: __TEXT_FIELD__;
     font-weight: 600;
 }
 QLabel#stepBadge {
-    background: #EAF1FF;
-    color: #2563EB;
+    background: __ACCENT_BG__;
+    color: __ACCENT__;
     border-radius: 9px;
     padding: 2px 10px;
     font-size: 12px;
@@ -121,110 +125,120 @@ QLabel#stepBadge {
 QLabel#bigNumber {
     font-size: 28px;
     font-weight: 600;
-    color: #111827;
+    color: __TEXT_STRONG__;
 }
 /* 用量汇总：6 个指标排一行，字号比首页大数字小一档。 */
 QLabel#usageValue {
     font-size: 22px;
     font-weight: 600;
-    color: #111827;
+    color: __TEXT_STRONG__;
 }
 QFrame#card {
-    background: #FFFFFF;
-    border: 1px solid #E4E8F0;
+    background: __BG_CARD__;
+    border: 1px solid __BORDER__;
     border-radius: 12px;
 }
 /* 档内进度条：细条、无文字，具体百分比写在旁边的 muted 文案里。 */
 QProgressBar#levelProgress {
-    background: #EEF1F6;
+    background: __TRACK__;
     border: none;
     border-radius: 4px;
 }
 QProgressBar#levelProgress::chunk {
-    background: #2563EB;
+    background: __ACCENT__;
+    border-radius: 4px;
+}
+/* AI 处理中的不确定进度条：外观与档内进度条一致，但默认隐藏。 */
+QProgressBar#busyProgress {
+    background: __TRACK__;
+    border: none;
+    border-radius: 4px;
+}
+QProgressBar#busyProgress::chunk {
+    background: __ACCENT__;
     border-radius: 4px;
 }
 QFrame#divider {
-    background: #EEF1F6;
+    background: __TRACK__;
     max-height: 1px;
     border: none;
 }
 
 /* ---------- 输入控件 ---------- */
 QLineEdit, QComboBox, QDoubleSpinBox {
-    background: #FFFFFF;
-    border: 1px solid #D7DCE6;
+    background: __BG_INPUT__;
+    border: 1px solid __BORDER_INPUT__;
     border-radius: 8px;
     padding: 8px 10px;
     min-height: 20px;
-    selection-background-color: #BFD6FF;
+    selection-background-color: __SELECTION__;
 }
 QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus {
-    border-color: #3B82F6;
+    border-color: __ACCENT_STRONG__;
 }
 QLineEdit:disabled, QComboBox:disabled, QDoubleSpinBox:disabled {
-    background: #F1F3F7;
-    color: #9AA3B2;
+    background: __BG_DISABLED__;
+    color: __TEXT_DISABLED__;
 }
 QComboBox::drop-down {
     border: none;
     width: 22px;
 }
 QComboBox QAbstractItemView {
-    background: #FFFFFF;
-    border: 1px solid #D7DCE6;
-    selection-background-color: #EAF1FF;
-    selection-color: #1F2937;
+    background: __BG_INPUT__;
+    border: 1px solid __BORDER_INPUT__;
+    selection-background-color: __ACCENT_BG__;
+    selection-color: __TEXT__;
     outline: none;
 }
 QCheckBox {
-    color: #4B5563;
+    color: __TEXT_SECOND__;
     font-size: 13px;
     spacing: 6px;
 }
 
 /* ---------- 按钮 ---------- */
 QPushButton#primaryButton {
-    background: #3B82F6;
-    color: #FFFFFF;
+    background: __ACCENT_STRONG__;
+    color: __ON_ACCENT__;
     border: none;
     border-radius: 8px;
     padding: 9px 22px;
     font-weight: 600;
 }
 QPushButton#primaryButton:hover {
-    background: #2F6FE0;
+    background: __ACCENT_STRONG_HOVER__;
 }
 QPushButton#primaryButton:pressed {
-    background: #2760C8;
+    background: __ACCENT_STRONG_PRESSED__;
 }
 QPushButton#primaryButton:disabled {
-    background: #B9CDF2;
-    color: #F3F6FD;
+    background: __ACCENT_DISABLED__;
+    color: __ON_ACCENT_DISABLED__;
 }
 QPushButton#secondaryButton {
-    background: #FFFFFF;
-    color: #374151;
-    border: 1px solid #D7DCE6;
+    background: __BG_SUBTLE__;
+    color: __TEXT_FIELD__;
+    border: 1px solid __BORDER_INPUT__;
     border-radius: 8px;
     padding: 9px 18px;
 }
 QPushButton#secondaryButton:hover {
-    border-color: #3B82F6;
-    color: #2563EB;
+    border-color: __ACCENT_STRONG__;
+    color: __ACCENT__;
 }
 QPushButton#secondaryButton:disabled {
-    color: #9AA3B2;
-    background: #F7F8FA;
+    color: __TEXT_DISABLED__;
+    background: __BG_DISABLED__;
 }
 QPushButton#linkButton {
     background: transparent;
     border: none;
-    color: #2563EB;
+    color: __ACCENT__;
     padding: 2px 4px;
 }
 QPushButton#linkButton:hover {
-    color: #1D4ED8;
+    color: __ACCENT_HOVER__;
     text-decoration: underline;
 }
 
@@ -242,12 +256,12 @@ QScrollBar:vertical {
     margin: 2px;
 }
 QScrollBar::handle:vertical {
-    background: #D3D9E4;
+    background: __SCROLL_HANDLE__;
     border-radius: 5px;
     min-height: 30px;
 }
 QScrollBar::handle:vertical:hover {
-    background: #B8C1D1;
+    background: __SCROLL_HANDLE_HOVER__;
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0;
@@ -260,16 +274,16 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
 /* 字体沿用全局英文链；行距在 assessment_dialog 里用富文本设置。 */
 QLabel#passageText {
     font-size: 15px;
-    color: #1F2937;
+    color: __TEXT__;
     padding: 4px 0;
 }
 QLabel#questionPrompt {
     font-size: 14px;
-    color: #111827;
+    color: __TEXT_STRONG__;
     font-weight: 600;
 }
 QRadioButton {
-    color: #374151;
+    color: __TEXT_FIELD__;
     font-size: 14px;
     spacing: 8px;
     padding: 2px 0;
@@ -277,40 +291,42 @@ QRadioButton {
 
 /* ---------- 阅读器与释义卡 ---------- */
 QTextEdit#articleView {
-    background: #FFFFFF;
-    border: 1px solid #E4E8F0;
+    background: __BG_CARD__;
+    border: 1px solid __BORDER__;
     border-radius: 12px;
-    selection-background-color: #BFD6FF;
+    selection-background-color: __SELECTION__;
+    /* 双击取词的选中文字：不设前景色时暗色主题会沿用正文浅灰，对比不足。 */
+    selection-color: __SELECTION_TEXT__;
 }
 QFrame#wordPanel {
-    background: #FFFFFF;
-    border: 1px solid #E4E8F0;
+    background: __BG_CARD__;
+    border: 1px solid __BORDER__;
     border-radius: 12px;
 }
 QPushButton#cardCloseButton {
     background: transparent;
     border: none;
-    color: #9CA3AF;
+    color: __TEXT_FAINT__;
     font-size: 18px;
     padding: 0;
 }
 QPushButton#cardCloseButton:hover {
-    color: #111827;
-    background: #F3F4F6;
+    color: __TEXT_STRONG__;
+    background: __HOVER_BG__;
     border-radius: 12px;
 }
 QLabel#wordTitle {
     font-size: 26px;
     font-weight: 600;
-    color: #111827;
+    color: __TEXT_STRONG__;
 }
 QLabel#wordPhonetic {
-    color: #6B7280;
+    color: __TEXT_MUTED__;
     font-size: 14px;
 }
 QLabel#wordPos {
-    background: #EAF1FF;
-    color: #2563EB;
+    background: __ACCENT_BG__;
+    color: __ACCENT__;
     border-radius: 8px;
     padding: 2px 8px;
     font-size: 12px;
@@ -318,97 +334,97 @@ QLabel#wordPos {
 }
 QLabel#wordMeaningCn {
     font-size: 16px;
-    color: #111827;
+    color: __TEXT_STRONG__;
 }
 QLabel#wordMeaningEn {
-    color: #4B5563;
+    color: __TEXT_SECOND__;
     font-size: 13px;
     font-style: italic;
 }
 QLabel#wordExampleEn {
-    color: #1F2937;
+    color: __TEXT__;
     font-size: 13px;
 }
 QLabel#wordExampleCn {
-    color: #6B7280;
+    color: __TEXT_MUTED__;
     font-size: 13px;
 }
 QLabel#wordContext {
-    color: #6B7280;
+    color: __TEXT_MUTED__;
     font-size: 12px;
-    background: #F7F8FA;
+    background: __BG_SUBTLE__;
     border-radius: 8px;
     padding: 8px 10px;
 }
 QLabel#wordMnemonic {
-    color: #92400E;
+    color: __WARN_TEXT__;
     font-size: 13px;
-    background: #FFFBEB;
-    border: 1px solid #FDE68A;
+    background: __WARN_BG__;
+    border: 1px solid __WARN_BORDER__;
     border-radius: 8px;
     padding: 8px 10px;
 }
 QLabel#reviewHelpAdvice {
-    color: #1F2937;
+    color: __TEXT__;
     font-size: 14px;
-    background: #F0FDF4;
-    border: 1px solid #BBF7D0;
+    background: __OK_BG__;
+    border: 1px solid __OK_BORDER__;
     border-radius: 10px;
     padding: 12px 14px;
 }
 QLabel#reviewHelpLog {
-    color: #1F2937;
+    color: __TEXT__;
     font-size: 12px;
-    background: #F0FDF4;
-    border: 1px solid #BBF7D0;
+    background: __OK_BG__;
+    border: 1px solid __OK_BORDER__;
     border-radius: 8px;
     padding: 8px 10px;
 }
 
 /* ---------- 生词本 ---------- */
 QTableWidget#wordTable, QTableWidget#dataTable {
-    background: #FFFFFF;
-    border: 1px solid #E4E8F0;
+    background: __BG_CARD__;
+    border: 1px solid __BORDER__;
     border-radius: 12px;
-    selection-background-color: #EAF1FF;
-    selection-color: #1F2937;
+    selection-background-color: __ACCENT_BG__;
+    selection-color: __TEXT__;
     outline: none;
 }
 QTableWidget#wordTable::item, QTableWidget#dataTable::item {
     padding: 8px 10px;
-    border-bottom: 1px solid #F1F4F9;
+    border-bottom: 1px solid __BORDER_FAINT__;
 }
 QTableWidget#wordTable::item:selected, QTableWidget#dataTable::item:selected {
-    background: #EAF1FF;
-    color: #1F2937;
+    background: __ACCENT_BG__;
+    color: __TEXT__;
 }
 QHeaderView::section {
-    background: #F7F8FA;
-    color: #4B5563;
+    background: __BG_SUBTLE__;
+    color: __TEXT_SECOND__;
     border: none;
-    border-bottom: 1px solid #E4E8F0;
+    border-bottom: 1px solid __BORDER__;
     padding: 8px 10px;
     font-size: 12px;
     font-weight: 600;
 }
 QPlainTextEdit {
-    background: #FFFFFF;
-    border: 1px solid #D7DCE6;
+    background: __BG_INPUT__;
+    border: 1px solid __BORDER_INPUT__;
     border-radius: 8px;
     padding: 6px 8px;
-    selection-background-color: #BFD6FF;
+    selection-background-color: __SELECTION__;
 }
 QPlainTextEdit:focus {
-    border-color: #3B82F6;
+    border-color: __ACCENT_STRONG__;
 }
 
 /* ---------- 复习 ---------- */
 QFrame#reviewCard {
-    background: #FFFFFF;
-    border: 1px solid #E4E8F0;
+    background: __BG_CARD__;
+    border: 1px solid __BORDER__;
     border-radius: 12px;
 }
-/* 复习卡片正文的滚动区：透出卡片白底，只留滚动条。 */
+/* 复习卡片正文的滚动区：透出卡片底色，只留滚动条。 */
 QScrollArea#reviewScroll {
     background: transparent;
     border: none;
@@ -419,91 +435,220 @@ QScrollArea#reviewScroll > QWidget > QWidget {
 QLabel#reviewIdleTitle {
     font-size: 22px;
     font-weight: 600;
-    color: #111827;
+    color: __TEXT_STRONG__;
 }
 QLabel#reviewWord {
     font-size: 40px;
     font-weight: 600;
-    color: #111827;
+    color: __TEXT_STRONG__;
 }
 QLabel#reviewMeaning {
     font-size: 18px;
-    color: #111827;
+    color: __TEXT_STRONG__;
 }
 QLabel#reviewPrompt {
     font-size: 22px;
     font-weight: 600;
-    color: #111827;
+    color: __TEXT_STRONG__;
 }
 QLabel#reviewContext {
-    color: #4B5563;
+    color: __TEXT_SECOND__;
     font-size: 14px;
-    background: #F7F8FA;
+    background: __BG_SUBTLE__;
     border-radius: 8px;
     padding: 10px 12px;
 }
 QPushButton#ratingForgot {
-    background: #FEE2E2;
-    color: #B91C1C;
+    background: __DANGER_BG__;
+    color: __DANGER_TEXT__;
     border: none;
     border-radius: 8px;
     padding: 10px 18px;
     font-weight: 600;
 }
 QPushButton#ratingForgot:hover {
-    background: #FECACA;
+    background: __DANGER_HOVER__;
 }
 QPushButton#ratingVague {
-    background: #FEF3C7;
-    color: #B45309;
+    background: __VAGUE_BG__;
+    color: __VAGUE_TEXT__;
     border: none;
     border-radius: 8px;
     padding: 10px 18px;
     font-weight: 600;
 }
 QPushButton#ratingVague:hover {
-    background: #FDE68A;
+    background: __VAGUE_HOVER__;
 }
 QPushButton#ratingKnown {
-    background: #DBEAFE;
-    color: #1D4ED8;
+    background: __KNOWN_BG__;
+    color: __KNOWN_TEXT__;
     border: none;
     border-radius: 8px;
     padding: 10px 18px;
     font-weight: 600;
 }
 QPushButton#ratingKnown:hover {
-    background: #BFDBFE;
+    background: __KNOWN_HOVER__;
 }
 QPushButton#ratingEasy {
-    background: #D1FAE5;
-    color: #047857;
+    background: __EASY_BG__;
+    color: __EASY_TEXT__;
     border: none;
     border-radius: 8px;
     padding: 10px 18px;
     font-weight: 600;
 }
 QPushButton#ratingEasy:hover {
-    background: #A7F3D0;
+    background: __EASY_HOVER__;
 }
 
 /* ---------- 消息框 ---------- */
 QMessageBox {
-    background: #FFFFFF;
+    background: __BG_CARD__;
 }
 QMessageBox QLabel {
-    color: #1F2937;
+    color: __TEXT__;
 }
 """
 
+# 浅色主题：原配色，未改动。
+LIGHT_PALETTE: dict[str, str] = {
+    "TEXT": "#1F2937",
+    "TEXT_STRONG": "#111827",
+    "TEXT_SECOND": "#4B5563",
+    "TEXT_FIELD": "#374151",
+    "TEXT_MUTED": "#6B7280",
+    "TEXT_DISABLED": "#9AA3B2",
+    "TEXT_FAINT": "#9CA3AF",
+    "BG": "#F5F7FA",
+    "BG_CARD": "#FFFFFF",
+    "BG_INPUT": "#FFFFFF",
+    "BG_SUBTLE": "#F7F8FA",
+    "BG_DISABLED": "#F1F3F7",
+    "BORDER": "#E4E8F0",
+    "BORDER_INPUT": "#D7DCE6",
+    "BORDER_FAINT": "#F1F4F9",
+    "TRACK": "#EEF1F6",
+    "ACCENT": "#2563EB",
+    "ACCENT_HOVER": "#1D4ED8",
+    "ACCENT_STRONG": "#3B82F6",
+    "ACCENT_STRONG_HOVER": "#2F6FE0",
+    "ACCENT_STRONG_PRESSED": "#2760C8",
+    "ACCENT_DISABLED": "#B9CDF2",
+    "ACCENT_BG": "#EAF1FF",
+    "ON_ACCENT": "#FFFFFF",
+    "ON_ACCENT_DISABLED": "#F3F6FD",
+    "SELECTION": "#BFD6FF",
+    "SELECTION_TEXT": "#1F2937",
+    "HOVER_BG": "#F3F4F6",
+    "SCROLL_HANDLE": "#D3D9E4",
+    "SCROLL_HANDLE_HOVER": "#B8C1D1",
+    "WARN_TEXT": "#92400E",
+    "WARN_BG": "#FFFBEB",
+    "WARN_BORDER": "#FDE68A",
+    "OK_BG": "#F0FDF4",
+    "OK_BORDER": "#BBF7D0",
+    "DANGER_BG": "#FEE2E2",
+    "DANGER_TEXT": "#B91C1C",
+    "DANGER_HOVER": "#FECACA",
+    "VAGUE_BG": "#FEF3C7",
+    "VAGUE_TEXT": "#B45309",
+    "VAGUE_HOVER": "#FDE68A",
+    "KNOWN_BG": "#DBEAFE",
+    "KNOWN_TEXT": "#1D4ED8",
+    "KNOWN_HOVER": "#BFDBFE",
+    "EASY_BG": "#D1FAE5",
+    "EASY_TEXT": "#047857",
+    "EASY_HOVER": "#A7F3D0",
+    "SIDEBAR_BG": "#1D2433",
+    "SIDEBAR_TITLE": "#FFFFFF",
+    "SIDEBAR_SUBTITLE": "#8E9AB0",
+    "SIDEBAR_SECTION": "#5F6B80",
+    "SIDEBAR_TEXT": "#A9B4C8",
+    "SIDEBAR_ACTIVE_TEXT": "#FFFFFF",
+    "SIDEBAR_HOVER": "#262F40",
+    "SIDEBAR_ACTIVE": "#2B364A",
+    "SIDEBAR_FOOTER": "#6C7890",
+}
 
-def build_stylesheet(english_font: str | None = None) -> str:
+# 低调主题：VS Code 风格的深色配色。刻意不使用纯白/大面积浅色，
+# 远看更像编辑器或终端窗口。
+LOW_PROFILE_PALETTE: dict[str, str] = {
+    "TEXT": "#D4D4D4",
+    "TEXT_STRONG": "#E8E8E8",
+    "TEXT_SECOND": "#B0B8C4",
+    "TEXT_FIELD": "#C9D1D9",
+    "TEXT_MUTED": "#8B949E",
+    "TEXT_DISABLED": "#6A6A6A",
+    "TEXT_FAINT": "#6E7681",
+    "BG": "#1E1E1E",
+    "BG_CARD": "#252526",
+    "BG_INPUT": "#2A2A2A",
+    "BG_SUBTLE": "#2D2D30",
+    "BG_DISABLED": "#262626",
+    "BORDER": "#3C3C3C",
+    "BORDER_INPUT": "#3C3C3C",
+    "BORDER_FAINT": "#333333",
+    "TRACK": "#333333",
+    "ACCENT": "#4A9EFF",
+    "ACCENT_HOVER": "#7DB8FF",
+    "ACCENT_STRONG": "#0E639C",
+    "ACCENT_STRONG_HOVER": "#1177BB",
+    "ACCENT_STRONG_PRESSED": "#0A5488",
+    "ACCENT_DISABLED": "#2D4A66",
+    "ACCENT_BG": "#1E3A5F",
+    "ON_ACCENT": "#FFFFFF",
+    "ON_ACCENT_DISABLED": "#A7B8C8",
+    "SELECTION": "#264F78",
+    "SELECTION_TEXT": "#FFFFFF",
+    "HOVER_BG": "#3A3A3A",
+    "SCROLL_HANDLE": "#424242",
+    "SCROLL_HANDLE_HOVER": "#4F4F4F",
+    "WARN_TEXT": "#E2B65C",
+    "WARN_BG": "#332B1A",
+    "WARN_BORDER": "#5C4A22",
+    "OK_BG": "#1E3328",
+    "OK_BORDER": "#2E5A3E",
+    "DANGER_BG": "#4A2222",
+    "DANGER_TEXT": "#F48771",
+    "DANGER_HOVER": "#5C2A2A",
+    "VAGUE_BG": "#4A3A1E",
+    "VAGUE_TEXT": "#D7B45A",
+    "VAGUE_HOVER": "#5C4A22",
+    "KNOWN_BG": "#1E3A5F",
+    "KNOWN_TEXT": "#7DB8FF",
+    "KNOWN_HOVER": "#26476B",
+    "EASY_BG": "#1E3B2E",
+    "EASY_TEXT": "#5FD3A0",
+    "EASY_HOVER": "#2A5240",
+    "SIDEBAR_BG": "#181818",
+    "SIDEBAR_TITLE": "#CCCCCC",
+    "SIDEBAR_SUBTITLE": "#7A8290",
+    "SIDEBAR_SECTION": "#6E7681",
+    "SIDEBAR_TEXT": "#9DA5B4",
+    "SIDEBAR_ACTIVE_TEXT": "#FFFFFF",
+    "SIDEBAR_HOVER": "#2A2D2E",
+    "SIDEBAR_ACTIVE": "#37373D",
+    "SIDEBAR_FOOTER": "#5F6672",
+}
+
+
+def build_stylesheet(english_font: str | None = None, *, low_profile: bool = False) -> str:
     """生成全局 QSS。`english_font` 是用户选的英文字体 key（见 gui.fonts）。
 
-    设置页切换字体时会重新生成并 `QApplication.setStyleSheet(...)`，
+    设置页切换字体或主题时会重新生成并 `QApplication.setStyleSheet(...)`，
     Qt 会自动重刷所有控件，不需要逐个页面改样式。
+
+    `low_profile=True` 时使用深色调色板，并把全局字体换成等宽链
+    （低调模式下用户选的英文字体会被忽略，见 `gui.fonts.font_stack`）。
     """
-    return _STYLESHEET_TEMPLATE.replace("__ENGLISH_FONT__", english_font_stack(english_font))
+    font = font_stack(english_font, mono=low_profile)
+    qss = _STYLESHEET_TEMPLATE.replace("__ENGLISH_FONT__", font)
+    palette = LOW_PROFILE_PALETTE if low_profile else LIGHT_PALETTE
+    for name, value in palette.items():
+        qss = qss.replace(f"__{name}__", value)
+    return qss
 
 
 # 默认样式表：没读到用户偏好时用它兜底。

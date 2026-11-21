@@ -109,6 +109,16 @@ uv run ruff format src/english_learner tests
 - **M6.5（2026-11-20）**：档内难度浮动。`difficulty_hint()` 推导 low / mid / high
   并注入文章 prompt（空值 / mid 与旧版逐字节一致），hint 与理由写入
   `articles.metrics_json`；可读性重试会撤掉 high，用户阅读反馈优先于 hint。
+- **低调主题（2026-11-21）**：设置页「外观 → 界面主题」可切到深色等宽模式
+  （`ui.low_profile`）。`theme.py` 的颜色已抽成 `LIGHT_PALETTE` /
+  `LOW_PROFILE_PALETTE`，QSS 模板只写 `__KEY__` 占位符，**新样式不要写死
+  颜色**；低调模式下窗口标题与侧边栏文案中性化，生词本页顶部大标题也隐藏
+  （`PageHeader.set_title_visible`），所有 `QPushButton` 走 `gui/i18n.py`
+  转英文（新增按钮文案记得补 `BUTTON_EN`），英文字体统一为等宽链
+  （用户选的 `english_font` 保留但不生效），正文由
+  `ArticleView.set_english_font(key, mono=True)` 同步；生词高亮颜色随主题成对
+  切换（暗色 `#5C4A22 / #FFE9A8`），主题变化时调
+  `ArticleView.set_low_profile()` 重绘。
 - **剩余为 M6.6 / M6.7**（强证据升级与边界文案）、可选 M4（深色模式、
   安装器 / 自动更新）与真实环境调优。当前看板见
   `docs/english_learner/PROGRESS.md`，已知技术债见 `TECH_DEBT.md`。

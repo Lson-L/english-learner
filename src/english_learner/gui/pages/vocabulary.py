@@ -35,7 +35,8 @@ from PySide6.QtWidgets import (
 from ...models.entities import ReviewLog, Word
 from ...services.app_context import AppContext
 from ...services.srs import RATING_LABELS
-from ..workers import TaskWorker
+from ..widgets import busy_progress_bar
+from ..workers import TaskWorker, retire_worker
 from .common import PageHeader, set_status
 
 STATUS_LABELS: dict[str, str] = {
@@ -81,6 +82,9 @@ class VocabularyPage(QWidget):
         self._last_search_text = ""
         self._last_sort_index = 0
         self._worker: TaskWorker | None = None
+        # 切换选中行时也可能有未保存释义：置位期间忽略 itemSelectionChanged，
+        # 避免恢复选中行或保存后的 refresh() 再次触发询问。
+        self._suppress_selection_check = False
 
         self._build_ui()
 
@@ -90,12 +94,11 @@ class VocabularyPage(QWidget):
         layout.setContentsMargins(32, 28, 32, 24)
         layout.setSpacing(14)
 
-        layout.addWidget(
-            PageHeader(
-                "生词本",
-                "阅读时标注过的词都在这里；可以筛选、搜索、修改释义或删除。",
-            )
+        self._header = PageHeader(
+            "生词本",
+            "阅读时标注过的词都在这里；可以筛选、搜索、修改释义或删除。",
         )
+        layout.addWidget(self._header)
         layout.addLayout(self._build_toolbar())
 
         self._empty_label = QLabel("还没有生词。去「阅读」页双击一个单词，加入生词本吧。")
@@ -114,6 +117,11 @@ class VocabularyPage(QWidget):
 
         self._status = QLabel("")
         layout.addWidget(self._status)
+
+    # ------------------------------------------------------------------ 外观
+    def set_low_profile(self, low_profile: bool) -> None:
+        """低调模式下去掉页面顶部的「生词本」大字，说明文字保留。"""
+        self._header.set_title_visible(not low_profile)
 
     def _build_toolbar(self) -> QHBoxLayout:
         toolbar = QHBoxLayout()
@@ -248,8 +256,11 @@ class VocabularyPage(QWidget):
         mnemonic_row.setSpacing(8)
         self._mnemonic_button = QPushButton("AI 生成记忆方法")
         self._mnemonic_button.setObjectName("secondaryButton")
-        self._mnemonic_button.clicked.connect(self._generate_mnemonic)
+        self._mnemonic_button.setToolTip("生成中可以再次点击取消")
+        self._mnemonic_button.clicked.connect(self._on_mnemonic_clicked)
         mnemonic_row.addWidget(self._mnemonic_button)
+        self._mnemonic_progress = busy_progress_bar(width=90)
+        mnemonic_row.addWidget(self._mnemonic_progress)
         mnemonic_row.addStretch(1)
         body.addLayout(mnemonic_row)
 
@@ -418,12 +429,48 @@ class VocabularyPage(QWidget):
         return None
 
     def _on_selection_changed(self) -> None:
+        """选中的词条变化时刷新详情；有未保存释义先询问，避免静默丢失。"""
         self._update_batch_button()
+        if self._suppress_selection_check:
+            return
         row = self._table.currentRow()
         if row < 0 or row >= len(self._rows):
             self._clear_detail()
             return
-        self._show_detail(self._rows[row])
+
+        target = self._rows[row]
+        if (
+            self._selected is not None
+            and target.id != self._selected.id
+            and self._has_unsaved_changes()
+        ):
+            action = self._ask_unsaved("当前词条的释义还没有保存。\n切换词条前要保存吗？")
+            if action == "cancel":
+                self._select_row_silently(self._selected.id)
+                return
+            if action == "save" and not self._save_meaning():
+                self._select_row_silently(self._selected.id)
+                return
+            if action == "discard":
+                self._reset_edits()
+            # 保存会触发 refresh() 并把选中行带回旧词，这里重新定位到用户点的词。
+            if self._row_of(target.id) is None:
+                return
+            self._select_row_silently(target.id)
+
+        self._show_detail(target)
+
+    def _select_row_silently(self, word_id: int | None) -> None:
+        """按词条 id 选中行，但不触发详情切换（调用方随后自行决定展示哪条）。"""
+        row = self._row_of(word_id)
+        if row is None:
+            return
+        self._suppress_selection_check = True
+        try:
+            self._table.selectRow(row)
+        finally:
+            self._suppress_selection_check = False
+        self._update_batch_button()
 
     def _selected_word_ids(self) -> list[int]:
         model = self._table.selectionModel()
@@ -547,21 +594,34 @@ class VocabularyPage(QWidget):
         if not self._has_unsaved_changes():
             return True
 
+        action = self._ask_unsaved("当前词条的释义还没有保存。\n离开前要保存吗？")
+        if action == "save":
+            return self._save_meaning()
+        if action == "discard":
+            self._reset_edits()
+            return True
+        return False
+
+    def _ask_unsaved(self, message: str) -> str:
+        """统一的三选一：返回 save / discard / cancel。
+
+        切页、筛选、排序、切换词条都走这里，保证任何离开当前编辑的动作
+        都不会静默丢掉用户输入。
+        """
         answer = QMessageBox.question(
             self,
             "有未保存的释义",
-            "当前词条的释义还没有保存。\n离开前要保存吗？",
+            message,
             QMessageBox.StandardButton.Save
             | QMessageBox.StandardButton.Discard
             | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Save,
         )
         if answer == QMessageBox.StandardButton.Save:
-            return self._save_meaning()
+            return "save"
         if answer == QMessageBox.StandardButton.Discard:
-            self._reset_edits()
-            return True
-        return False
+            return "discard"
+        return "cancel"
 
     def _source_text(self, word: Word) -> str:
         if word.article_id is None:
@@ -628,6 +688,17 @@ class VocabularyPage(QWidget):
         set_status(self._status, f"「{name}」已从生词本删除。", "success")
 
     # -------------------------------------------------------------- 记忆方法
+    def _on_mnemonic_clicked(self) -> None:
+        """生成中再点一次 = 取消；取消后旧请求转入后台，界面立即恢复。"""
+        worker = self._worker
+        if worker is not None and worker.isRunning():
+            if retire_worker(worker):
+                self._worker = None
+                set_status(self._status, "已取消生成记忆方法。", "hint")
+                self._on_mnemonic_finished()
+            return
+        self._generate_mnemonic()
+
     def _generate_mnemonic(self) -> None:
         word = self._selected
         if word is None or word.id is None:
@@ -644,8 +715,10 @@ class VocabularyPage(QWidget):
 
         service = self._context.dictionary_service()
         level = self._context.level()
-        self._mnemonic_button.setEnabled(False)
-        self._mnemonic_button.setText("生成中…")
+        # 保持按钮可点：生成中再点一次用于取消。
+        self._mnemonic_button.setEnabled(True)
+        self._mnemonic_button.setText("取消生成")
+        self._mnemonic_progress.setVisible(True)
         set_status(self._status, "AI 正在生成记忆方法…", "loading")
 
         worker = TaskWorker(lambda: service.generate_mnemonic(word, level))
@@ -668,11 +741,14 @@ class VocabularyPage(QWidget):
 
     def _on_mnemonic_finished(self) -> None:
         self._worker = None
+        self._mnemonic_progress.setVisible(False)
         self._mnemonic_button.setEnabled(True)
         if self._selected is not None:
             self._mnemonic_button.setText(
                 "重新生成记忆方法" if self._selected.mnemonic else "AI 生成记忆方法"
             )
+        else:
+            self._mnemonic_button.setText("AI 生成记忆方法")
 
     def _on_batch_delete_clicked(self) -> None:
         ids = self._selected_word_ids()

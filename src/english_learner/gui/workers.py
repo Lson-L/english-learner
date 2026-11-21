@@ -28,6 +28,8 @@ Java 对照：
 from __future__ import annotations
 
 import logging
+import threading
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -42,6 +44,41 @@ def is_cancellation_requested() -> bool:
     """供长任务在循环里检查：当前线程是否已被请求取消。"""
     thread = QThread.currentThread()
     return isinstance(thread, TaskWorker) and thread.is_cancelled()
+
+
+def retire_worker(worker: TaskWorker | None) -> bool:
+    """把仍在运行的任务移出界面槽位，让用户立刻可以重试或做别的事。
+
+    取消是协作式的：底层 HTTP 不会被打断，线程会继续跑到请求返回。这里做两件事：
+    1. 断开成功 / 失败 / 取消信号，旧结果不会覆盖新任务的状态；
+    2. 把 worker 放进全局列表，保证线程运行期间不会被 GC。
+    """
+    if worker is None or worker.isFinished():
+        return False
+    worker.cancel()
+    # PySide 对“没有连接”的信号会发 RuntimeWarning 而不是抛异常，这里统一静音。
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for signal in (worker.succeeded, worker.failed, worker.cancelled, worker.finished):
+            try:
+                signal.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+    with _ORPHANS_LOCK:
+        _ORPHANS[:] = [item for item in _ORPHANS if not item.isFinished()]
+        _ORPHANS.append(worker)
+    logger.info("后台任务已放弃，等待其网络请求自行结束")
+    return True
+
+
+def wait_for_orphans() -> None:
+    """退出前等待被放弃的任务结束，避免 QThread 运行中被销毁。"""
+    with _ORPHANS_LOCK:
+        workers = list(_ORPHANS)
+    for worker in workers:
+        if not worker.isFinished():
+            logger.info("退出前等待被放弃的后台任务…")
+            worker.wait()
 
 
 class TaskWorker(QThread):
@@ -94,3 +131,9 @@ class TaskWorker(QThread):
                 self.cancelled.emit()
             else:
                 self.succeeded.emit(result)
+
+
+# 被界面“放弃”的任务：底层 HTTP 无法中断，线程会自己跑完。
+# 这里保证它们在运行期间始终有引用，避免 QThread 被 GC 导致进程崩溃。
+_ORPHANS: list[TaskWorker] = []
+_ORPHANS_LOCK = threading.Lock()

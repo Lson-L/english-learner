@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
@@ -30,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...models.entities import Word
+from ...models.entities import Word, today_str
 from ...services.app_context import AppContext
 from ...services.config_store import ReviewConfig
 from ...services.recall import (
@@ -86,6 +87,17 @@ _IDLE_HINT = (
 )
 
 
+@dataclass(frozen=True)
+class _UndoState:
+    """撤销最近一次评分所需的快照；只保留一张卡。"""
+
+    word: Word
+    log_id: int | None
+    rating: int
+    mode: str
+    stat_date: str
+
+
 class ReviewPage(QWidget):
     def __init__(self, context: AppContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -112,6 +124,9 @@ class ReviewPage(QWidget):
         self._prompt: SpellingPrompt | None = None
         self._recall_result: RecallResult | None = None
         self._spell_input_active = False
+
+        # 撤销上一张：记录评分前的词条与刚写入的日志 id。
+        self._last_undo: _UndoState | None = None
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._build_ui()
@@ -210,6 +225,14 @@ class ReviewPage(QWidget):
         self._progress_label.setObjectName("muted")
         progress_row.addWidget(self._progress_label)
         progress_row.addStretch(1)
+        # 误按 1~4 会直接影响排期，给一次撤销机会（只保留最近一张）。
+        self._undo_button = QPushButton("撤销上一张")
+        self._undo_button.setObjectName("linkButton")
+        self._undo_button.setToolTip("恢复上一个词的复习排期，并删除刚记录的这次评分")
+        self._undo_button.clicked.connect(self._undo_last_rating)
+        self._undo_button.setVisible(False)
+        progress_row.addWidget(self._undo_button)
+
         # 随时收工：已评分的卡片都已落库，不需要硬撑到整轮结束。
         self._end_button = QPushButton("结束本轮")
         self._end_button.setObjectName("linkButton")
@@ -386,6 +409,14 @@ class ReviewPage(QWidget):
         button_row = QHBoxLayout()
         button_row.setSpacing(10)
         button_row.addStretch(1)
+        # 检查点 / 总结页同样可以撤销刚刚那张，避免第 10 张误按时没有退路。
+        self._summary_undo_button = QPushButton("撤销上一张")
+        self._summary_undo_button.setObjectName("secondaryButton")
+        self._summary_undo_button.setToolTip("恢复上一个词的复习排期，并删除刚记录的这次评分")
+        self._summary_undo_button.clicked.connect(self._undo_last_rating)
+        self._summary_undo_button.setVisible(False)
+        button_row.addWidget(self._summary_undo_button)
+
         # 检查点：继续下一轮；总结页：继续复习 / 加练一轮。同一个按钮按状态分支。
         self._continue_button = QPushButton("继续")
         self._continue_button.setObjectName("primaryButton")
@@ -512,7 +543,9 @@ class ReviewPage(QWidget):
         self._session = []
         self._index = 0
         self._at_checkpoint = False
+        self._last_undo = None
         self._stack.setCurrentWidget(self._idle_page)
+        self._refresh_undo_buttons()
 
     # ------------------------------------------------------------------ 会话
     def _is_session_active(self) -> bool:
@@ -551,6 +584,7 @@ class ReviewPage(QWidget):
         self._round_reviewed = 0
         self._round_recalled = 0
         self._at_checkpoint = False
+        self._last_undo = None
         self._current = None
         self._revealed = False
         set_status(self._status, "", "hint")
@@ -622,6 +656,7 @@ class ReviewPage(QWidget):
             self._show_recognition_front()
             if card.mode == CARD_DUAL:
                 self._reveal_button.setText("显示释义并默写（空格）")
+        self._refresh_undo_buttons()
 
     def _show_spelling_front(self) -> None:
         """拼写模式的正脸：释义 + 挖空例句 + 输入框。"""
@@ -873,8 +908,10 @@ class ReviewPage(QWidget):
             verdict = result.status
             distance = result.distance
 
+        previous_word = self._current
+        mode = self._current_mode
         try:
-            self._context.review_service().review(
+            outcome = self._context.review_service().review(
                 self._current,
                 rating,
                 note=note,
@@ -888,9 +925,18 @@ class ReviewPage(QWidget):
             set_status(self._status, f"保存复习进度失败：{exc}", "error")
             return
 
+        # 记录撤销快照：词条评分前状态 + 刚写入的日志 id + 本次评分。
+        self._last_undo = _UndoState(
+            word=previous_word,
+            log_id=outcome.log_id,
+            rating=rating,
+            mode=mode,
+            stat_date=today_str(),
+        )
+
         self._reviewed += 1
         self._round_reviewed += 1
-        self._mode_counts[self._current_mode] = self._mode_counts.get(self._current_mode, 0) + 1
+        self._mode_counts[mode] = self._mode_counts.get(mode, 0) + 1
         if rating >= RATING_KNOWN:
             self._recalled += 1
             self._round_recalled += 1
@@ -902,6 +948,45 @@ class ReviewPage(QWidget):
             self._show_checkpoint()
         else:
             self._show_current()
+
+    def _undo_last_rating(self) -> None:
+        """撤销最近一次评分：恢复词条排期、删除日志、复习数 -1，并回到那张卡。"""
+        state = self._last_undo
+        if state is None or state.word.id is None:
+            return
+
+        try:
+            self._context.review_service().undo_review(
+                state.word,
+                state.log_id,
+                stat_date=state.stat_date,
+            )
+        except Exception as exc:  # noqa: BLE001 - 撤销失败不能让界面崩掉
+            logger.exception("撤销复习失败")
+            set_status(self._status, f"撤销失败：{exc}", "error")
+            return
+
+        self._last_undo = None
+        self._reviewed = max(0, self._reviewed - 1)
+        self._round_reviewed = max(0, self._round_reviewed - 1)
+        if state.rating >= RATING_KNOWN:
+            self._recalled = max(0, self._recalled - 1)
+            self._round_recalled = max(0, self._round_recalled - 1)
+        count = self._mode_counts.get(state.mode, 0)
+        if count:
+            self._mode_counts[state.mode] = count - 1
+
+        self._index = max(0, self._index - 1)
+        self._at_checkpoint = False
+        self._stack.setCurrentWidget(self._card_page)
+        self._show_current()
+        self._refresh_due_label()
+        set_status(self._status, "已撤销上一张评分，这张卡重新出现。", "hint")
+
+    def _refresh_undo_buttons(self) -> None:
+        available = self._last_undo is not None
+        self._undo_button.setVisible(available)
+        self._summary_undo_button.setVisible(available)
 
     def _collect_review_help(self, rating: int) -> tuple[str, str] | None:
         """弹出复习帮助框，返回 (原因, AI 建议)；None 表示用户取消本次评分。
@@ -959,6 +1044,7 @@ class ReviewPage(QWidget):
         self._overview_button.setVisible(True)
         self._stack.setCurrentWidget(self._summary_page)
         self._refresh_due_label()
+        self._refresh_undo_buttons()
         set_status(self._status, "进度已保存，可以继续，也可以先停在这里。", "hint")
 
     def _continue_from_summary(self) -> None:
@@ -977,6 +1063,9 @@ class ReviewPage(QWidget):
         self._round_reviewed = 0
         self._round_recalled = 0
         self._at_checkpoint = False
+        # 跨轮撤销会把上一轮的卡插进新轮的计数窗口；检查点已经是撤销点，
+        # 继续下一轮后不再保留跨轮撤销。
+        self._last_undo = None
         self._stack.setCurrentWidget(self._card_page)
         self._show_current()
 
@@ -1043,6 +1132,7 @@ class ReviewPage(QWidget):
         self._overview_button.setVisible(True)
         self._stack.setCurrentWidget(self._summary_page)
         self._refresh_due_label()
+        self._refresh_undo_buttons()
         if due_count == 0:
             set_status(self._status, "复习进度已保存，今天到期的词已全部复习完。", "success")
         elif done >= goal:
