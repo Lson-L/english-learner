@@ -38,6 +38,7 @@ from english_learner.services.dictionary_service import (  # noqa: E402
     normalize_lemma,
 )
 from english_learner.services.learner_memory import LearnerMemory  # noqa: E402
+from english_learner.services.prompts import build_dictionary_messages  # noqa: E402
 from english_learner.storage.db import Database  # noqa: E402
 
 _APP: QApplication | None = None
@@ -206,6 +207,20 @@ def test_lookup_injects_learner_memory(db: Database) -> None:
     # 查词任务不注入积压 / 上周计划。
     assert "到期未复习" not in prompt
     assert "上周计划重点" not in prompt
+
+
+def test_dictionary_prompt_only_mentions_base_form_when_it_differs() -> None:
+    """词形与原形相同时，不许 AI 再写“原形就是 X”（释义卡片会重复）。"""
+    prompt = build_dictionary_messages("damage", "The earthquake caused damage.", "B1")[-1][
+        "content"
+    ]
+
+    assert "display_form 与 lemma 不同时" in prompt
+    assert "两者相同（仅大小写不同也算相同）时" in prompt
+    assert "不要出现“原形”字样" in prompt
+    assert "原形就是 X" in prompt
+    # 旧措辞会诱导模型每次都解释词形关系，不能回来。
+    assert "说明它与原形的关系" not in prompt
 
 
 def test_lookup_stores_cefr_band_and_tolerates_invalid(db: Database) -> None:

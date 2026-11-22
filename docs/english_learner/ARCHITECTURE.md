@@ -29,7 +29,7 @@ src/english_learner/
 │   ├── config_store.py         AIConfig、JSON 配置读写、URL 规范化、Key 脱敏
 │   ├── provider_presets.py     服务商预设
 │   ├── json_utils.py           parse_json_object 三档兜底 + 字段类型转换
-│   ├── prompts.py              全部提示词 + PROMPT_VERSION = "m5-4"
+│   ├── prompts.py              全部提示词 + PROMPT_VERSION（当前 "m6-5a"）
 │   ├── assessment_bank.py      3 套固定题（A2/B1/B2），默认 B1
 │   ├── assessment_service.py   本地计分、AI 评分、CEFR 回退、手动选级、落库
 │   ├── article_service.py      文章生成、JSON 校验、重试一次、当天缓存、换一篇
@@ -379,6 +379,10 @@ tests/（共 522 个用例，全部 mock AI、无网络）
 - **prompt 版本**：M3.5 时为 `PROMPT_VERSION = "m3-2"`（M3.8 起为 `m3-8`），新增
   `build_mnemonic_messages` / `build_review_help_messages`，查词契约新增
   `lemma 必须是原形` 与 `mnemonic` 字段。
+- **词形说明**：查词 `meaning_cn` 只在 `display_form` 与 `lemma` 不同时补
+  “（go 的过去式）”这类说明；两者相同时 prompt 明确禁止出现“原形”字样
+  （卡片本来也只在不同形时显示“原形：X”）。旧缓存不受影响，见 HISTORY。`PROMPT_VERSION`
+  随之到 `m6-5a`。
 - **换一篇的上下文**：只有用户在「换一篇」弹窗里写了要求时，
   `regenerate_today()` 才把**当前文章**传给 prompt（标题、等级、主题、正文），
   让模型理解“这个话题 / 这种结构”等指代，并明确要求不要逐句改写；

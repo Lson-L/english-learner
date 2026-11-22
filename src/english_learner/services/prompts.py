@@ -40,7 +40,8 @@ if TYPE_CHECKING:  # 避免与 assessment_service 循环导入
 # 让阅读时双击查词尽量走本地缓存。
 # M6.2：阅读检测选择题支持「不知道 + 补充说明」，讲评与盲评 prompt 带上原因。
 # M6.5：文章生成支持档内位置（low / mid / high），空值时不改变 prompt。
-PROMPT_VERSION = "m6-5"
+# m6-5a：查词 prompt 只在词形与原形不同时才说明原形，避免释义重复“原形就是 X”。
+PROMPT_VERSION = "m6-5a"
 
 # ------------------------------------------------------------ 学习者记忆
 # 记忆按任务过滤：不同 AI 任务只该看到与自己相关的那几行。
@@ -1271,11 +1272,15 @@ def build_dictionary_messages(
         "要求：\n"
         "1. lemma 必须是词典原形（went→go、studies→study、better→good），"
         "display_form 保留原文中的形态；\n"
-        "2. phonetic 用国际音标并带斜杠，按原形标注；meaning_cn 简洁并说明它与原形的关系；\n"
-        "3. example_en 必须是一个完整英文例句，example_cn 是它的中文翻译；\n"
-        "4. cefr_band 是该词在常见词表里的 CEFR 词档，只能是 A2/B1/B2/C1"
+        "2. phonetic 用国际音标并带斜杠，按原形标注；meaning_cn 简洁，只写本句语境下的中文义项；\n"
+        "3. 词形说明只在 display_form 与 lemma 不同时写：在 meaning_cn 的义项后用括号补一句"
+        "（如 went 写成“去；走（go 的过去式）”）；两者相同（仅大小写不同也算相同）时"
+        "meaning_cn 里不要出现“原形”字样"
+        "（“原形就是 X”“本句中的 X 就是词典原形”这类说明都不要写）；\n"
+        "4. example_en 必须是一个完整英文例句，example_cn 是它的中文翻译；\n"
+        "5. cefr_band 是该词在常见词表里的 CEFR 词档，只能是 A2/B1/B2/C1"
         "（比 A2 更基础的词也归到 A2）；\n"
-        "5. mnemonic 用中文写 40~80 字，可结合词根词缀、联想、谐音、画面感或一个短场景，"
+        "6. mnemonic 用中文写 40~80 字，可结合词根词缀、联想、谐音、画面感或一个短场景，"
         "让这个词变得好记；不要空泛地说“多读几遍”。"
     )
     return [
