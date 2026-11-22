@@ -11,11 +11,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
 
+from english_learner.gui import i18n  # noqa: E402
 from english_learner.gui.review_help_dialog import ReviewHelpDialog  # noqa: E402
 from english_learner.models.entities import Word, now_iso, today_str  # noqa: E402
 from english_learner.services.app_context import AppContext  # noqa: E402
 from english_learner.services.config_store import AIConfig, ConfigStore  # noqa: E402
-from english_learner.services.review_help_service import ReviewHelpService  # noqa: E402
+from english_learner.services.review_help_service import (  # noqa: E402
+    ReviewHelpResult,
+    ReviewHelpService,
+)
 from english_learner.services.srs import RATING_FORGOT  # noqa: E402
 from english_learner.storage.db import Database  # noqa: E402
 
@@ -72,6 +76,26 @@ def make_context(db: Database, tmp_path: Path) -> AppContext:
         ConfigStore(tmp_path / "config.json"),
         db,
     )
+
+
+def test_dialog_never_clips_content_horizontally(db: Database, tmp_path: Path) -> None:
+    """回归：窗口曾经按 sizeHint 打开得比正文窄，右侧按钮和左侧正文都被裁掉。"""
+    app = get_app()
+    i18n.set_low_profile(True)
+    try:
+        dialog = ReviewHelpDialog(make_context(db, tmp_path), make_word(db), RATING_FORGOT)
+        dialog.show()
+        app.processEvents()
+        dialog._on_help_ready(ReviewHelpResult(advice="很长的建议。" * 120))
+        app.processEvents()
+
+        bar = dialog._scroll.horizontalScrollBar()
+        assert dialog._scroll_body.minimumSizeHint().width() <= dialog._scroll.viewport().width()
+        assert bar.maximum() == 0
+        assert bar.value() == 0
+        dialog.close()
+    finally:
+        i18n.set_low_profile(False)
 
 
 def test_quick_reasons_fill_text(db: Database, tmp_path: Path) -> None:

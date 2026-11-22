@@ -28,12 +28,19 @@ from ..models.entities import Word
 from ..services.app_context import AppContext
 from ..services.review_help_service import ReviewHelpResult, ReviewHelpService
 from ..services.srs import RATING_VAGUE
+from .i18n import refresh_buttons
 from .pages.common import set_status
 from .widgets import busy_progress_bar
 from .workers import TaskWorker, retire_worker
 
 # 弹窗与屏幕边缘的留白：窗口边框 + 任务栏，避免贴边。
 _SCREEN_MARGIN = 48
+
+# 弹窗的设计最小宽度；实际宽度按正文内容放大，见 _fit_to_screen。
+_MIN_WIDTH = 580
+
+# 快捷原因按钮的列数：优先 3 列，窗口放不下时依次退到 2 列、1 列。
+_REASON_COLUMN_CHOICES: tuple[int, ...] = (3, 2, 1)
 
 _QUICK_REASONS: tuple[str, ...] = (
     "和近义词混淆",
@@ -63,9 +70,10 @@ class ReviewHelpDialog(QDialog):
         self._advice = ""
         self._result_ready = False
         self._reason_buttons: list[QPushButton] = []
+        self._reason_grid: QGridLayout | None = None
+        self._reason_columns = 0
 
         self.setWindowTitle("记忆帮助")
-        self.setMinimumWidth(580)
         self._build_ui()
         self._fit_to_screen()
 
@@ -142,14 +150,24 @@ class ReviewHelpDialog(QDialog):
         buttons.addWidget(self._submit_button)
         layout.addWidget(self._button_row)
 
-    def _fit_to_screen(self) -> None:
-        """按内容高度定窗口大小，并封顶在屏幕可用区域内。
+        # 低调模式下的按钮初始文案是中文，Qt 要等 Show 事件才翻成英文；英文更宽，
+        # 不先翻好，_fit_to_screen 量到的正文最小宽度会偏小（窗口右半边被裁）。
+        refresh_buttons(self)
 
-        背景：带布局的 QDialog 不做显式 resize 时，Qt 会在每次移动窗口后
+    def _fit_to_screen(self) -> None:
+        """按内容定窗口大小，并封顶在屏幕可用区域内。
+
+        背景一：带布局的 QDialog 不做显式 resize 时，Qt 会在每次移动窗口后
         按 sizeHint 重新撑高；窗口一旦高过屏幕，Windows 会按最大跟踪尺寸
         把高度截断，布局又把它撑回去，拖动时高度在两者之间反复跳变（看起来
         就是“闪烁移动”）。这里显式 resize 并给最大高度封顶，之后 Qt 不再
         自动撑高，超出的内容由滚动区承接。
+
+        背景二：宽度不能只看 `self.sizeHint().width()`。QScrollArea 的
+        sizeHint 不会把内部正文的最小宽度算进去，于是窗口按设计最小宽度
+        打开，而快捷原因按钮行比视口宽；横向滚动条是关掉的，超出的部分就
+        被右侧裁掉（再叠加 ensureWidgetVisible 的横向滚动，左侧也会被裁）。
+        这里改为量正文的 ``minimumSizeHint()``，放不下时减少按钮列数。
         """
         screen = self.screen() or QGuiApplication.primaryScreen()
         if screen is None:
@@ -157,14 +175,20 @@ class ReviewHelpDialog(QDialog):
         avail = screen.availableGeometry()
         margins = self.layout().contentsMargins()
 
-        max_width = max(self.minimumWidth(), avail.width() - _SCREEN_MARGIN)
+        max_width = max(_MIN_WIDTH, avail.width() - _SCREEN_MARGIN)
         max_height = max(320, avail.height() - _SCREEN_MARGIN)
         self.setMaximumWidth(max_width)
         self.setMaximumHeight(max_height)
 
-        width = min(max(self.minimumWidth(), self.sizeHint().width()), max_width)
-        # 预留垂直滚动条宽度，保证正文按“会出现滚动条”时的宽度换行。
+        # 预留垂直滚动条宽度：内容超高时滚动条会占掉一条，正文按剩余宽度换行。
         scrollbar_width = self._scroll.verticalScrollBar().sizeHint().width()
+        chrome_width = (
+            margins.left() + margins.right() + 2 * self._scroll.frameWidth() + scrollbar_width
+        )
+        width = self._preferred_width(max_width, chrome_width)
+        # 最小宽度跟着内容走：用户把窗口拖窄时正文也不会被裁掉。
+        self.setMinimumWidth(width)
+
         viewport_width = max(
             width
             - margins.left()
@@ -185,6 +209,37 @@ class ReviewHelpDialog(QDialog):
             + 2 * self.layout().spacing()
         )
         self.resize(width, min(chrome + body_height, max_height))
+
+    def _preferred_width(self, max_width: int, chrome_width: int) -> int:
+        """返回能装下正文的窗口宽度；放不下时逐步减少快捷原因列数。"""
+        self._scroll_body.ensurePolished()
+        needed = 0
+        for columns in _REASON_COLUMN_CHOICES:
+            self._apply_reason_columns(columns)
+            # 先激活布局再量最小宽度：QWidget.minimumSizeHint() 会缓存上一次的
+            # 结果，构造阶段量到的是还没翻译成英文（更窄）的按钮行。
+            self._scroll_body.layout().invalidate()
+            self._scroll_body.layout().activate()
+            needed = self._scroll_body.minimumSizeHint().width() + chrome_width
+            if needed <= max_width:
+                break
+        return min(max(_MIN_WIDTH, needed), max_width)
+
+    def _apply_reason_columns(self, columns: int) -> None:
+        """按给定列数重排快捷原因按钮。
+
+        横向滚动条是关掉的，按钮行一旦比视口宽就会被直接裁掉；窄屏上减少
+        列数比裁掉文字更可读。
+        """
+        grid = self._reason_grid
+        if grid is None or columns == self._reason_columns:
+            return
+        for button in self._reason_buttons:
+            grid.removeWidget(button)
+        for index, button in enumerate(self._reason_buttons):
+            grid.addWidget(button, index // columns, index % columns)
+        self._reason_columns = columns
+        grid.invalidate()
 
     def _build_word_card(self) -> QWidget:
         word = self._word
@@ -225,13 +280,14 @@ class ReviewHelpDialog(QDialog):
         grid = QGridLayout()
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(8)
-        for index, reason in enumerate(_QUICK_REASONS):
+        for reason in _QUICK_REASONS:
             button = QPushButton(reason)
             button.setObjectName("secondaryButton")
             # 点击时读按钮当前显示文本：低调模式下原因框也填英文。
             button.clicked.connect(lambda _checked=False, b=button: self._append_reason(b.text()))
             self._reason_buttons.append(button)
-            grid.addWidget(button, index // 3, index % 3)
+        self._reason_grid = grid
+        self._apply_reason_columns(3)
         return grid
 
     @staticmethod
@@ -298,6 +354,8 @@ class ReviewHelpDialog(QDialog):
         # 建议可能很长：窗口最多长到屏幕高度，超出的部分滚动，并滚到建议处。
         self._fit_to_screen()
         self._scroll.ensureWidgetVisible(self._advice_label)
+        # 只保留纵向滚动：横向滚动条是关掉的，偏移一段会把左侧正文裁掉。
+        self._scroll.horizontalScrollBar().setValue(0)
 
     def _on_help_failed(self, message: str) -> None:
         self._result_ready = False

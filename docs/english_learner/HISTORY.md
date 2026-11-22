@@ -773,6 +773,36 @@ M6.5（档内难度浮动）完成（2026-11-20）：
   几何与最大化往返、关闭被页面拦截时不写盘、`MainWindow` 关闭后重新启动
   能读到快照。全量 649 passed，`ruff check` 与 `ruff format --check` 通过。
 
+复习求助弹窗排版修复（2026-11-22）：
+
+- **现象**：复习时点「模糊 / 忘记」弹出的「记忆帮助」窗口内容显示不全——
+  快捷原因按钮只剩 “sed with synonyms / Spelling or s…”，释义和记忆方法也
+  被切断；AI 建议返回后正文整体左移，左侧“写下卡住的地方…”和词条标题
+  “treat”整行消失（用户截图 870x1311，对应 580x874 DIP、150% 缩放）；
+- **根因一（窗口太窄）**：`_fit_to_screen()` 用 `self.sizeHint().width()` 定宽度，
+  而 `QScrollArea` 的 sizeHint 不含正文最小宽度，结果宽度停在
+  `setMinimumWidth(580)` 的 580；正文滚动区其实需要 677（3 列英文快捷原因
+  按钮 + 间距），视口只有 532，横向滚动条又是 `ScrollBarAlwaysOff`，
+  右侧 145px 被直接裁掉；
+- **根因二（左侧也被裁）**：AI 建议回来后 `ensureWidgetVisible(advice)` 在
+  内容比视口宽时会顺带横向滚动（hvalue 72），左侧正文与词条标题被推出视口，
+  所以截图中 “treat” 那一行是空白；
+- **根因三（构造时量错）**：低调模式下按钮的中文初始文案要等 Show 事件才翻成
+  英文（英文更宽），且 `QWidget.minimumSizeHint()` 会缓存上一次结果；
+  构造阶段量到的是 438（中文）而不是 677（英文）；
+- **修复**：`_fit_to_screen()` 改为按正文 `minimumSizeHint().width()` 加边距与
+  垂直滚动条宽度反推窗口宽度，并设为窗口最小宽度（手动拖窄也不会裁）；
+  `_build_ui()` 末尾先 `i18n.refresh_buttons(self)` 再量，量之前
+  `layout().invalidate()/activate()` 清缓存；放不下时快捷原因按钮由 3 列
+  依次退到 2 列、1 列（`_apply_reason_columns`）；建议展示后横向滚动条归零，
+  只保留纵向滚动；
+- **测试**：新增 1 个回归用例（低调模式 + offscreen：正文最小宽度不超过视口、
+  横向滚动条 range 与 value 均为 0）；全量 650 passed，`ruff check` 与
+  `ruff format --check` 通过；
+- **视觉验证**：按本机 150% 缩放（DPR 1.5）+ 真实字体 / QSS 离屏渲染，
+  修复前 870x1308 与用户截图一致，修复后 1103x1211，标题、快捷原因、释义、
+  AI 建议全部完整。
+
 ## 5. 验证记录
 
 ### 5.1 M0（2026-11-18）

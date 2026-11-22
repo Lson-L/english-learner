@@ -366,6 +366,14 @@ tests/（共 522 个用例，全部 mock AI、无网络）
   （截断 1000 字）；两者只用于回顾/导出，不参与调度。
 - **弹窗细节**：复习页 `_collect_review_help()` 在弹窗期间禁用 1~4 快捷键，
   避免在原因输入框里按数字误触评分；弹窗请求进行中拒绝关闭（同其他 AI 弹窗）。
+- **弹窗尺寸**：`ReviewHelpDialog` 的正文在 `QScrollArea` 里，`QScrollArea` 的
+  sizeHint 不含内容最小宽度，用 `self.sizeHint()` 定宽会退回设计最小宽度、
+  右侧被裁。现在按 `_scroll_body.minimumSizeHint().width()` 反推窗口宽度
+  （含边距与垂直滚动条），并把结果设为 `minimumWidth`；量之前先
+  `i18n.refresh_buttons()` 把中文按钮翻成更宽的英文，且
+  `layout().invalidate()/activate()` 清掉 minimumSizeHint 缓存。横向滚动条
+  始终关闭，`ensureWidgetVisible()` 之后要把 hvalue 归零，否则左侧正文会被
+  横向偏移推出视口。
 - **导出**：新增 `word_forms` 表和 `words.mnemonic`、`review_logs.note/advice`
   列；JSON 自动包含，CSV 列顺序在 `export_service.CSV_COLUMNS` 固定。
 - **prompt 版本**：M3.5 时为 `PROMPT_VERSION = "m3-2"`（M3.8 起为 `m3-8`），新增
