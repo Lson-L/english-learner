@@ -821,6 +821,36 @@ M6.5（档内难度浮动）完成（2026-11-20）：
   字样”，旧措辞“说明它与原形的关系”不得回来）；全量 651 passed，`ruff check`
   与 `ruff format --check` 通过。
 
+启动遮罩与延迟导入完成（2026-11-24，体验项）：
+
+- **现象**：用户反馈启动后页面出来太慢，“感觉没启动”。实测（本机热缓存）
+  `import english_learner.app` 要 1.5s，其中 openai SDK（openai + pydantic +
+  httpx2 + asyncio）约 0.9~1.2s、PySide6 约 0.15s；之后还要构造 5 个页面
+  约 0.25~0.35s，到首屏约 2.1s（冷启动更久，且受磁盘缓存 / 杀软扫描影响
+  波动到 3~5s）；
+- **根因**：`app.py` 顶层 import `gui.main_window`，后者链式 import
+  `app_context → ai_client → openai` 与全部页面 / 弹窗模块；这些导入发生在
+  `QApplication` 创建之前，用户全程看不到任何窗口；
+- **方案**：新增 `gui/splash.py` 的 `StartupSplash`，只依赖 PySide6 与
+  `theme` 调色板，无边框、置顶、不进任务栏；`app.main()` 顶层只保留 Qt /
+  字体 / 主题 / 配置等轻量导入，建好 `QApplication` 与全局 QSS 后立刻显示遮罩，
+  然后才导入 `gui.main_window`、`gui.onboarding`、`gui.workers`、`storage.db`，
+  在重导入 / 备份 / 导入库 / 建库 / 构建主窗口之间用 `set_message()` 更新
+  阶段文案与进度；主窗口 `show()` 后 `splash.finish(window)` 收起；
+- **效果**：`import english_learner.app` 从 1.5s 降到 0.29~0.39s，
+  `--version` 从 1.9s 降到 0.4~0.5s，遮罩在 0.5~0.9s 可见；
+  重依赖加载移到遮罩显示期间，用户不再面对“双击没反应”；
+- **兜底**：启动阶段用 `try/except BaseException` 包住，异常时先关闭遮罩再抛给
+  excepthook，避免置顶遮罩压住错误弹窗；配置损坏、导入数据库失败、首次配置
+  向导 / `--reconfigure` 弹窗之前先 `hide()` 遮罩，关闭后 `show()` 回来；
+- **约束**：重导入必须写在 `main()` 函数体内（模块顶层 import 在 `main()` 之前
+  执行，遮罩来不及显示）；`splash.py` 不能 import `gui.main_window`，
+  标题 / 副标题在 splash 里复制两份，避免把 openai 带回来；
+- **测试**：新增 `test_english_learner_splash.py` 3 个用例——窗口类型与文案 /
+  进度收敛、低调主题英文文案、子进程断言 `import english_learner.app` 后
+  `openai` 与 `gui.main_window` 不在 `sys.modules`；全量 654 passed，
+  `ruff check` 与 `ruff format --check` 通过。
+
 ## 5. 验证记录
 
 ### 5.1 M0（2026-11-18）

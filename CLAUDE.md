@@ -125,6 +125,11 @@ uv run ruff format src/english_learner tests
   `WindowState` 只存不透明 base64，Qt 换算在 `gui/window_state.py`。
   **不要改回手写 width/x + setGeometry**：框架坐标与客户区坐标差一个标题栏，
   每次启动都会偏移。
+- **启动遮罩（2026-11-24）**：`gui/splash.py` 在 `QApplication` 建好后立刻显示，
+  之后才导入 openai SDK 与全部页面（`app.main()` 里延迟导入）。
+  **不要把 `gui.main_window` / `gui.onboarding` / `gui.workers` 挪回 app.py
+  顶层**，否则 `import english_learner.app` 重新变成 1.5s，遮罩来不及显示；
+  `splash.py` 本身也不能 import `gui.main_window`。
 - **剩余为 M6.6 / M6.7**（强证据升级与边界文案）、可选 M4（深色模式、
   安装器 / 自动更新）与真实环境调优。当前看板见
   `docs/english_learner/PROGRESS.md`，已知技术债见 `TECH_DEBT.md`。

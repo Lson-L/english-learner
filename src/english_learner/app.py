@@ -1,4 +1,9 @@
-"""应用入口：日志、QApplication、首次配置判断、主窗口。
+"""应用入口：日志、启动遮罩、QApplication、首次配置判断、主窗口。
+
+启动顺序（性能敏感，改动前先读）：
+1. 顶层只导入 Qt 与轻量模块（字体 / 主题 / 配置），尽快把启动遮罩显示出来；
+2. 遮罩可见后再导入 openai SDK 与全部页面 / 弹窗模块（冷启动 1~2 秒）；
+3. 备份、建库、构建主窗口，最后收起遮罩。
 
 启动方式：
     uv run english-learner
@@ -7,7 +12,8 @@
 
 Java 对照：
 - main() ≈ Spring Boot 的 main 方法；
-- 首次配置判断 ≈ 启动时检查配置文件，不存在就走 Onboarding 引导。
+- 首次配置判断 ≈ 启动时检查配置文件，不存在就走 Onboarding 引导；
+- StartupSplash ≈ java.awt.SplashScreen，在主窗口就绪前先给用户反馈。
 """
 
 from __future__ import annotations
@@ -24,16 +30,17 @@ from . import __version__
 from .gui.fonts import load_application_fonts
 from .gui.i18n import install as install_button_translator
 from .gui.i18n import set_low_profile
-from .gui.main_window import MainWindow
-from .gui.onboarding import OnboardingDialog
+from .gui.splash import StartupSplash
 from .gui.theme import build_stylesheet
-from .gui.workers import wait_for_orphans
-from .services.backup_service import run_startup_backup
 from .services.config_store import AIConfig, ConfigError, ConfigStore, log_dir
-from .services.database_transfer import apply_pending_import
-from .storage.db import Database
 
 logger = logging.getLogger(__name__)
+
+# 遮罩上的阶段文案：默认 / 低调两套（低调模式全英文，与主窗口保持一致）。
+_STARTUP_MESSAGES: dict[bool, tuple[str, str, str]] = {
+    False: ("正在加载界面组件…", "正在检查数据…", "正在准备主界面…"),
+    True: ("loading components…", "checking data…", "preparing workspace…"),
+}
 
 
 def setup_logging() -> None:
@@ -125,43 +132,83 @@ def main(argv: Sequence[str] | None = None) -> int:
     app.setStyleSheet(build_stylesheet(ui.english_font, low_profile=ui.low_profile))
     _install_excepthook()
 
-    existing: AIConfig | None = None
+    # 先给反馈，再干活：下面这些重依赖的导入放在遮罩显示之后。
+    messages = _STARTUP_MESSAGES[ui.low_profile]
+    splash = StartupSplash(low_profile=ui.low_profile)
+    splash.show()
+    app.processEvents()
+
     try:
-        existing = store.load()
-    except ConfigError as exc:
-        logger.warning("配置文件读取失败：%s", exc)
-        QMessageBox.warning(
-            None,
-            "配置文件损坏",
-            f"{exc}\n\n将重新进入配置向导。",
-        )
+        splash.set_message(messages[0], 35)
+        app.processEvents()
+        # 重依赖：openai SDK（含 pydantic / httpx2）与全部页面、弹窗模块。
+        # 冷启动约 1~2 秒，期间遮罩已经显示，用户不会面对“点了没反应”。
+        from .gui.main_window import MainWindow
+        from .gui.onboarding import OnboardingDialog
+        from .gui.workers import wait_for_orphans
+        from .services.backup_service import run_startup_backup
+        from .services.database_transfer import apply_pending_import
+        from .storage.db import Database
 
-    config = None if args.reconfigure else existing
-    if config is None:
-        dialog = OnboardingDialog(store, initial=existing)
-        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.saved_config is None:
-            logger.info("用户取消了首次配置，退出")
-            return 0
-        config = dialog.saved_config
+        existing: AIConfig | None = None
+        try:
+            existing = store.load()
+        except ConfigError as exc:
+            logger.warning("配置文件读取失败：%s", exc)
+            splash.hide()
+            QMessageBox.warning(
+                None,
+                "配置文件损坏",
+                f"{exc}\n\n将重新进入配置向导。",
+            )
+            splash.show()
+            app.processEvents()
 
-    # 迁移前先备份：即使新版本迁移出问题，也有启动前的完整数据可回退。
-    # 备份失败只记日志，不能影响启动（见 backup_service.run_startup_backup）。
-    run_startup_backup()
+        config = None if args.reconfigure else existing
+        if config is None:
+            # 配置向导是模态对话框，遮罩先收起，避免一直压在它上面。
+            splash.hide()
+            dialog = OnboardingDialog(store, initial=existing)
+            if dialog.exec() != QDialog.DialogCode.Accepted or dialog.saved_config is None:
+                logger.info("用户取消了首次配置，退出")
+                splash.close()
+                return 0
+            config = dialog.saved_config
+            splash.show()
+            app.processEvents()
 
-    # 设置页的「导入数据库」只做暂存；真正替换放在这里——此时还没有任何连接，
-    # 不会出现运行中替换 SQLite 文件的问题。
-    try:
-        imported = apply_pending_import()
-    except Exception as exc:  # noqa: BLE001 - 导入失败必须保留原数据并继续启动
-        logger.exception("启动时应用待导入数据库失败")
-        QMessageBox.warning(None, "导入数据库失败", f"{exc}\n\n已保留原有数据。")
-    else:
-        if imported is not None:
-            logger.info("启动时已导入数据库；导入前备份：%s", imported.safety_backup)
+        splash.set_message(messages[1], 60)
+        app.processEvents()
 
-    db = Database()
-    window = MainWindow(config, store, db)
-    window.show()
+        # 迁移前先备份：即使新版本迁移出问题，也有启动前的完整数据可回退。
+        # 备份失败只记日志，不能影响启动（见 backup_service.run_startup_backup）。
+        run_startup_backup()
+
+        # 设置页的「导入数据库」只做暂存；真正替换放在这里——此时还没有任何连接，
+        # 不会出现运行中替换 SQLite 文件的问题。
+        try:
+            imported = apply_pending_import()
+        except Exception as exc:  # noqa: BLE001 - 导入失败必须保留原数据并继续启动
+            logger.exception("启动时应用待导入数据库失败")
+            splash.hide()
+            QMessageBox.warning(None, "导入数据库失败", f"{exc}\n\n已保留原有数据。")
+            splash.show()
+            app.processEvents()
+        else:
+            if imported is not None:
+                logger.info("启动时已导入数据库；导入前备份：%s", imported.safety_backup)
+
+        splash.set_message(messages[2], 85)
+        app.processEvents()
+        db = Database()
+        window = MainWindow(config, store, db)
+        window.show()
+    except BaseException:
+        # 启动失败时先收起遮罩，否则置顶窗口会压住 excepthook 的错误弹窗。
+        splash.close()
+        raise
+
+    splash.finish(window)
     # 首次使用（profile 为空）时弹测评；用户取消也不影响进入主界面。
     window.maybe_show_assessment()
     exit_code = app.exec()

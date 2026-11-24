@@ -10,7 +10,7 @@
 src/english_learner/
 ├── __init__.py                 版本号、产品说明、分层约定
 ├── __main__.py                 支持 python -m english_learner
-├── app.py                      入口：日志、配置、Database、主窗口、首次测评
+├── app.py                      入口：日志、启动遮罩、延迟导入、配置、Database、主窗口、首次测评
 ├── assets/
 │   ├── fonts/                  内置开源字体 Inter + Literata（OFL 1.1，见 OFL-*.txt）
 │   └── wordlists/              M5.3 静态词表 ai_frequency.json（3212 词，A1~C1）
@@ -56,6 +56,7 @@ src/english_learner/
 └── gui/
     ├── fonts.py                内置字体注册 + 全局英文字体（默认 Lexend，可选 Literata/Georgia/Inter）
     ├── theme.py                全局 QSS（含阅读器/释义卡/测评短文样式）
+    ├── splash.py               启动遮罩：重依赖导入期间给反馈（只依赖 PySide6 与 theme）
     ├── workers.py              TaskWorker(QThread)：AI 调用必须走这里；支持协作式取消
     ├── app_restart.py          重启应用（导入数据库后立即生效；开发环境用 -m，打包后拉起 exe）
     ├── onboarding.py           3 步配置向导
@@ -991,3 +992,32 @@ tests/（共 522 个用例，全部 mock AI、无网络）
   会把超宽窗口夹到屏幕内（`MainWindow` 再被 1080 最小宽度兜底）。所以
   `test_english_learner_window_state.py` 用不受最小尺寸限制的 `ModelWindow`
   验证精确往返，并比较 `frameGeometry()`（客户区 `pos()` 会差框架边距）。
+
+### 6.38 启动遮罩与延迟导入（2026-11-24，体验项）
+
+- **问题**：实测冷启动到首屏约 2~3 秒，其中约 60% 花在
+  `import english_learner.app` 上——顶层导入把 openai SDK（openai + pydantic +
+  httpx2 + asyncio，约 0.9~1.2s）与全部页面 / 弹窗模块一次拉进来；
+  这期间没有任何窗口，用户容易以为“点了没启动”。
+- **方案**：`gui/splash.py` 的 `StartupSplash` 只依赖 PySide6 与 `theme` 调色板；
+  `app.main()` 顶层只保留 Qt / 字体 / 主题 / 配置等轻量导入，建好
+  `QApplication` 与全局 QSS 后立刻 `splash.show()` + `processEvents()`，
+  然后才导入 `gui.main_window`、`gui.onboarding`、`gui.workers`、`storage.db`
+  等重模块；备份 / 导入 / 建库 / `MainWindow` 之间用
+  `set_message(text, progress)` 更新阶段文案。实测
+  `import english_learner.app` 从 1.5s 降到 0.29~0.39s，遮罩 0.5~0.9s 可见。
+- **为什么重导入必须写在 `main()` 里**：模块顶层 import 会在 `main()` 之前执行，
+  遮罩就来不及显示。`splash.py` 也**不能** import `gui.main_window`
+  （标题 / 副标题在 splash 里复制了两份），否则又把 openai 带回来。
+  以后新增重依赖（新的 SDK、新的页面模块）请放进 `main()` 的 try 块内。
+- **遮罩不会动**：导入与建窗口都是同步代码，事件循环被占用，进度条 / 文案
+  只在每个 `processEvents()` 点重绘一次；所以进度值是“阶段值”，不是真实百分比。
+- **失败兜底**：启动阶段用 `try/except BaseException` 包住，异常时先
+  `splash.close()` 再抛给 excepthook，避免置顶遮罩压住错误弹窗；配置损坏、
+  导入数据库失败、首次配置向导 / `--reconfigure` 弹窗之前都会先 `hide()`
+  遮罩，弹窗关闭后再 `show()` 回来。
+- **测试**：`test_english_learner_splash.py` 验证窗口类型 / 文案 / 进度收敛 /
+  低调主题文案，并用子进程断言 `import english_learner.app` 之后
+  `openai` 与 `english_learner.gui.main_window` **不在** `sys.modules`，
+  防止以后把重导入挪回顶层。全量 654 passed，`ruff check` 与
+  `ruff format --check` 通过。
