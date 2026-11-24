@@ -142,10 +142,6 @@ class ReadingQuizDialog(QDialog):
         top_row.addWidget(self._fullscreen_button)
         root.addLayout(top_row)
 
-        title = QLabel("读完了？做几道题检验一下")
-        title.setObjectName("pageTitle")
-        root.addWidget(title)
-
         self._subtitle = QLabel(
             "检测分两轮：先答 3 道当前等级题，再根据表现出 2 道边界题和 2 道英译中题；"
             "最后按本地后验与 AI 讲评调整等级。"
