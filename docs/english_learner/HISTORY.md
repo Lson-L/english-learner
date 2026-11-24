@@ -1580,8 +1580,16 @@ def lookup(word: str, sentence: str, article_id: int, level: str) -> WordDefinit
 - 新增 `test_english_learner_stats_overview.py`（纯服务口径）与
   `test_english_learner_stats_page.py`（offscreen 页面 / 空态 / 主题切换 /
   失败兜底）；
-- 全量 **674 passed**（`uv run pytest`），`ruff check` 与
+- 全量 **675 passed**（`uv run pytest`），`ruff check` 与
   `ruff format --check` 通过；
 - 图表色用 dataviz 校验脚本在浅色 `#FFFFFF` 与深色 `#252526` 卡片底上
   分别验证分类色与 ordinal 阶梯，无 FAIL；浅色下 aqua / yellow 的
   对比度 WARN 由页面汇总数字与直接标签作为 relief 通道。
+
+**补充修复（同日）**：低调主题下热力图几乎不可见。根因有两个：一是
+`HeatmapCalendar` 构造时没有数据，`sizeHint` 只有 1 周宽（46px），
+`refresh()` 调 `set_days()` 后只 `update()` 没 `updateGeometry()`，
+布局仍停在窄缝；二是暗色 `CHART_HEAT_0` 与卡片底 `#252526` 对比度约
+1.05:1，26 周里的空白格完全消失。修复：`set_days()` 补 `updateGeometry()`；
+暗色空白格改为 `#3A3A3A`、1 档改为 `#1C5CAB`；单元格 13→18px、间距 3→4px。
+新增“26 周宽度”与“暗色空白格对比度 ≥1.25:1”两个回归断言，全量 675 passed。

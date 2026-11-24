@@ -111,6 +111,13 @@ def test_chart_palette_defines_all_slots_and_heat_ramp() -> None:
         luminance = [_relative_luminance(color) for color in chart.heat]
         if low_profile:
             assert luminance == sorted(luminance)
+            # 0 档是“没有学习”的空白格，必须和卡片底拉开一点差距；
+            # 否则 26 周里没活动的格子完全消失，只剩最近几周亮着。
+            surface, empty = sorted(
+                (_relative_luminance(palette["BG_CARD"]), luminance[0]),
+                reverse=True,
+            )
+            assert (surface + 0.05) / (empty + 0.05) >= 1.25
         else:
             assert luminance == sorted(luminance, reverse=True)
 

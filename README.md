@@ -143,7 +143,7 @@ docs/english_learner/ 产品、进度、架构、技术债与历史记录
 ## 开发
 
 ```bash
-uv run pytest -q                              # 单元测试（674 个）
+uv run pytest -q                              # 单元测试（675 个）
 uv run ruff check src/english_learner tests   # 静态检查
 uv run ruff format src/english_learner tests  # 格式化
 ```
@@ -162,5 +162,5 @@ uv run ruff format src/english_learner tests  # 格式化
 
 ## 状态
 
-核心功能已经闭环，可以作为日常学习工具使用，674 个测试通过。
+核心功能已经闭环，可以作为日常学习工具使用，675 个测试通过。
 剩余的都是可选增强：M6.6 强证据升级、M6.7 边界文案、安装器与自动更新。

@@ -163,8 +163,8 @@ class _ChartBase(QWidget):
 class HeatmapCalendar(_ChartBase):
     """26 周打卡热力图：每列一周、每行一天，颜色越深当天学习量越大。"""
 
-    CELL = 13
-    GAP = 3
+    CELL = 18
+    GAP = 4
     LEFT = 26
     TOP = 18
 
@@ -177,6 +177,9 @@ class HeatmapCalendar(_ChartBase):
     def set_days(self, days: tuple[ActivityDay, ...]) -> None:
         self._days = tuple(days)
         self._hover = None
+        # 构造时还没有数据（sizeHint 只有 1 周宽），set_days 后必须让布局
+        # 重新按 26 周计算宽度，否则热力图会被压成一条窄缝。
+        self.updateGeometry()
         self.update()
 
     def sizeHint(self) -> QSize:

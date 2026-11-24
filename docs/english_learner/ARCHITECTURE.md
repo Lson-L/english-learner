@@ -85,7 +85,7 @@ src/english_learner/
         ├── stats.py            统计页：累计数字 + 热力图 + 累计曲线 + 近 30 天 + 词汇分布 + 检测趋势 + 成就
         └── settings.py         配置、学习效果、调用记录摘要与入口、字体、数据位置、JSON/CSV 导出
 
-tests/（共 674 个用例，全部 mock AI、无网络）
+tests/（共 675 个用例，全部 mock AI、无网络）
 ├── test_english_learner_config.py        配置读写/校验/脱敏
 ├── test_english_learner_ai_client.py     连接测试与错误翻译
 ├── test_english_learner_ai_usage.py      AI 调用仓库汇总/筛选、客户端埋点与重试、AppContext 注入
@@ -1080,4 +1080,4 @@ tests/（共 674 个用例，全部 mock AI、无网络）
   热力分档、累计基线、词档过滤、检测分组与成就阈值；
   `test_english_learner_stats_page.py` 覆盖页面渲染、指标切换、主题切换、
   空态绘制与统计失败兜底；主题测试额外校验两套调色板的图表 key 与热力
-  阶梯单调性。全量 674 passed。
+  阶梯单调性。全量 675 passed。

@@ -753,8 +753,10 @@ LOW_PROFILE_PALETTE: dict[str, str] = {
     "CHART_SEQ_1": "#1C5CAB",
     "CHART_SEQ_2": "#3987E5",
     "CHART_SEQ_3": "#86B6EF",
-    "CHART_HEAT_0": "#2A2A2A",
-    "CHART_HEAT_1": "#184F95",
+    # 热力图 0 档必须比卡片底 #252526 亮一档，否则 26 周的空白格
+    # 会完全消失，只剩最近几周有活动的格子，看起来像图表没画出来。
+    "CHART_HEAT_0": "#3A3A3A",
+    "CHART_HEAT_1": "#1C5CAB",
     "CHART_HEAT_2": "#256ABF",
     "CHART_HEAT_3": "#3987E5",
     "CHART_HEAT_4": "#86B6EF",

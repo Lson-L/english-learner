@@ -188,6 +188,28 @@ def test_charts_can_paint_without_data(tmp_path: Path) -> None:
     db.close()
 
 
+def test_heatmap_expands_to_full_26_weeks_after_data(tmp_path: Path) -> None:
+    """回归：热力图构造时没有数据，set_days 后必须让布局按 26 周重算宽度。
+
+    之前只调 update() 不调 updateGeometry()，控件会停在 1 周宽的 46px，
+    在低调主题下看起来像一条几乎看不见的窄缝。
+    """
+    get_app()
+    page, db = make_page(tmp_path)
+    seed(db)
+    page.resize(1200, 900)
+    page.show()
+    try:
+        page.refresh()
+        get_app().processEvents()
+        heatmap = page._heatmap
+        assert heatmap.sizeHint().width() >= 26 * (heatmap.CELL + heatmap.GAP)
+        assert heatmap.width() >= 500
+    finally:
+        page.hide()
+        db.close()
+
+
 def test_service_failure_keeps_page_usable(tmp_path: Path) -> None:
     get_app()
     store = ConfigStore(tmp_path / "config.json")
