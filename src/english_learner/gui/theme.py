@@ -166,6 +166,74 @@ QFrame#divider {
     max-height: 1px;
     border: none;
 }
+/* 统计页的累计指标切换：三个互斥小按钮，选中态用浅色强调底。 */
+QPushButton#segmentButton {
+    background: __BG_SUBTLE__;
+    border: 1px solid __BORDER__;
+    border-radius: 6px;
+    padding: 4px 12px;
+    color: __TEXT_SECOND__;
+    font-size: 12px;
+}
+QPushButton#segmentButton:hover {
+    background: __HOVER_BG__;
+}
+QPushButton#segmentButton:checked {
+    background: __ACCENT_BG__;
+    border-color: __ACCENT__;
+    color: __ACCENT__;
+    font-weight: 600;
+}
+/* 成就徽章：默认灰底锁定态；解锁后浅蓝底 + 强调描边。 */
+QFrame#achievementBadge {
+    background: __BG_SUBTLE__;
+    border: 1px solid __BORDER__;
+    border-radius: 10px;
+}
+QFrame#achievementBadge[unlocked="true"] {
+    background: __ACCENT_BG__;
+    border-color: __ACCENT__;
+}
+QLabel#badgeMark {
+    background: __TRACK__;
+    color: __TEXT_MUTED__;
+    border-radius: 14px;
+    font-size: 14px;
+    font-weight: 600;
+}
+QFrame#achievementBadge[unlocked="true"] QLabel#badgeMark {
+    background: __ACCENT__;
+    color: __ON_ACCENT__;
+}
+QLabel#badgeTitle {
+    font-size: 13px;
+    font-weight: 600;
+    color: __TEXT_STRONG__;
+}
+QLabel#badgeDesc {
+    font-size: 11px;
+    color: __TEXT_MUTED__;
+}
+QLabel#badgeState {
+    font-size: 11px;
+    color: __TEXT_MUTED__;
+}
+QFrame#achievementBadge[unlocked="true"] QLabel#badgeState {
+    color: __ACCENT__;
+    font-weight: 600;
+}
+QProgressBar#badgeProgress {
+    background: __TRACK__;
+    border: none;
+    border-radius: 2px;
+}
+QProgressBar#badgeProgress::chunk {
+    background: __ACCENT__;
+    border-radius: 2px;
+}
+QFrame#achievementBadge[unlocked="false"] QProgressBar#badgeProgress::chunk {
+    background: __TEXT_FAINT__;
+}
 
 /* ---------- 输入控件 ---------- */
 QLineEdit, QComboBox, QDoubleSpinBox {
@@ -592,6 +660,23 @@ LIGHT_PALETTE: dict[str, str] = {
     "EASY_BG": "#D1FAE5",
     "EASY_TEXT": "#047857",
     "EASY_HOVER": "#A7F3D0",
+    # 图表专用色：分类色按固定槽位分配（蓝 / 橙 / 青 / 黄），
+    # 词档三段用同色系 ordinal 阶梯，热力图用单色 sequential 阶梯。
+    # 已用 dataviz 校验脚本在卡片底色 #FFFFFF 上验证通过；改色必须重跑校验。
+    "CHART_1": "#2A78D6",
+    "CHART_2": "#EB6834",
+    "CHART_3": "#1BAF7A",
+    "CHART_4": "#EDA100",
+    "CHART_SEQ_1": "#86B6EF",
+    "CHART_SEQ_2": "#2A78D6",
+    "CHART_SEQ_3": "#104281",
+    "CHART_HEAT_0": "#EEF1F6",
+    "CHART_HEAT_1": "#CDE2FB",
+    "CHART_HEAT_2": "#9EC5F4",
+    "CHART_HEAT_3": "#5598E7",
+    "CHART_HEAT_4": "#184F95",
+    "CHART_GRID": "#E4E8F0",
+    "CHART_AXIS": "#9CA3AF",
     "SIDEBAR_BG": "#1D2433",
     "SIDEBAR_TITLE": "#FFFFFF",
     "SIDEBAR_SUBTITLE": "#8E9AB0",
@@ -659,6 +744,22 @@ LOW_PROFILE_PALETTE: dict[str, str] = {
     "EASY_BG": "#1E3B2E",
     "EASY_TEXT": "#5FD3A0",
     "EASY_HOVER": "#2A5240",
+    # 图表色：与浅色主题同一组色相，但按深色卡片底 #252526 重新取步进；
+    # 分类色与 ordinal 阶梯均已通过 dataviz 校验（含 2:1 浅端对比度）。
+    "CHART_1": "#3987E5",
+    "CHART_2": "#D95926",
+    "CHART_3": "#199E70",
+    "CHART_4": "#C98500",
+    "CHART_SEQ_1": "#1C5CAB",
+    "CHART_SEQ_2": "#3987E5",
+    "CHART_SEQ_3": "#86B6EF",
+    "CHART_HEAT_0": "#2A2A2A",
+    "CHART_HEAT_1": "#184F95",
+    "CHART_HEAT_2": "#256ABF",
+    "CHART_HEAT_3": "#3987E5",
+    "CHART_HEAT_4": "#86B6EF",
+    "CHART_GRID": "#3C3C3C",
+    "CHART_AXIS": "#898781",
     "SIDEBAR_BG": "#181818",
     "SIDEBAR_TITLE": "#CCCCCC",
     "SIDEBAR_SUBTITLE": "#7A8290",

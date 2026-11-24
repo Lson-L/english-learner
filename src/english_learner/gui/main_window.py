@@ -34,7 +34,14 @@ from ..storage.db import Database
 from .assessment_dialog import AssessmentDialog
 from .i18n import refresh_buttons, set_low_profile
 from .onboarding import OnboardingDialog
-from .pages import ReaderPage, ReviewPage, SettingsPage, TodayPage, VocabularyPage
+from .pages import (
+    ReaderPage,
+    ReviewPage,
+    SettingsPage,
+    StatsPage,
+    TodayPage,
+    VocabularyPage,
+)
 from .theme import build_stylesheet
 from .weekly_review_dialog import WeeklyReviewDialog
 from .window_state import capture_window_state, restore_window_state
@@ -47,7 +54,8 @@ PAGE_TODAY = 0
 PAGE_READER = 1
 PAGE_VOCABULARY = 2
 PAGE_REVIEW = 3
-PAGE_SETTINGS = 4
+PAGE_STATS = 4
+PAGE_SETTINGS = 5
 
 # 侧边栏与窗口文案：默认 / 低调主题两套。
 # 低调模式刻意避开“英语”“生词本”这类字眼，导航保持英文短词，远看像一个
@@ -59,7 +67,7 @@ _SIDEBAR_TEXTS: dict[bool, dict[str, object]] = {
         "subtitle": "每天读一点，就会不一样",
         "section": "学习",
         "other_section": "其他",
-        "nav": ("今日", "阅读", "生词本", "复习"),
+        "nav": ("今日", "阅读", "生词本", "复习", "统计"),
         "settings": "设置",
         "footer": None,
         "app_display_name": "Daily English",
@@ -70,7 +78,7 @@ _SIDEBAR_TEXTS: dict[bool, dict[str, object]] = {
         "subtitle": "local",
         "section": "WORKSPACE",
         "other_section": "SYSTEM",
-        "nav": ("Today", "Docs", "Words", "Review"),
+        "nav": ("Today", "Docs", "Words", "Review", "Stats"),
         "settings": "Settings",
         "footer": "local · offline",
         "app_display_name": "Workspace",
@@ -116,6 +124,7 @@ class MainWindow(QMainWindow):
         self._reader_page = ReaderPage(self._context)
         self._vocabulary_page = VocabularyPage(self._context)
         self._review_page = ReviewPage(self._context)
+        self._stats_page = StatsPage(self._context, low_profile=self._low_profile)
         self._settings_page = SettingsPage(config, store, self._context)
         self._settings_page.reconfigure_requested.connect(self._open_reconfigure)
         self._settings_page.english_font_changed.connect(self._apply_english_font)
@@ -135,6 +144,7 @@ class MainWindow(QMainWindow):
             self._reader_page,
             self._vocabulary_page,
             self._review_page,
+            self._stats_page,
             self._settings_page,
         )
         for page in self._pages:
@@ -305,6 +315,7 @@ class MainWindow(QMainWindow):
         self._reader_page.apply_english_font(self._ui.english_font, mono=self._low_profile)
         self._reader_page.apply_low_profile(self._low_profile)
         self._vocabulary_page.set_low_profile(self._low_profile)
+        self._stats_page.set_low_profile(self._low_profile)
 
     # -------------------------------------------------------------- 配置变更
     def _open_reconfigure(self) -> None:

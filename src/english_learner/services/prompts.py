@@ -708,7 +708,10 @@ def build_quiz_stage_two_messages(
         "   - 每道题从文章中选 1 句完整的英文句子，要求学习者翻译成中文；\n"
         "   - 第 1 道选包含关键信息或主旨的句子；第 2 道选包含指代、转折、因果等逻辑关系的句子；\n"
         "   - 每句控制在 12~35 个英文单词，不要选整段，也不要把句子拆得太碎；\n"
-        '   - 题面写成 "Translate the following sentence into Chinese: \\"<原文句子>\\""；\n'
+        "   - 题面只写要翻译的英文原句本身，用英文双引号包住，"
+        '例如 "Small habits add up over time."；\n'
+        '     不要在题面里加 "Translate the following sentence into Chinese" 之类英文指令，'
+        "界面已有中文说明；\n"
         "   - reference_answer 必须给中文参考翻译，不要给英文；\n"
         "   - 不要要求学习者写英文，不要出成选择题；\n"
         f"   - 两道题难度分别标为 {current} 和 {target}（至少落在 {current}~{target} 之间）；\n"
@@ -731,8 +734,7 @@ def build_quiz_stage_two_messages(
         "    },\n"
         "    {\n"
         '      "kind": "short",\n'
-        '      "prompt": "Translate the following sentence into Chinese: '
-        '\\"Small habits add up over time.\\"",\n'
+        '      "prompt": "\\"Small habits add up over time.\\"",\n'
         '      "skill": "translation",\n'
         f'      "difficulty": "{current}",\n'
         '      "reference_answer": "小习惯会随着时间的推移不断累积。",\n'
@@ -740,8 +742,7 @@ def build_quiz_stage_two_messages(
         "    },\n"
         "    {\n"
         '      "kind": "short",\n'
-        '      "prompt": "Translate the following sentence into Chinese: '
-        '\\"They change our lives in ways we rarely notice.\\"",\n'
+        '      "prompt": "\\"They change our lives in ways we rarely notice.\\"",\n'
         '      "skill": "translation",\n'
         f'      "difficulty": "{target}",\n'
         '      "reference_answer": "它们以我们很少察觉的方式改变着我们的生活。",\n'

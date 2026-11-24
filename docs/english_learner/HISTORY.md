@@ -1553,3 +1553,35 @@ def lookup(word: str, sentence: str, article_id: int, level: str) -> WordDefinit
    - 自适应题目的难度选择有单测（mock AI）；
    - 盲评分数与当前等级的相关性可用历史数据回放；
    - 任何 AI 失败都不改画像，用户可跳过/重试。
+
+## 学习统计页（2026-11-24）
+
+**目标**：把已有的本地学习记录变成“看得见的积累”，而不是只有设置页里
+几行数字。全部离线聚合，0 次 AI 调用。
+
+**交付**：
+
+- 新增 `services/stats_overview.py`：`StatsOverviewService.build()` 读取
+  `daily_stats / words / reading_quizzes`，产出累计数字、26 周热力图、
+  90 天累计曲线、近 30 天每日活动、词汇状态拆分、按等级的检测趋势与
+  12 个成就；空库返回结构完整的全 0 快照。
+- 新增 `gui/widgets/charts.py`：QPainter 自绘热力图、累计面积曲线、
+  堆叠柱、词汇分段条、检测折线与热力图图例；颜色全部取
+  `theme.py` 新增的 `CHART_*` 调色板，支持 hover tooltip 与低调主题切换。
+- 新增 `gui/widgets/achievements.py`：3 列成就徽章网格，未解锁显示进度，
+  解锁后切浅强调底 + 强调描边。
+- 新增 `gui/pages/stats.py`：侧边栏「统计」页（页面栈索引 4，设置页顺延到 5），
+  顶部 4 个累计指标 + 6 张图表卡片；`on_activated()` 时重新聚合。
+- 主题测试更新导航期望为 5 个学习入口，并新增图表调色板 key / 热力阶梯
+  单调性断言；GUI 冒烟测试更新页面栈数量为 6。
+
+**验证**：
+
+- 新增 `test_english_learner_stats_overview.py`（纯服务口径）与
+  `test_english_learner_stats_page.py`（offscreen 页面 / 空态 / 主题切换 /
+  失败兜底）；
+- 全量 **674 passed**（`uv run pytest`），`ruff check` 与
+  `ruff format --check` 通过；
+- 图表色用 dataviz 校验脚本在浅色 `#FFFFFF` 与深色 `#252526` 卡片底上
+  分别验证分类色与 ordinal 阶梯，无 FAIL；浅色下 aqua / yellow 的
+  对比度 WARN 由页面汇总数字与直接标签作为 relief 通道。

@@ -65,7 +65,7 @@ uv run ruff format src/english_learner tests
 7. **代码风格**：中文注释 / docstring；必要时用 Java 概念做类比；作者署名 `lson`；
    `@dataclass`；行宽 100，ruff 必须通过。
 8. **页面导航**：`main_window.py` 中页面栈顺序与侧边栏按钮索引硬绑定
-   （今日 0 / 阅读 1 / 生词本 2 / 复习 3 / 设置 4），加页面两处一起改。
+   （今日 0 / 阅读 1 / 生词本 2 / 复习 3 / 统计 4 / 设置 5），加页面两处一起改。
 9. **字体**：所有英文（界面、正文、测评、释义卡）的外观只由 `gui/fonts.py` 的
    字体链 + 全局 QSS 的 `*` 规则决定，新控件**不要**单独设 `font-family`
    （中文靠字体链回退到雅黑）。唯一例外是 QTextDocument 类控件（文章正文），
@@ -109,6 +109,13 @@ uv run ruff format src/english_learner tests
 - **M6.5（2026-11-20）**：档内难度浮动。`difficulty_hint()` 推导 low / mid / high
   并注入文章 prompt（空值 / mid 与旧版逐字节一致），hint 与理由写入
   `articles.metrics_json`；可读性重试会撤掉 high，用户阅读反馈优先于 hint。
+- **学习统计页（2026-11-24）**：侧边栏新增「统计」页（页面栈索引 4，
+  设置页顺延到 5）。`services/stats_overview.py` 纯本地聚合
+  `daily_stats / words / reading_quizzes`，产出累计数字、26 周打卡热力图、
+  90 天累计曲线、近 30 天活动、词汇状态、检测趋势与 12 个成就；
+  图表是 `gui/widgets/charts.py` 的 QPainter 自绘控件，**不用 QtCharts**，
+  颜色取 `theme.py` 的 `CHART_*` 键（改色必须重跑 dataviz 校验），
+  `set_low_profile()` 时整套换色。新增页面/导航时两处索引一起改。
 - **低调主题（2026-11-21）**：设置页「外观 → 界面主题」可切到深色等宽模式
   （`ui.low_profile`）。`theme.py` 的颜色已抽成 `LIGHT_PALETTE` /
   `LOW_PROFILE_PALETTE`，QSS 模板只写 `__KEY__` 占位符，**新样式不要写死

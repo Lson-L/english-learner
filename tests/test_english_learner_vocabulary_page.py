@@ -100,6 +100,31 @@ def test_lists_all_words_and_filters(db: Database, tmp_path: Path) -> None:
     assert page._table.rowCount() == 3
 
 
+def test_search_matches_lemma_and_chinese_meaning_only(db: Database, tmp_path: Path) -> None:
+    """英文释义不参与搜索：搜 me 不应命中释义里的 something。"""
+    get_app()
+    db.words.upsert(
+        make_word(
+            "detect",
+            meaning_cn="发现；察觉；探测",
+            meaning_en="to notice or discover something that is hidden",
+        )
+    )
+    db.words.upsert(make_word("me", meaning_cn="我（宾格）", meaning_en="pronoun"))
+
+    page = VocabularyPage(make_context(db, tmp_path))
+    page.on_activated()
+
+    page._search_edit.setText("me")
+    assert page._table.rowCount() == 1
+    assert page._table.item(0, 0).text() == "me"
+
+    # 中文释义仍然参与搜索。
+    page._search_edit.setText("察觉")
+    assert page._table.rowCount() == 1
+    assert page._table.item(0, 0).text() == "detect"
+
+
 def test_inflected_word_shows_article_form_and_lemma(db: Database, tmp_path: Path) -> None:
     get_app()
     db.words.upsert(make_word("go", display_form="went", meaning_cn="去；走"))

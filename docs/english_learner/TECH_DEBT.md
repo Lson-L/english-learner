@@ -13,14 +13,14 @@
 | 测评题库固定 B1 | A2/B2 套已写好，UI 暂不提供选择 | 以后做自适应或设置项 |
 | 文章重试成本 | 校验失败会重试一次，失败的那次也计费 | 可接受；如频繁失败再调 prompt / 放宽校验 |
 | `json_mode` 兼容性 | 已实现 `complete_json()` 降级 + 本地三档解析；真实网关报错文案覆盖度待实测 | 实测后补充识别关键字 |
-| PySide6 体积大 | 完整 `PySide6` 会拉 WebEngine/Addons | M4 可选：换 `PySide6-Essentials` 后重打包验证 |
+| PySide6 体积大 | spec 已过滤未用的 Qt DLL/插件（Qml/Quick、Pdf、Svg、Network、OpenGL、虚拟键盘、opengl32sw 等），依赖里仍是完整 `PySide6` | 可选：换 `PySide6-Essentials` 精简构建环境，重打包冒烟后生效 |
 | 单温度 | 全局一个 temperature，业务层按任务覆盖 | 够用 |
 | 配置校验重复 | `ConfigStore.load()` 调了两次 `validate()` | 顺手清理即可 |
 | 导航索引耦合 | 页面顺序与按钮索引硬绑定（`main_window.py` 的 `PAGE_*` 常量） | 加页面时同步改两处 |
 | 反馈调级成本 | 一次调整 = 两次 AI 调用（定级 + 写文章），文章失败还会再重试一次 | 可接受；如太慢可换小模型或合并为一次调用 |
 | 调级依赖模型判断 | 是否降档取决于模型是否遵守 prompt；极端情况下可能维持原级 | 已验证有兜底；必要时后续加“手动指定等级重写” |
 | 重写清空高亮 | 按设计，新文章无法沿用旧偏移，旧高亮随文章级联删除（生词保留） | 可接受 |
-| 打包状态 | 已有 `DailyEnglish.spec`（onefile），产物 `dist/DailyEnglish.exe` | 安装器 / 自动更新留到 M4（可选） |
+| 打包状态 | `DailyEnglish.spec` 支持 onefile（默认）与 onedir（`DAILYENGLISH_ONEDIR=1`），已做 Qt/依赖裁剪 | 未签名，SmartScreen/杀软误报需自行处理；安装器 / 自动更新留到 M4（可选） |
 | 复习目标与队列上限耦合 | `MAX_DAILY_REVIEW_LIMIT` 与 `SESSION_LIMIT` 目前都为 200；若单独调大其一，概览「加练一轮」文案与 `_start_session()` 实际取词上限可能不一致 | 已让两处都取 `min(..., SESSION_LIMIT)`；以后调整时同步检查两处 |
 | 复习快捷键 | 数字键 1~4 在中文输入法下未实测；必要时改成 Alt+1~4 或可配置 | 真实桌面确认后调整 |
 | 复习落库非原子 | `review()` 依次写词条、`review_logs`、`daily_stats`，未包同一个事务 | 概率极低；M4 视需要包进 `Database.transaction()` |

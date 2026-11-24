@@ -43,6 +43,7 @@ from .readability import ReadabilityThresholds
 from .reading_quiz_service import ReadingQuizService
 from .review_help_service import ReviewHelpService
 from .srs import ReviewService
+from .stats_overview import StatsOverview, StatsOverviewService
 from .weekly_review_service import WeeklyReviewService
 
 
@@ -238,6 +239,14 @@ class AppContext:
             self.ai_call_repo,
             self.writing_attempt_repo,
         )
+
+    def stats_overview(self) -> StatsOverview:
+        """统计页快照：热力图 / 累计曲线 / 成就全部本地计算，0 次 AI 调用。"""
+        return StatsOverviewService(
+            self.stats_repo,
+            self.word_repo,
+            self.quiz_repo,
+        ).build()
 
     def export_service(self) -> ExportService:
         """数据导出同样是纯本地操作。"""

@@ -1,11 +1,11 @@
 # Daily English 开发进度（当前看板）
 
 - 最后更新：2026-11-24
-- 当前阶段：**M6.5 完成**（档内难度浮动）+ 启动体验优化；M0 ~ M3.19、M5.0 ~ M5.5、
-  M6.1 ~ M6.5 全部完成
+- 当前阶段：**M6.5 完成**（档内难度浮动）+ 启动体验优化 + 学习统计页；
+  M0 ~ M3.19、M5.0 ~ M5.5、M6.1 ~ M6.5 全部完成
 - 下一阶段：**M6.6 强证据升级 + 主客观一致**（见 [AI_TASKS.md](AI_TASKS.md)
   第 7 节）；M6.7 随后，M5.6 暂缓，M4 剩余安装器 / 自动更新排最后
-- 当前基线：**654 passed**（`uv run pytest`）；SQLite schema **v8**
+- 当前基线：**674 passed**（`uv run pytest`）；SQLite schema **v8**
 - 产品方向：[PRODUCT.md](PRODUCT.md)
 
 > **文档怎么读（重要，避免污染上下文）**
@@ -54,6 +54,7 @@
 | M6.3 | 加入生词本后后台补全简释：简释词自动再查一次完整释义（例句 / 记忆方法），完成后原地更新卡片与词条 | ✅ 2026-11-20 |
 | M6.4 | 档内进度仪表盘：今日页显示向下一档的把握、pending 与三条证据（纯本地） | ✅ 2026-11-20 |
 | M6.5 | 档内难度浮动：文章生成带 low / mid / high 档内位置，等级标签不变 | ✅ 2026-11-20 |
+| 统计页 | 学习统计：26 周打卡热力图、累计成长 / 近 30 天活动、词汇分布、检测趋势、成就墙（纯本地） | ✅ 2026-11-24 |
 | M6.6 | 强证据升级（默认关）+ 手动调级升级二次确认 | ⬜ 未开始 |
 | M6.7 | 边界用户与文案：明确 A2–C1 覆盖范围 | ⬜ 未开始 |
 | M5 | AI 学习闭环：复习证据、学习者记忆、本地 i+1、回译练习、效果度量（M5.0~M5.6） | 🟡 M5.0 ~ M5.5 已完成，M5.6 按数据决定（2026-11-20） |
@@ -106,6 +107,10 @@ M6.3 起把预置的简释词加入生词本后，后台会自动按完整查词
 启动时先显示轻量遮罩（`gui/splash.py`），再导入 openai SDK 与全部页面 /
 弹窗模块；`import english_learner.app` 从约 1.5s 降到 0.3s，
 重依赖加载期间能看到阶段文案与进度，不再出现“双击没反应”。
+侧边栏新增「统计」页（2026-11-24）：26 周打卡热力图、累计生词 / 阅读 / 复习
+曲线、近 30 天堆叠柱、词汇掌握分段条、按等级的检测得分折线与 12 个成就徽章；
+全部由 `services/stats_overview.py` 从本地 SQLite 聚合，0 次 AI 调用，
+图表用 QPainter 自绘并跟随两套主题换色。
 所有 AI 请求都带任务标签并写入 `ai_calls`（token / 耗时 / 错误，
 不保存提示词与模型回复）。
 
@@ -139,8 +144,11 @@ uv run pytest -q
 uv run ruff check src/english_learner tests
 uv run ruff format src/english_learner tests
 
-# 打包成单文件 exe → dist/DailyEnglish.exe（约 61MB，双击即用）
+# 打包成单文件 exe → dist/DailyEnglish.exe（裁剪后约 36MB，双击即用）
 uv run pyinstaller --noconfirm --clean DailyEnglish.spec
+
+# 目录版（启动更快、杀软误报更少）→ dist/DailyEnglish/DailyEnglish.exe
+DAILYENGLISH_ONEDIR=1 uv run pyinstaller --noconfirm --clean DailyEnglish.spec
 ```
 
 配置文件位置（Windows）：`%APPDATA%\EnglishLearner\config.json`

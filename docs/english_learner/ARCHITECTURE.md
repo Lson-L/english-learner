@@ -4,7 +4,7 @@
 > 当前状态见 [PROGRESS.md](PROGRESS.md)，历史记录见 [HISTORY.md](HISTORY.md)，
 > 已知问题见 [TECH_DEBT.md](TECH_DEBT.md)。章节编号沿用拆分前的 PROGRESS。
 
-## 4. 文件地图（M5.5 完成后的现状）
+## 4. 文件地图（当前现状）
 
 ```
 src/english_learner/
@@ -49,6 +49,7 @@ src/english_learner/
 │   ├── back_translation.py     回译：切句 / 抽句 / 译文与批改解析（M5.4，纯函数）
 │   ├── back_translation_service.py 回译出题缓存 + 批量批改（M5.4，两次 AI 调用）
 │   ├── metrics_service.py      学习效果度量：通过率 / 回炉率 / 计划完成 / 重试 / 趋势（M5.5，纯本地）
+│   ├── stats_overview.py       统计页聚合：热力图 / 累计曲线 / 每日活动 / 词档 / 检测趋势 / 成就（纯本地）
 │   ├── export_service.py       JSON / CSV 数据导出（十二张表，含 AI 调用记录与回译）
 │   ├── backup_service.py       启动时每日备份 data.db（SQLite backup API，保留 7 份）
 │   ├── database_transfer.py    整库导出 / 导入（校验 + 暂存 + 启动时替换，导入前备份）
@@ -72,16 +73,19 @@ src/english_learner/
     ├── window_state.py         窗口几何保存 / 恢复（saveGeometry ↔ config.json）
     ├── widgets/
     │   ├── article_view.py     只读 QTextEdit：双击取词、高亮、17px/1.8 行距
-    │   └── word_panel.py       悬浮释义卡（可滚动/关闭）+ 加入生词本按钮
+    │   ├── word_panel.py       悬浮释义卡（可滚动/关闭）+ 加入生词本按钮
+    │   ├── charts.py           自绘图表：热力图 / 累计曲线 / 堆叠柱 / 分段条 / 折线（跟随主题）
+    │   └── achievements.py     成就墙：徽章网格 + 进度条 + 解锁态样式
     └── pages/
         ├── common.py           Card / PageHeader / StatCard(可刷新) / set_status
         ├── today.py            今日页：连续天数/到期复习/累计生词/文章状态/测评入口
         ├── reader.py           阅读页：正文全宽 + 悬浮释义卡、换一篇、调整难度、阅读完成、回译练习
         ├── vocabulary.py       生词本页：筛选/搜索/排序/编辑/批量删除/脏检查/求助记录回显
         ├── review.py           复习页：自动编排卡片、每日目标、分批检查点、随时结束（M3.18/M3.19）
+        ├── stats.py            统计页：累计数字 + 热力图 + 累计曲线 + 近 30 天 + 词汇分布 + 检测趋势 + 成就
         └── settings.py         配置、学习效果、调用记录摘要与入口、字体、数据位置、JSON/CSV 导出
 
-tests/（共 522 个用例，全部 mock AI、无网络）
+tests/（共 674 个用例，全部 mock AI、无网络）
 ├── test_english_learner_config.py        配置读写/校验/脱敏
 ├── test_english_learner_ai_client.py     连接测试与错误翻译
 ├── test_english_learner_ai_usage.py      AI 调用仓库汇总/筛选、客户端埋点与重试、AppContext 注入
@@ -109,6 +113,8 @@ tests/（共 522 个用例，全部 mock AI、无网络）
 ├── test_english_learner_back_translation_dialog.py 回译弹窗：缓存/校验/批改展示/失败重试
 ├── test_english_learner_metrics.py       学习效果口径：首次通过/回炉/计划完成/重试/趋势
 ├── test_english_learner_metrics_page.py  设置页学习效果卡片（offscreen）
+├── test_english_learner_stats_overview.py 统计口径：热力级别/累计基线/词档/检测趋势/成就
+├── test_english_learner_stats_page.py    统计页渲染 / 指标切换 / 主题切换 / 空态（offscreen）
 ├── test_english_learner_vocabulary_page.py 生词本筛选/搜索/排序/编辑/批量删除/脏检查/求助记录回显
 ├── test_english_learner_secret_store.py   DPAPI 往返/明文兼容/损坏密文
 ├── test_english_learner_export.py        JSON 快照/CSV 分表/空库/原子写入
@@ -260,7 +266,8 @@ tests/（共 522 个用例，全部 mock AI、无网络）
 ### 6.12 打包成 exe（PyInstaller）
 
 - 配置在项目根 `DailyEnglish.spec`，命令：`uv run pyinstaller --noconfirm --clean DailyEnglish.spec`，
-  产物 `dist/DailyEnglish.exe`（单文件约 61MB，onedir 可另改 spec）；
+  产物 `dist/DailyEnglish.exe`（单文件，裁剪后约 36MB）；设环境变量
+  `DAILYENGLISH_ONEDIR=1` 再执行同一命令，则产出 `dist/DailyEnglish/` 目录版；
 - 三个必须踩对的点：
   1. `SPECPATH` 是 **spec 文件所在目录**（不是它的父目录），算路径时别多套一层 `.parent`；
   2. `pathex=[src]`：项目是 src 布局 + editable 安装，让 PyInstaller 直接从源码找包；
@@ -269,8 +276,24 @@ tests/（共 522 个用例，全部 mock AI、无网络）
      下也能算对 —— 否则内置字体会静默回退成系统字体，界面看不出报错；
 - `console=False`：不留黑窗；未捕获异常走 `app.py` 的 excepthook 弹窗 + 写
   `%APPDATA%/EnglishLearner/logs/app.log`，所以打包版排查问题先看日志；
+- **裁剪**：界面只用 QtCore / QtGui / QtWidgets，但 PySide6 的 QtGui hook 会按
+  「模块 → 插件 → 插件依赖」连锁收集，把 Qml/Quick（虚拟键盘插件）、Pdf（qpdf
+  图片插件）、Svg、Network（TLS 插件）、OpenGL 全带进来。spec 里先按包内路径
+  过滤 `a.binaries`：Qt 插件只留 `platforms/qwindows.dll`、`styles/qmodernwindowsstyle.dll`、
+  `imageformats/qico.dll`，再显式丢弃 `opengl32sw.dll`（单文件 20MB，纯 Widgets
+  用不到）和其他连带 DLL；Python 侧 `excludes` 掉 pygments / setuptools 等。
+  升级 PySide6 后插件依赖可能变化，**必须重新打包并双击冒烟**，不要只看构建成功；
+- **hiddenimports**：`gui/pages/__init__.py` 用模块级 `__getattr__` + `importlib.import_module`
+  按需加载页面（避免循环导入），PyInstaller 静态分析看不到模块名，spec 里必须显式列出
+  `english_learner.gui.pages.{reader,review,settings,today,vocabulary}`；新增页面时同步加，
+  否则 exe 启动即 `ModuleNotFoundError: english_learner.gui.pages.xxx`。这个坑只有在
+  双击 exe 时才会暴露，`uv run` 跑源码永远正常；
+- 构建机的 PATH 会污染依赖收集：旧构建曾把 `D:\soft\Git\mingw64\bin\libcrypto-3-x64.dll`
+  和 `D:\soft\miniconda3\ucrtbase.dll` 打进包，spec 已按文件名丢弃；换机器构建
+  时如果体积异常变大，先查 `build/DailyEnglish/Analysis-00.toc` 里的源路径；
 - `dist/`、`build/` 已在 `.gitignore` 里，不要入库；
-- 首次启动 onefile 会把内容解压到临时目录，比直接跑源码慢几秒，属正常现象。
+- 首次启动 onefile 会把内容解压到临时目录，比直接跑源码慢几秒，属正常现象；
+  介意启动速度就发目录版（`DAILYENGLISH_ONEDIR=1`）。
 
 ### 6.13 阅读反馈调难度（M1.5）
 
@@ -616,15 +639,20 @@ tests/（共 522 个用例，全部 mock AI、无网络）
   「原文选句 → 翻译成中文」，不再出现英文短答 / 改写；
 - **题型表示**：仍用 `kind=short`（产出题），`skill=translation` 区分类型；
   `QuizQuestion.is_translation` 的判断是「skill 为 translation/translate 且
-  题面包含“中文”或“Chinese”」。UI、讲评、盲评、错因统计都复用这个属性，
-  不要各自写一套字符串判断；
+  （题面包含“中文”/“Chinese”，或 `reference_answer` 含中文字符）」。新题面
+  只写英文原句，方向由界面中文说明与中文参考译文体现；UI、讲评、盲评、
+  错因统计都复用这个属性，不要各自写一套字符串判断；
 - **出题**：`build_quiz_stage_two_messages()` 要求 2 道英译中题，
   第 1 道选关键信息/主旨句，第 2 道选含指代/转折/因果的句子；
-  直接引用原文，12~35 词，`reference_answer` 必须是中文；
-  `PROMPT_VERSION` 已升到 `m3-17`；
+  直接引用原文，12~35 词，题面只写带英文双引号的原文句子（不再拼
+  “Translate the following sentence into Chinese” 指令），
+  `reference_answer` 必须是中文；`PROMPT_VERSION` 已升到 `m3-17`；
 - **解析校验**：`parse_stage_two_questions()` 把产出题 skill 强制写成
   `translation`，再用 `is_translation` 过滤；不足 2 道就抛
-  `InvalidQuizError`，由服务层带原因重试。模型退回英文写作时不能放行；
+  `InvalidQuizError`，由服务层带原因重试。模型退回英文写作时不能放行
+  （题面与参考译文都是英文）；旧缓存 / 模型旧格式题面的英文指令由
+  `QuizQuestion.from_dict()` 调 `strip_translation_instruction()` 剥掉
+  （只在有中文参考译文时执行，保证剥掉后仍能判断英译中方向）；
 - **评分**：讲评 prompt 按题型给不同口径。英译中按「理解准确 / 中文通顺」：
   准确传达原句意思给 1；关键词义、指代、否定、逻辑关系译错/漏译/译反给 0；
   中文生硬不扣分。旧缓存里的 writing/rewrite 题仍按「内容 / 语法 / 词汇」；
@@ -1021,3 +1049,35 @@ tests/（共 522 个用例，全部 mock AI、无网络）
   `openai` 与 `english_learner.gui.main_window` **不在** `sys.modules`，
   防止以后把重导入挪回顶层。全量 654 passed，`ruff check` 与
   `ruff format --check` 通过。
+
+### 6.39 学习统计页与自绘图表（2026-11-24，体验项）
+
+- **数据口径**：`services/stats_overview.py` 只读 `daily_stats / words /
+  reading_quizzes`，一次性组装 `StatsOverview`。打卡日 = `daily_stats` 三项
+  任意一项 > 0；连续天数从今天（今天没学则从昨天）往前数；累计曲线窗口
+  90 天，窗口之前的活动折成基线，曲线第一点就是真实累计值；检测趋势按
+  `result_level` 分组，每组最近 8 次、最多 4 条等级线；成就全部由累计值
+  现场判定，不建表、不写库。空库返回结构完整的全 0 快照。
+- **为什么自绘而不是 QtCharts**：QtCharts 虽然随 PySide6 一起装了，但主题色
+  与 QSS 联动要逐个 `QChart` 重新 setBrush，低调主题切换容易漏；自绘
+  `gui/widgets/charts.py` 只依赖 QPainter，颜色全部从 `theme.py` 的
+  `CHART_*` 调色板取，`set_low_profile()` 一次重绘就能整套换色，也不增加
+  启动期的重导入。
+- **配色与图表规范**：分类色固定槽位（蓝 / 橙 / 青 / 黄），不按排名换色；
+  热力图用单色 sequential 五阶，词档用同色系 ordinal 三阶；折线 2px、
+  端点 8px 带 2px 卡片底色描边、面积填充约 10% 透明度；网格 1px 实线。
+  `CHART_*` 已用 dataviz 校验脚本在 `#FFFFFF` / `#252526` 两种卡片底上跑过
+  分类色与 ordinal 检查，**改色必须重跑**；低调主题的 ordinal 最浅端也要
+  满足 2:1 对比度。
+- **页面结构**：侧边栏第 5 个导航「统计」在页面栈索引 4，设置页顺延到 5；
+  `PAGE_STATS` 与 `_SIDEBAR_TEXTS` 的 `nav` 必须同步改（这是第 8 条硬性约定
+  的又一个落点）。页面本身只调 `AppContext.stats_overview()`，不自己拼 SQL。
+- **交互与可达性**：热力图 / 柱状图 / 折线 / 累计曲线都有 hover tooltip，
+  但页面同时给出汇总数字（打卡天数、近 30 天三项合计、当前累计值、检测
+  次数与最新得分），tooltip 不是唯一读数方式；成就墙未解锁显示
+  `当前/目标`，解锁后显示“已解锁”。
+- **测试**：`test_english_learner_stats_overview.py` 覆盖空库、连续天数、
+  热力分档、累计基线、词档过滤、检测分组与成就阈值；
+  `test_english_learner_stats_page.py` 覆盖页面渲染、指标切换、主题切换、
+  空态绘制与统计失败兜底；主题测试额外校验两套调色板的图表 key 与热力
+  阶梯单调性。全量 674 passed。

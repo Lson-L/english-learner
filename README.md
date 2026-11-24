@@ -33,6 +33,10 @@
 
 **额外练习**：回译练习、每周复盘、档内进度仪表盘、学习效果看板。
 
+**学习统计**：侧边栏「统计」页把本地记录画成积累曲线：26 周打卡热力图、
+累计生词 / 阅读 / 复习、近 30 天每日活动、词汇掌握分布、按等级的检测
+得分趋势和 12 个成就徽章；全部离线聚合，不消耗 token。
+
 **本地数据**：JSON / CSV 导出、整库导出与导入迁移、每次启动自动备份；
 Windows 上 API Key 使用 DPAPI 加密；AI 调用只记录 token、耗时和错误，
 不保存提示词与模型回复。
@@ -61,12 +65,30 @@ uv run english-learner --version       # 查看版本号
 
 ## 打包
 
+在 Windows x64 机器上（不能跨平台构建）：
+
 ```bash
-uv run pyinstaller --noconfirm --clean DailyEnglish.spec
+uv sync                                                              # 含 dev 组的 pyinstaller
+uv run pyinstaller --noconfirm --clean DailyEnglish.spec             # 单文件
+DAILYENGLISH_ONEDIR=1 uv run pyinstaller --noconfirm --clean DailyEnglish.spec   # 目录版
 ```
 
-产物 `dist/DailyEnglish.exe` 是自包含的单文件：解释器、PySide6 与内置字体
-都在里面，目标机器不需要安装 Python。配置与学习数据仍然写入用户目录。
+PowerShell 里改环境变量的写法是 `$env:DAILYENGLISH_ONEDIR=1`，再执行最后一条命令。
+
+- **单文件**：`dist/DailyEnglish.exe`，约 36MB，把 Python 解释器、PySide6、
+  VC++ 运行库与内置字体全部打进一个 exe，目标机器**不需要安装 Python 或
+  PySide6**，双击即用；代价是每次启动要解压到临时目录，首屏前多等 2~4 秒。
+- **目录版**：`dist/DailyEnglish/`，把整个目录一起发给用户，双击里面的
+  `DailyEnglish.exe` 即可；启动更快，杀软误报更少，适合再做安装包。
+
+`DailyEnglish.spec` 已经裁掉了用不到的 Qt 模块与插件（Qml/Quick、Pdf、Svg、
+Network、OpenGL、虚拟键盘、多余图片格式等）以及 pygments/setuptools 等
+开发期依赖；界面只用到 QtCore / QtGui / QtWidgets，升级 PySide6 后重新打包
+需做一次双击冒烟测试。目标机器要求：**Windows 10 1809+ / Windows 11，64 位**。
+
+分发时提醒使用者：exe 未做代码签名，首次运行可能被 SmartScreen 拦下，点
+「更多信息 → 仍要运行」即可；API Key 用 Windows DPAPI 加密，和当前 Windows
+用户绑定，换机器后需要重新填写。配置与学习数据仍写入用户目录，不随 exe 走。
 
 ## 配置 AI 服务
 
@@ -121,7 +143,7 @@ docs/english_learner/ 产品、进度、架构、技术债与历史记录
 ## 开发
 
 ```bash
-uv run pytest -q                              # 单元测试（654 个）
+uv run pytest -q                              # 单元测试（674 个）
 uv run ruff check src/english_learner tests   # 静态检查
 uv run ruff format src/english_learner tests  # 格式化
 ```
@@ -140,5 +162,5 @@ uv run ruff format src/english_learner tests  # 格式化
 
 ## 状态
 
-核心功能已经闭环，可以作为日常学习工具使用，654 个测试通过。
+核心功能已经闭环，可以作为日常学习工具使用，674 个测试通过。
 剩余的都是可选增强：M6.6 强证据升级、M6.7 边界文案、安装器与自动更新。

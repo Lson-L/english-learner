@@ -15,6 +15,7 @@ __all__ = [
     "ReaderPage",
     "ReviewPage",
     "SettingsPage",
+    "StatsPage",
     "TodayPage",
     "VocabularyPage",
 ]
@@ -23,6 +24,7 @@ _EXPORTS: dict[str, str] = {
     "ReaderPage": ".reader",
     "ReviewPage": ".review",
     "SettingsPage": ".settings",
+    "StatsPage": ".stats",
     "TodayPage": ".today",
     "VocabularyPage": ".vocabulary",
 }

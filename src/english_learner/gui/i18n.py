@@ -31,7 +31,9 @@ BUTTON_EN: dict[str, str] = {
     "今日": "Today",
     "阅读": "Docs",
     "生词本": "Words",
+    "生词": "Words",
     "复习": "Review",
+    "统计": "Stats",
     "设置": "Settings",
     # 阅读页
     "生成今日文章": "Generate article",

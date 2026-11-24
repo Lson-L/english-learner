@@ -19,6 +19,7 @@ from english_learner.gui.main_window import MainWindow  # noqa: E402
 from english_learner.gui.pages.settings import SettingsPage  # noqa: E402
 from english_learner.gui.theme import LIGHT_PALETTE, LOW_PROFILE_PALETTE, build_stylesheet  # noqa: E402
 from english_learner.gui.widgets.article_view import ArticleView  # noqa: E402
+from english_learner.gui.widgets.charts import chart_palette  # noqa: E402
 from english_learner.models.entities import Article, Highlight  # noqa: E402
 from english_learner.services.config_store import (  # noqa: E402
     AIConfig,
@@ -95,6 +96,23 @@ def test_tooltip_colors_stay_readable_in_both_themes() -> None:
         # 前景/背景亮度差要足够大（WCAG 对比度 ≥ 4.5，按公式反推亮度比）。
         light, dark = sorted((_relative_luminance(bg), _relative_luminance(fg)), reverse=True)
         assert (light + 0.05) / (dark + 0.05) >= 4.5
+
+
+def test_chart_palette_defines_all_slots_and_heat_ramp() -> None:
+    """图表色必须完整；热力阶梯要按主题方向单调变化，不能出现“越多越浅”。"""
+    for low_profile, palette in ((False, LIGHT_PALETTE), (True, LOW_PROFILE_PALETTE)):
+        chart = chart_palette(low_profile)
+        assert chart.surface == palette["BG_CARD"]
+        assert chart.series[0] == palette["CHART_1"]
+        assert len(chart.series) == 4
+        assert len(set(chart.series)) == 4
+        assert len(chart.seq) == 3
+        assert len(chart.heat) == 5
+        luminance = [_relative_luminance(color) for color in chart.heat]
+        if low_profile:
+            assert luminance == sorted(luminance)
+        else:
+            assert luminance == sorted(luminance, reverse=True)
 
 
 def test_radio_indicators_have_explicit_checked_style() -> None:
@@ -247,7 +265,13 @@ def test_main_window_starts_in_low_profile_with_neutral_copy(tmp_path: Path) -> 
 
     assert window.windowTitle() == "Workspace"
     assert window._brand_label.text() == "Workspace"
-    assert [button.text() for button in window._nav_buttons] == ["Today", "Docs", "Words", "Review"]
+    assert [button.text() for button in window._nav_buttons] == [
+        "Today",
+        "Docs",
+        "Words",
+        "Review",
+        "Stats",
+    ]
     assert window._settings_button.text() == "Settings"
     # 低调模式下所有页面按钮都用英文。
     assert window._reader_page._generate_button.text() == "Generate article"
@@ -273,7 +297,13 @@ def test_main_window_switches_theme_live(tmp_path: Path) -> None:
 
     assert store.load_ui().low_profile is True
     assert window.windowTitle() == "Workspace"
-    assert [button.text() for button in window._nav_buttons] == ["Today", "Docs", "Words", "Review"]
+    assert [button.text() for button in window._nav_buttons] == [
+        "Today",
+        "Docs",
+        "Words",
+        "Review",
+        "Stats",
+    ]
     css = QApplication.instance().styleSheet()
     assert "#1E1E1E" in css and '"Consolas"' in css
     assert window._reader_page._view._low_profile is True

@@ -14,6 +14,7 @@ Java 对照：
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
@@ -427,6 +428,27 @@ class AssessmentResult:
 
 
 # --------------------------------------------------------------- 阅读检测
+# 旧版出题 / 旧缓存会把英文出题指令拼在题面前缀里；界面下方已有中文说明，
+# 这里统一剥掉，只保留要翻译的原句（兼容模型偶尔仍按旧格式输出）。
+_TRANSLATION_INSTRUCTION = re.compile(
+    r"^\s*(?:please\s+)?translate\s+(?:(?:this|the)\s+(?:following\s+)?)?"
+    r"(?:sentence|passage|text)?\s*into\s+chinese\s*[:：]\s*",
+    re.IGNORECASE,
+)
+
+
+def strip_translation_instruction(prompt: str) -> str:
+    """去掉英译中题面开头的英文出题指令，只保留待翻译的英文原句。"""
+    text = (prompt or "").strip()
+    stripped = _TRANSLATION_INSTRUCTION.sub("", text).strip()
+    return stripped or text
+
+
+def _contains_cjk(text: str) -> bool:
+    """是否含中文字符（用于确认参考译文的方向是英译中）。"""
+    return any("一" <= char <= "鿿" for char in text or "")
+
+
 @dataclass(frozen=True)
 class QuizQuestion:
     """阅读检测的一道题：选择题（kind=choice）或主动产出题（kind=short）。
@@ -454,13 +476,17 @@ class QuizQuestion:
     def is_translation(self) -> bool:
         """是否是英译中题。
 
-        新题的 `skill` 固定为 `translation`，题面必须明确要求译成中文；
-        旧缓存的英文短答/改写不会被误认成英译中。
+        新题的 `skill` 固定为 `translation`，题面只写英文原句（不再带
+        “Translate the following sentence into Chinese” 这类英文指令），
+        因此方向判断优先看题面，题面没有方向词时用中文参考译文兜底。
+        旧缓存的英文短答/改写（题面与参考译文都是英文）不会被误认成英译中。
         """
         if (self.skill or "").strip().lower() not in {"translation", "translate"}:
             return False
         prompt = self.prompt or ""
-        return "中文" in prompt or "chinese" in prompt.lower()
+        if "中文" in prompt or "chinese" in prompt.lower():
+            return True
+        return _contains_cjk(self.reference_answer)
 
     @classmethod
     def from_dict(cls, data: Any) -> QuizQuestion | None:
@@ -470,6 +496,12 @@ class QuizQuestion:
         prompt = str(data.get("prompt") or data.get("question") or "").strip()
         if not prompt:
             return None
+        reference_answer = str(data.get("reference_answer") or "").strip()
+        # 兼容旧缓存 / 模型旧格式：题面前缀的英文出题指令不展示给用户。
+        # 只在有中文参考译文（剥掉后仍能确认是英译中）时处理，避免旧缓存
+        # 缺参考译文时把英译中误判成英文写作。
+        if _contains_cjk(reference_answer):
+            prompt = strip_translation_instruction(prompt)
 
         raw_kind = str(data.get("kind") or data.get("type") or "choice").strip().lower()
         # 模型偶尔会把改写/翻译写成 kind=rewrite/translation；都按主动产出题处理。
@@ -498,7 +530,7 @@ class QuizQuestion:
                 skill=skill,
                 difficulty=difficulty,
                 kind="short",
-                reference_answer=str(data.get("reference_answer") or "").strip(),
+                reference_answer=reference_answer,
             )
 
         raw_options = data.get("options")

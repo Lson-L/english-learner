@@ -98,11 +98,12 @@ def test_main_window_builds_all_pages(tmp_path: Path) -> None:
 
     window = MainWindow(make_config(), store, db)
 
-    assert window._stack.count() == 5
+    assert window._stack.count() == 6
     assert window._today_page is not None
     assert window._reader_page is not None
     assert window._vocabulary_page is not None
     assert window._review_page is not None
+    assert window._stats_page is not None
     assert window._settings_page is not None
     assert window._nav_group.buttons()[0].isChecked()
     window.close()

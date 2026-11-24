@@ -128,7 +128,7 @@ class VocabularyPage(QWidget):
         toolbar.setSpacing(10)
 
         self._search_edit = QLineEdit()
-        self._search_edit.setPlaceholderText("搜索单词或释义…")
+        self._search_edit.setPlaceholderText("搜索单词或中文释义…")
         self._search_edit.setClearButtonEnabled(True)
         self._search_edit.setMaximumWidth(240)
         self._search_edit.textChanged.connect(self._on_search_changed)
@@ -326,7 +326,12 @@ class VocabularyPage(QWidget):
 
     @staticmethod
     def _matches(word: Word, keyword: str) -> bool:
-        haystack = f"{word.lemma}\n{word.meaning_cn}\n{word.meaning_en}".lower()
+        """只匹配单词原形与中文释义。
+
+        英文释义不参与搜索：里面常有 something / sometimes 这类词，
+        搜 "me" 会意外命中 detect，用户很难理解结果从哪来。
+        """
+        haystack = f"{word.lemma}\n{word.meaning_cn}".lower()
         return keyword in haystack
 
     @staticmethod

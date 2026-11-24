@@ -131,9 +131,7 @@ def stage_two_payload(
     questions.append(
         {
             "kind": "short",
-            "prompt": (
-                'Translate the following sentence into Chinese: "Small habits add up over time."'
-            ),
+            "prompt": '"Small habits add up over time."',
             "skill": "translation",
             "difficulty": difficulty,
             "reference_answer": "小习惯会随着时间不断累积。",
@@ -143,10 +141,7 @@ def stage_two_payload(
     questions.append(
         {
             "kind": "short",
-            "prompt": (
-                "Translate the following sentence into Chinese: "
-                '"They change our lives in ways we rarely notice."'
-            ),
+            "prompt": '"They change our lives in ways we rarely notice."',
             "skill": "translation",
             "difficulty": target,
             "reference_answer": "它们以我们很少察觉的方式改变生活。",
@@ -352,6 +347,15 @@ def test_is_translation_requires_chinese_direction() -> None:
     )
     assert chinese.is_translation is True
 
+    # 新题面只写英文原句，方向由中文参考译文兜底判断。
+    clean = QuizQuestion(
+        prompt='"Small habits add up."',
+        skill="translation",
+        kind="short",
+        reference_answer="小习惯会不断累积。",
+    )
+    assert clean.is_translation is True
+
     # 旧缓存的“翻译成英文”不能被误判成英译中。
     english = QuizQuestion(
         prompt="Translate into English: 小习惯会不断累积。",
@@ -367,6 +371,31 @@ def test_is_translation_requires_chinese_direction() -> None:
         kind="short",
     )
     assert writing.is_translation is False
+
+    # 题面是英文原句、参考译文也是英文：仍按英文写作处理，不算英译中。
+    english_only = QuizQuestion(
+        prompt='"Small habits add up."',
+        skill="translation",
+        kind="short",
+        reference_answer="Small habits add up.",
+    )
+    assert english_only.is_translation is False
+
+
+def test_legacy_translation_prompt_drops_english_instruction() -> None:
+    """旧缓存 / 模型旧格式的题面前缀不再展示给用户。"""
+    question = QuizQuestion.from_dict(
+        {
+            "kind": "short",
+            "prompt": 'Translate the following sentence into Chinese: "Small habits add up."',
+            "skill": "translation",
+            "reference_answer": "小习惯会不断累积。",
+        }
+    )
+
+    assert question is not None
+    assert question.prompt == '"Small habits add up."'
+    assert question.is_translation is True
 
 
 def test_parse_question_review_filters_bad_indices() -> None:
@@ -675,6 +704,8 @@ def test_stage_two_prompt_asks_for_chinese_translation(db: Database) -> None:
     assert "翻译成中文" in prompt
     assert "不要要求学习者写英文" in prompt
     assert "reference_answer 必须给中文参考翻译" in prompt
+    # 题面只给英文原句，不再让模型拼英文出题指令。
+    assert '"prompt": "\\"Small habits add up over time.\\""' in prompt
 
 
 def test_grading_prompt_uses_comprehension_rubric_for_translation(

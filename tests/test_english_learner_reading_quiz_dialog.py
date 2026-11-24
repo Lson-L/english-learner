@@ -84,9 +84,7 @@ def choice_question(index: int, *, difficulty: str = "B1") -> QuizQuestion:
 def production_question(index: int, *, skill: str = "translation") -> QuizQuestion:
     if skill == "translation":
         return QuizQuestion(
-            prompt=(
-                'Translate the following sentence into Chinese: "Small habits add up over time."'
-            ),
+            prompt='"Small habits add up over time."',
             skill="translation",
             difficulty="B1",
             kind="short",
