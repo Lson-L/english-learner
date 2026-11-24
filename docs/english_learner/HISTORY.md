@@ -1591,5 +1591,7 @@ def lookup(word: str, sentence: str, article_id: int, level: str) -> WordDefinit
 `refresh()` 调 `set_days()` 后只 `update()` 没 `updateGeometry()`，
 布局仍停在窄缝；二是暗色 `CHART_HEAT_0` 与卡片底 `#252526` 对比度约
 1.05:1，26 周里的空白格完全消失。修复：`set_days()` 补 `updateGeometry()`；
-暗色空白格改为 `#3A3A3A`、1 档改为 `#1C5CAB`；单元格 13→18px、间距 3→4px。
-新增“26 周宽度”与“暗色空白格对比度 ≥1.25:1”两个回归断言，全量 675 passed。
+单元格 13→18px、间距 3→4px；低调主题 0 档改为不填色（只保留网格描边），
+1~4 档按“从浅到深”排列（`#9EC5F4 / #6DA7EC / #2A78D6 / #184F95`），
+与浅色主题方向一致。新增“26 周宽度”与“暗色空白格描边对比度 ≥1.25:1”
+两个回归断言，全量 675 passed。

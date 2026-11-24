@@ -249,12 +249,20 @@ class HeatmapCalendar(_ChartBase):
 
         for index, day in enumerate(self._days):
             rect = self._cell_rect(index)
-            color = self._palette.heat[day.level]
             if day.future:
-                color = self._palette.track
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(_alpha(color, 90 if day.future else 255))
-            painter.drawRoundedRect(rect, 3, 3)
+                # 未来日期只留一圈很淡的网格，不填色。
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(_alpha(self._palette.grid, 80), 1))
+                painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 3, 3)
+            elif day.level == 0 and self._low_profile:
+                # 低调主题：0 档不填色，只用网格线勾出 26 周的骨架。
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(self._palette.grid), 1))
+                painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 3, 3)
+            else:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(self._palette.heat[day.level]))
+                painter.drawRoundedRect(rect, 3, 3)
             if index == self._hover and not day.future:
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.setPen(QPen(QColor(self._palette.text), 1))
@@ -326,10 +334,17 @@ class HeatLegend(_ChartBase):
             less,
         )
         x += metrics.horizontalAdvance(less) + 6
-        for color in self._palette.heat:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(color))
-            painter.drawRoundedRect(QRectF(x, 5, 11, 11), 2, 2)
+        for index, color in enumerate(self._palette.heat):
+            rect = QRectF(x, 5, 11, 11)
+            if index == 0 and self._low_profile:
+                # 低调主题的 0 档是“未填色”，图例里也画成空心格。
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(QColor(self._palette.grid), 1))
+                painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 2, 2)
+            else:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(color))
+                painter.drawRoundedRect(rect, 2, 2)
             x += 14
         painter.setPen(QColor(self._palette.muted))
         painter.drawText(

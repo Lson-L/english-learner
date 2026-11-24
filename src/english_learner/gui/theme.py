@@ -753,13 +753,14 @@ LOW_PROFILE_PALETTE: dict[str, str] = {
     "CHART_SEQ_1": "#1C5CAB",
     "CHART_SEQ_2": "#3987E5",
     "CHART_SEQ_3": "#86B6EF",
-    # 热力图 0 档必须比卡片底 #252526 亮一档，否则 26 周的空白格
-    # 会完全消失，只剩最近几周有活动的格子，看起来像图表没画出来。
-    "CHART_HEAT_0": "#3A3A3A",
-    "CHART_HEAT_1": "#1C5CAB",
-    "CHART_HEAT_2": "#256ABF",
-    "CHART_HEAT_3": "#3987E5",
-    "CHART_HEAT_4": "#86B6EF",
+    # 热力图：0 档不填色（控件只描一圈网格线），1~4 档从浅到深。
+    # 这里把 0 档设成卡片底色，占位颜色与“未填色”的语义一致；
+    # HeatmapCalendar / HeatLegend 在低调主题下不会真的用它填充。
+    "CHART_HEAT_0": "#252526",
+    "CHART_HEAT_1": "#9EC5F4",
+    "CHART_HEAT_2": "#6DA7EC",
+    "CHART_HEAT_3": "#2A78D6",
+    "CHART_HEAT_4": "#184F95",
     "CHART_GRID": "#3C3C3C",
     "CHART_AXIS": "#898781",
     "SIDEBAR_BG": "#181818",

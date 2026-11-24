@@ -108,16 +108,19 @@ def test_chart_palette_defines_all_slots_and_heat_ramp() -> None:
         assert len(set(chart.series)) == 4
         assert len(chart.seq) == 3
         assert len(chart.heat) == 5
+        assert len(set(chart.heat)) == 5
         luminance = [_relative_luminance(color) for color in chart.heat]
         if low_profile:
-            assert luminance == sorted(luminance)
-            # 0 档是“没有学习”的空白格，必须和卡片底拉开一点差距；
-            # 否则 26 周里没活动的格子完全消失，只剩最近几周亮着。
-            surface, empty = sorted(
-                (_relative_luminance(palette["BG_CARD"]), luminance[0]),
+            # 0 档在深色主题下不填色，用卡片底占位；1~4 档和浅色主题一样，
+            # 按“从浅到深”排列，避免同一套图例在两种主题下方向相反。
+            assert chart.heat[0] == palette["BG_CARD"]
+            assert luminance[1:] == sorted(luminance[1:], reverse=True)
+            # 空白格靠网格描边保留骨架，描边必须和卡片底拉开一点差距。
+            surface, outline = sorted(
+                (_relative_luminance(palette["BG_CARD"]), _relative_luminance(chart.grid)),
                 reverse=True,
             )
-            assert (surface + 0.05) / (empty + 0.05) >= 1.25
+            assert (surface + 0.05) / (outline + 0.05) >= 1.25
         else:
             assert luminance == sorted(luminance, reverse=True)
 
