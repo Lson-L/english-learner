@@ -69,6 +69,34 @@ def test_low_profile_stylesheet_is_dark_and_mono() -> None:
     assert '"Literata"' not in css and '"Lexend"' not in css
 
 
+def _tooltip_rule(css: str) -> str:
+    """截出 QToolTip { ... } 这一段，避免误匹配其它控件里的同名颜色。"""
+    start = css.index("QToolTip {")
+    return css[start : css.index("}", start)]
+
+
+def _relative_luminance(hex_color: str) -> float:
+    channels = [int(hex_color[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+    linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def test_tooltip_colors_stay_readable_in_both_themes() -> None:
+    """悬浮提示必须自成一对配色。
+
+    回归背景：低调主题曾复用 TEXT/ON_ACCENT，浅灰底 + 白字，
+    鼠标悬停在按钮/表格上的提示几乎看不见。
+    """
+    for low_profile, palette in ((False, LIGHT_PALETTE), (True, LOW_PROFILE_PALETTE)):
+        css = build_stylesheet("lexend", low_profile=low_profile)
+        rule = _tooltip_rule(css)
+        bg, fg = palette["TOOLTIP_BG"], palette["TOOLTIP_TEXT"]
+        assert bg in rule and fg in rule
+        # 前景/背景亮度差要足够大（WCAG 对比度 ≥ 4.5，按公式反推亮度比）。
+        light, dark = sorted((_relative_luminance(bg), _relative_luminance(fg)), reverse=True)
+        assert (light + 0.05) / (dark + 0.05) >= 4.5
+
+
 def test_radio_indicators_have_explicit_checked_style() -> None:
     """选择题的选中态不能依赖系统默认圆点：两套主题都要有显式 indicator 样式。"""
     for low_profile in (False, True):

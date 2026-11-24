@@ -23,10 +23,13 @@ _STYLESHEET_TEMPLATE = """
 QMainWindow, QDialog {
     background: __BG__;
 }
+/* 悬浮提示：底色和文字必须成对取调色板，不能复用 TEXT/ON_ACCENT——
+   低调主题的 TEXT 是浅灰，配白字等于白底白字，完全看不清。 */
 QToolTip {
-    background: __TEXT__;
-    color: __ON_ACCENT__;
-    border: none;
+    background: __TOOLTIP_BG__;
+    color: __TOOLTIP_TEXT__;
+    border: 1px solid __TOOLTIP_BORDER__;
+    border-radius: 6px;
     padding: 6px 8px;
 }
 
@@ -561,6 +564,9 @@ LIGHT_PALETTE: dict[str, str] = {
     "ACCENT_BG": "#EAF1FF",
     "ON_ACCENT": "#FFFFFF",
     "ON_ACCENT_DISABLED": "#F3F6FD",
+    "TOOLTIP_BG": "#1F2937",
+    "TOOLTIP_TEXT": "#FFFFFF",
+    "TOOLTIP_BORDER": "#1F2937",
     "SELECTION": "#BFD6FF",
     "SELECTION_TEXT": "#1F2937",
     "RADIO_BORDER": "#C7CFDB",
@@ -625,6 +631,9 @@ LOW_PROFILE_PALETTE: dict[str, str] = {
     "ACCENT_BG": "#1E3A5F",
     "ON_ACCENT": "#FFFFFF",
     "ON_ACCENT_DISABLED": "#A7B8C8",
+    "TOOLTIP_BG": "#2D2D30",
+    "TOOLTIP_TEXT": "#E8E8E8",
+    "TOOLTIP_BORDER": "#4F4F4F",
     "SELECTION": "#264F78",
     "SELECTION_TEXT": "#FFFFFF",
     "RADIO_BORDER": "#6E7681",
