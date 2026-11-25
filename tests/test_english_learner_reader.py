@@ -614,7 +614,7 @@ def test_reader_has_no_dedicated_feedback_or_back_translation_buttons(db: Databa
     assert not hasattr(page, "_back_translation_button")
 
 
-def test_reader_regenerate_uses_level_adjust_when_text_present(
+def test_reader_regenerate_with_topic_keeps_original_request_logic(
     db: Database, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     get_app()
@@ -635,16 +635,54 @@ def test_reader_regenerate_uses_level_adjust_when_text_present(
         def exec(self):
             return QDialog.DialogCode.Accepted
 
+        def mode(self) -> str:
+            return "regenerate"
+
         def request_text(self) -> str:
-            return "生词太多，读得吃力"
+            return "写一篇关于深海生物的文章"
 
     monkeypatch.setattr("english_learner.gui.pages.reader.RegenerateDialog", StubDialog)
-    calls: list[str] = []
-    monkeypatch.setattr(page, "_start_level_adjust", calls.append)
+    calls: list[dict] = []
+    monkeypatch.setattr(page, "_start_generation", lambda **kwargs: calls.append(kwargs))
 
     page._on_regenerate_clicked()
 
-    assert calls == ["生词太多，读得吃力"]
+    assert calls == [{"regenerate": True, "user_request": "写一篇关于深海生物的文章"}]
+
+
+def test_reader_regenerate_adjust_mode_opens_level_feedback(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    get_app()
+    db.articles.insert(make_article())
+    context = AppContext(
+        AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
+        ConfigStore(Path("unused.json")),
+        db,
+    )
+    page = ReaderPage(context)
+    page.on_activated()
+
+    class StubDialog:
+        def __init__(self, parent=None) -> None:
+            self.parent = parent
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def mode(self) -> str:
+            return "adjust"
+
+        def request_text(self) -> str:
+            return ""
+
+    monkeypatch.setattr("english_learner.gui.pages.reader.RegenerateDialog", StubDialog)
+    calls: list[bool] = []
+    monkeypatch.setattr(page, "_open_level_feedback", lambda: calls.append(True))
+
+    page._on_regenerate_clicked()
+
+    assert calls == [True]
 
 
 def test_reader_regenerate_without_text_keeps_level(
@@ -667,6 +705,9 @@ def test_reader_regenerate_without_text_keeps_level(
 
         def exec(self):
             return QDialog.DialogCode.Accepted
+
+        def mode(self) -> str:
+            return "regenerate"
 
         def request_text(self) -> str:
             return ""
@@ -729,9 +770,14 @@ def test_regenerate_dialog_returns_input_or_empty() -> None:
     get_app()
     dialog = RegenerateDialog()
     assert dialog.request_text() == ""
+    assert dialog.mode() == "regenerate"
 
     dialog._request_edit.setPlainText("  写一篇关于深海生物的文章  ")
     assert dialog.request_text() == "写一篇关于深海生物的文章"
+
+    dialog._on_adjust_clicked()
+    assert dialog.mode() == "adjust"
+    assert dialog.result() == QDialog.DialogCode.Accepted
 
 
 def test_word_panel_shows_original_form_and_mnemonic() -> None:

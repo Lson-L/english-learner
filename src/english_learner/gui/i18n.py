@@ -43,6 +43,7 @@ BUTTON_EN: dict[str, str] = {
     "回译练习": "Back-translation",
     "换一篇": "New article",
     "调整难度": "Adjust level",
+    "调整难度…": "Adjust level…",
     "取消": "Cancel",
     "取消生成": "Cancel",
     "取消评分": "Cancel",

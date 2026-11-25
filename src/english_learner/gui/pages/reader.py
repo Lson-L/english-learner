@@ -12,9 +12,8 @@
 - 补全（`_enrich_worker`）也是独立槽位：加入生词本后，若该词只有预生成简释，
   在后台按完整查词 prompt 补一次释义（M6.3），完成后原地刷新词条与卡片；
   同样不阻塞阅读，失败静默；
-- “换一篇”先弹窗收集主题或阅读感受（可留空）；有输入时先按这句话重新评估
-  等级，再生成新文章；留空则保持当前等级随机换一篇。确认后会连带删除当天
-  正文里的高亮。
+- “换一篇”先弹窗收集主题（可留空）；弹窗里的「调整难度」继续走原来的
+  阅读反馈调级流程。确认后会连带删除当天正文里的高亮。
 """
 
 from __future__ import annotations
@@ -36,9 +35,9 @@ from PySide6.QtWidgets import (
 from ...models.entities import Article, Highlight, Word, now_iso, today_str
 from ...services.app_context import AppContext
 from ...services.dictionary_service import LookupResult, normalize_lemma
-from ...services.level_feedback_service import LevelAdjustment
 from ...services.readability import ReadabilityMetrics, threshold_warnings
 from ...services.reading_quiz_service import UPGRADE_EVIDENCE_REQUIRED
+from ..level_feedback_dialog import LevelFeedbackDialog
 from ..reading_quiz_dialog import ReadingQuizDialog
 from ..regenerate_dialog import RegenerateDialog
 from ..widgets import ArticleView, WordPanel, busy_progress_bar
@@ -261,7 +260,7 @@ class ReaderPage(QWidget):
 
     def _on_prefetch_finished(self) -> None:
         self._prefetch_worker = None
-        # 预取期间换了文章（换一篇，含按说明调级）：为当前文章补一次预取。
+        # 预取期间换了文章（换一篇 / 调整难度）：为当前文章补一次预取。
         if self._article is not None and self._article.id != self._prefetched_article_id:
             self._start_prefetch(self._article)
 
@@ -352,48 +351,13 @@ class ReaderPage(QWidget):
         self._worker = worker
         worker.start()
 
-    def _start_level_adjust(self, feedback: str) -> None:
-        """“换一篇”里写了说明：先按说明重新评估等级，再重写今日文章。"""
-        if self._article is None:
-            return
-        if self._worker is not None and self._worker.isRunning():
-            return
-        self._hide_word_card()
-        if self._context.profile() is None:
-            set_status(
-                self._status,
-                "请先在「今日」页完成水平测评，再按说明调整难度。",
-                "hint",
-            )
-            return
-
-        service = self._context.level_feedback_service()
-        self._busy_phase = "feedback"
-        set_status(
-            self._status,
-            "正在根据你的说明重新评估等级并生成新文章，可能需要 20~40 秒…",
-            "loading",
-        )
-        self._set_busy(True)
-        worker = TaskWorker(lambda: service.adjust(feedback))
-        worker.succeeded.connect(self._on_level_adjusted)
-        worker.failed.connect(self._on_article_failed)
-        worker.cancelled.connect(self._on_worker_finished)
-        worker.finished.connect(self._on_worker_finished)
-        self._worker = worker
-        worker.start()
-
     def _on_generate_clicked(self) -> None:
         # 用户主动重试：清掉失败标记，允许本次会话继续自动生成。
         self._generation_failed = False
         self._start_generation(regenerate=False)
 
     def _on_regenerate_clicked(self) -> None:
-        """弹窗收集主题或阅读感受（可留空）。
-
-        有输入：先按这句话重新评估等级，再重写文章（原「调整难度」流程）；
-        留空：保持当前等级，只换一个选题。
-        """
+        """弹窗收集主题（可留空）；选择「调整难度」时转走原来的调级流程。"""
         if self._article is None:
             return
         if self._worker is not None and self._worker.isRunning():
@@ -402,11 +366,41 @@ class ReaderPage(QWidget):
         dialog = RegenerateDialog(parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        feedback = dialog.request_text()
-        if feedback:
-            self._start_level_adjust(feedback)
+        if dialog.mode() == "adjust":
+            self._open_level_feedback()
+            return
+        self._start_generation(regenerate=True, user_request=dialog.request_text())
+
+    def _open_level_feedback(self) -> None:
+        """原来的「调整难度」流程：写阅读感受 → 重新定级并换一篇。"""
+        if self._article is None:
+            return
+        if self._worker is not None and self._worker.isRunning():
+            return
+        if self._context.profile() is None:
+            set_status(self._status, "请先在「今日」页完成水平测评，再调整难度。", "hint")
+            return
+
+        self._hide_word_card()
+        dialog = LevelFeedbackDialog(self._context, self._article, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.result_outcome is None:
+            return
+
+        outcome = dialog.result_outcome
+        self._load_article(outcome.article)
+        if outcome.level_changed:
+            set_status(
+                self._status,
+                f"已按你的反馈把等级从 {outcome.previous_level} 调整为 "
+                f"{outcome.profile.cefr_level}，并重新生成了文章。",
+                "success",
+            )
         else:
-            self._start_generation(regenerate=True, user_request="")
+            set_status(
+                self._status,
+                f"已按你的反馈重写文章，等级保持 {outcome.profile.cefr_level}。",
+                "success",
+            )
 
     def _on_quiz_clicked(self) -> None:
         """阅读完成 → 出题 / 查看结果。AI 调用都在弹窗自己的 worker 里。"""
@@ -453,26 +447,6 @@ class ReaderPage(QWidget):
                 f"等级保持 {quiz.result_level or self._context.level()}。"
             )
         set_status(self._status, text, "success")
-
-    def _on_level_adjusted(self, result: object) -> None:
-        """按“换一篇”里的说明完成调级 + 重写后的回填。"""
-        if not isinstance(result, LevelAdjustment):
-            set_status(self._status, "调整完成，但返回了意外数据。", "error")
-            return
-        self._load_article(result.article)
-        if result.level_changed:
-            set_status(
-                self._status,
-                f"已按你的说明把等级从 {result.previous_level} 调整为 "
-                f"{result.profile.cefr_level}，并重新生成了文章。",
-                "success",
-            )
-        else:
-            set_status(
-                self._status,
-                f"已按你的说明重写文章，等级保持 {result.profile.cefr_level}。",
-                "success",
-            )
 
     def _on_article_ready(self, result: object) -> None:
         if not isinstance(result, Article):
@@ -660,13 +634,6 @@ class ReaderPage(QWidget):
             self._current_word_id = None
             self._panel.hide()
             set_status(self._status, "已取消查词。", "hint")
-            return
-        if phase == "feedback":
-            set_status(
-                self._status,
-                "已取消重新评估，当前等级与文章保持不变。",
-                "hint",
-            )
             return
         if self._article is None:
             # 没有旧文章时，取消后必须把“重试生成”亮出来，否则用户没有入口。

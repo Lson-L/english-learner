@@ -242,25 +242,18 @@ class LevelFeedbackService:
         hint = load_hint(self._hint_provider)
         within_level = hint.within_level
         lowered = text.lower()
-        is_difficulty_feedback = any(
-            marker in lowered for marker in (*_DIFFICULT_MARKERS, *_EASY_MARKERS)
-        )
         if within_level == "high" and any(marker in lowered for marker in _DIFFICULT_MARKERS):
             within_level = ""
         if within_level == "low" and any(marker in lowered for marker in _EASY_MARKERS):
             within_level = ""
 
-        # “换一篇”的输入框现在同时承担主题和阅读感受：
-        # - 明确说太难/太简单：作为 learner_feedback 控制生词密度与句长；
-        # - 其他内容（如“写一篇关于深海生物的文章”）：作为本次选题要求，
-        #   不强行套用“简化文章”的反馈指令。
         # 先生成新文章（软约束目标词），成功后再替换；失败时旧文章原样保留。
         draft = self._article_service.generate_article(
             result.cefr,
             target_words,
             article.topic,
             strict_targets=False,
-            learner_feedback=text if is_difficulty_feedback else "",
+            learner_feedback=text,
             within_level=within_level,
             hint_reason=hint.reason if within_level else "",
             learner_focus="、".join(
@@ -268,8 +261,6 @@ class LevelFeedbackService:
             ),
             # 明确避开刚读完的这篇，否则模型容易换个说法重写同一篇。
             avoid_titles=[article.title],
-            user_request="" if is_difficulty_feedback else text,
-            current_article=None if is_difficulty_feedback else article,
         )
         new_article = self._article_service.replace_today(draft, today=day)
 

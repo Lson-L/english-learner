@@ -1598,27 +1598,24 @@ def lookup(word: str, sentence: str, article_id: int, level: str) -> WordDefinit
 
 ## 阅读页按钮精简与「换一篇」合并调级（2026-11-25）
 
-**目标**：回译练习基本不用，阅读页不再保留独立入口；「调整难度」也不适合单独
-占一个按钮，合并进「换一篇」，让用户在一个输入框里同时表达“想读什么”和
-“这篇读起来怎么样”。
+**目标**：回译练习基本不用，阅读页不再保留独立入口；「调整难度」不再单独占
+阅读页按钮，但保留原来的交互逻辑，入口放进「换一篇」弹窗。
 
 **改动**：
 
 - 阅读页移除「回译练习」「调整难度」两个按钮及其启用/禁用状态机；
   回译服务、弹窗与历史数据保留，阅读页不再有入口；
-- 「换一篇」弹窗改文案：输入框可以写主题/方向，也可以写“太难了/太简单”；
-  有输入时阅读页调用 `LevelFeedbackService.adjust()` 先重新定级再重写文章，
-  留空则走原来的 `ArticleService.regenerate_today()`，保持当前等级随机换选题；
-- `LevelFeedbackService` 区分输入类型：带“太难/太简单”等方向词时作为
-  `learner_feedback` 控制生词密度与句长；其他内容（如“写一篇深海生物”）
-  作为 `user_request`，并附带当前文章帮助理解指代，避免把主题要求误当成
-  “请简化文章”；
-- 取消逻辑新增 `feedback` 阶段：取消后提示“当前等级与文章保持不变”。
+- 「换一篇」弹窗底部新增「调整难度…」链接按钮：点击后关闭换一篇弹窗，
+  由阅读页打开原来的 `LevelFeedbackDialog`，继续走“快捷感受 + 自由文本 →
+  重新定级 → 重写文章”的原流程；
+- 「换一篇」输入框恢复原来的主题语义：只收集主题/方向，留空由 AI 随机选题，
+  不再自动触发调级；`LevelFeedbackService` 也恢复原逻辑（输入即阅读反馈）；
+- 弹窗通过 `mode()` 区分 `regenerate` / `adjust`，阅读页据此走
+  `ArticleService.regenerate_today()` 或 `LevelFeedbackDialog`。
 
 **测试**：
 
-- 阅读页测试改为断言两个旧按钮不存在，并覆盖“有输入走调级、空输入只换选题”
-  两条分支；
-- 反馈服务新增“主题要求 → user_request”“难度说明 → learner_feedback”
-  两个 prompt 断言；
-- 全量 **678 passed**，`ruff check` 与 `ruff format --check` 通过。
+- 阅读页测试断言两个旧按钮不存在，并覆盖“主题输入 → 普通换一篇”
+  “选择调整难度 → 打开原反馈弹窗”“空输入 → 随机换选题”三条分支；
+- `RegenerateDialog` 测试补充默认模式与点击调整难度后的 `mode()/result()`；
+- 相关测试与 `ruff check` / `ruff format --check` 通过。
