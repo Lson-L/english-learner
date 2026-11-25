@@ -74,6 +74,28 @@ uv run ruff format src/english_learner tests
     记录统一在 `AIClient` 内写 `ai_calls`，业务层不要自己插表。表里只存
     token/耗时/错误等元数据，**禁止**写入 prompt 或模型回复全文。
 
+## 测试策略（默认不跑全量）
+
+**不要每次改动都跑全量 `pytest`**，默认只跑与本次改动相关的测试文件；全量很慢，
+大部分小改动用不上。
+
+- **纯文档 / 文案 / 颜色 / QSS 调整**：可以只跑 `ruff check` + `ruff format --check`，
+  不必跑 `pytest`；
+- **单模块逻辑改动**：只跑对应测试，例如：
+  - 阅读页 / 换一篇 → `tests/test_english_learner_reader.py`
+  - 主题 / 图表配色 → `tests/test_english_learner_theme.py`
+  - 统计页 → `tests/test_english_learner_stats_page.py` +
+    `tests/test_english_learner_stats_overview.py`
+  - 阅读检测 / 调级 → `tests/test_english_learner_reading_quiz.py`、
+    `tests/test_english_learner_feedback.py`、`tests/test_english_learner_level_estimator.py`
+  - AI 客户端 / 用量 → `tests/test_english_learner_ai_client.py`、
+    `tests/test_english_learner_ai_usage.py`
+- **才需要跑全量**：用户明确要求；改动涉及数据库 schema / 迁移、AI 协议、
+  `AppContext` 组装、页面导航索引、全局主题模板、导出 / 导入等跨模块契约；
+  或准备发版前。
+- 不确定该跑哪些时，先跑最相关的 1~2 个测试文件；**不要默认退回全量**。
+- 汇报和提交信息里**只写实际跑过的测试**：没跑全量就不要写“全量 N passed”。
+
 ## 环境注意
 
 - Python 3.13，Windows 10。
@@ -81,7 +103,8 @@ uv run ruff format src/english_learner tests
   用 `import httpx2`。
 - offscreen GUI 测试（`QT_QPA_PLATFORM=offscreen`）没有字体库，截图里文字是方框，
   属于环境限制；它只用于验证控件能构造。
-- 用户未明确要求时，不要执行耗时的打包/构建；Python 改动以 `pytest` + `ruff` 为准。
+- 用户未明确要求时，不要执行耗时的打包/构建；Python 改动按上面的测试策略执行，
+  静态检查用 `ruff`。
 
 ## 当前状态
 
