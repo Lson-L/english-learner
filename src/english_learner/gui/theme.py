@@ -753,14 +753,14 @@ LOW_PROFILE_PALETTE: dict[str, str] = {
     "CHART_SEQ_1": "#1C5CAB",
     "CHART_SEQ_2": "#3987E5",
     "CHART_SEQ_3": "#86B6EF",
-    # 热力图：0 档不填色（控件只描一圈网格线），1~4 档从浅到深。
-    # 这里把 0 档设成卡片底色，占位颜色与“未填色”的语义一致；
-    # HeatmapCalendar / HeatLegend 在低调主题下不会真的用它填充。
+    # 热力图：0 档不填色（控件只描一圈网格线），1~4 档从深到浅。
+    # 深色卡片上“越亮 = 越多”更符合视觉层级：高活动格子从背景里跳出来。
+    # 0 档设成卡片底色只是占位；HeatmapCalendar / HeatLegend 不会真的填充它。
     "CHART_HEAT_0": "#252526",
-    "CHART_HEAT_1": "#9EC5F4",
-    "CHART_HEAT_2": "#6DA7EC",
-    "CHART_HEAT_3": "#2A78D6",
-    "CHART_HEAT_4": "#184F95",
+    "CHART_HEAT_1": "#1C5CAB",
+    "CHART_HEAT_2": "#256ABF",
+    "CHART_HEAT_3": "#3987E5",
+    "CHART_HEAT_4": "#86B6EF",
     "CHART_GRID": "#3C3C3C",
     "CHART_AXIS": "#898781",
     "SIDEBAR_BG": "#181818",
