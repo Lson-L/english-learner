@@ -379,3 +379,31 @@ def test_easy_feedback_drops_low_hint(db: Database, profile: Profile, article: A
 
     prompt = fake.messages[1][1]["content"]
     assert "内偏易" not in prompt
+
+
+def test_topic_request_is_sent_as_user_request(
+    db: Database, profile: Profile, article: Article
+) -> None:
+    """“换一篇”输入框里的主题要求不能被当成“请简化文章”的阅读反馈。"""
+    fake = FakeCompleter(reassess_payload(cefr="B1"), article_payload("B1"))
+    service = make_service(db, fake)
+
+    service.adjust("写一篇关于深海生物的文章", today=TODAY)
+
+    prompt = fake.messages[1][1]["content"]
+    assert "学习者这次的要求：写一篇关于深海生物的文章" in prompt
+    assert "学习者对上一篇的反馈" not in prompt
+
+
+def test_difficulty_note_is_sent_as_learner_feedback(
+    db: Database, profile: Profile, article: Article
+) -> None:
+    """带“太难/太简单”的说明继续走阅读反馈，触发简化/加难指令。"""
+    fake = FakeCompleter(reassess_payload(cefr="A2"), article_payload("A2"))
+    service = make_service(db, fake)
+
+    service.adjust("生词太多，读得吃力", today=TODAY)
+
+    prompt = fake.messages[1][1]["content"]
+    assert "学习者对上一篇的反馈是“生词太多，读得吃力”" in prompt
+    assert "学习者这次的要求" not in prompt

@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
 from PySide6.QtCore import QRect  # noqa: E402
-from PySide6.QtWidgets import QApplication, QSplitter  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog, QSplitter  # noqa: E402
 
 from english_learner.gui.pages.reader import ReaderPage  # noqa: E402
 from english_learner.gui.regenerate_dialog import RegenerateDialog  # noqa: E402
@@ -597,7 +597,8 @@ def test_reader_does_not_auto_generate_again_after_failure(
     assert page._generation_failed is False
 
 
-def test_reader_feedback_button_needs_profile_and_article(db: Database) -> None:
+def test_reader_has_no_dedicated_feedback_or_back_translation_buttons(db: Database) -> None:
+    """回译与调整难度不再占用阅读页按钮；调级合并进「换一篇」。"""
     get_app()
     db.articles.insert(make_article())
     context = AppContext(
@@ -608,28 +609,75 @@ def test_reader_feedback_button_needs_profile_and_article(db: Database) -> None:
 
     page = ReaderPage(context)
     page.on_activated()
-    assert page._feedback_button.isEnabled() is False
 
+    assert not hasattr(page, "_feedback_button")
+    assert not hasattr(page, "_back_translation_button")
+
+
+def test_reader_regenerate_uses_level_adjust_when_text_present(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    get_app()
+    db.articles.insert(make_article())
     db.profiles.save(Profile(cefr_level="B1"))
-    page.refresh()
-    assert page._feedback_button.isEnabled() is True
-
-
-def test_reader_back_translation_button_needs_only_article(db: Database) -> None:
-    """回译练习只依赖当天文章，不需要先完成测评。"""
-    get_app()
-    db.articles.insert(make_article())
     context = AppContext(
         AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
         ConfigStore(Path("unused.json")),
         db,
     )
-
     page = ReaderPage(context)
     page.on_activated()
 
-    assert page._back_translation_button.isEnabled() is True
-    assert page._back_translation_button.text() == "回译练习"
+    class StubDialog:
+        def __init__(self, parent=None) -> None:
+            self.parent = parent
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def request_text(self) -> str:
+            return "生词太多，读得吃力"
+
+    monkeypatch.setattr("english_learner.gui.pages.reader.RegenerateDialog", StubDialog)
+    calls: list[str] = []
+    monkeypatch.setattr(page, "_start_level_adjust", calls.append)
+
+    page._on_regenerate_clicked()
+
+    assert calls == ["生词太多，读得吃力"]
+
+
+def test_reader_regenerate_without_text_keeps_level(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    get_app()
+    db.articles.insert(make_article())
+    db.profiles.save(Profile(cefr_level="B1"))
+    context = AppContext(
+        AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
+        ConfigStore(Path("unused.json")),
+        db,
+    )
+    page = ReaderPage(context)
+    page.on_activated()
+
+    class StubDialog:
+        def __init__(self, parent=None) -> None:
+            self.parent = parent
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def request_text(self) -> str:
+            return ""
+
+    monkeypatch.setattr("english_learner.gui.pages.reader.RegenerateDialog", StubDialog)
+    calls: list[dict] = []
+    monkeypatch.setattr(page, "_start_generation", lambda **kwargs: calls.append(kwargs))
+
+    page._on_regenerate_clicked()
+
+    assert calls == [{"regenerate": True, "user_request": ""}]
 
 
 def test_reader_quiz_button_reflects_completion(db: Database) -> None:

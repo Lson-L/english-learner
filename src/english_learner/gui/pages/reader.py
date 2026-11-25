@@ -12,7 +12,9 @@
 - 补全（`_enrich_worker`）也是独立槽位：加入生词本后，若该词只有预生成简释，
   在后台按完整查词 prompt 补一次释义（M6.3），完成后原地刷新词条与卡片；
   同样不阻塞阅读，失败静默；
-- “换一篇”先弹窗收集方向（可留空），确认后会连带删除当天正文里的高亮。
+- “换一篇”先弹窗收集主题或阅读感受（可留空）；有输入时先按这句话重新评估
+  等级，再生成新文章；留空则保持当前等级随机换一篇。确认后会连带删除当天
+  正文里的高亮。
 """
 
 from __future__ import annotations
@@ -33,12 +35,10 @@ from PySide6.QtWidgets import (
 
 from ...models.entities import Article, Highlight, Word, now_iso, today_str
 from ...services.app_context import AppContext
-from ...services.back_translation import SCORE_PER_SENTENCE
 from ...services.dictionary_service import LookupResult, normalize_lemma
+from ...services.level_feedback_service import LevelAdjustment
 from ...services.readability import ReadabilityMetrics, threshold_warnings
 from ...services.reading_quiz_service import UPGRADE_EVIDENCE_REQUIRED
-from ..back_translation_dialog import BackTranslationDialog
-from ..level_feedback_dialog import LevelFeedbackDialog
 from ..reading_quiz_dialog import ReadingQuizDialog
 from ..regenerate_dialog import RegenerateDialog
 from ..widgets import ArticleView, WordPanel, busy_progress_bar
@@ -100,25 +100,13 @@ class ReaderPage(QWidget):
         self._quiz_button.clicked.connect(self._on_quiz_clicked)
         header_row.addWidget(self._quiz_button, 0, Qt.AlignmentFlag.AlignBottom)
 
-        self._back_translation_button = QPushButton("回译练习")
-        self._back_translation_button.setObjectName("secondaryButton")
-        self._back_translation_button.setToolTip(
-            "从文章里抽 3 句翻成中文，你写回英文；AI 给最小修改与原因（不影响等级）"
-        )
-        self._back_translation_button.clicked.connect(self._on_back_translation_clicked)
-        header_row.addWidget(self._back_translation_button, 0, Qt.AlignmentFlag.AlignBottom)
-
         self._regenerate_button = QPushButton("换一篇")
         self._regenerate_button.setObjectName("secondaryButton")
-        self._regenerate_button.setToolTip("写下想读的内容再换一篇；留空则由 AI 自己选题")
+        self._regenerate_button.setToolTip(
+            "写想读的主题，或直接说这篇太难/太简单；有输入时会先重新评估等级"
+        )
         self._regenerate_button.clicked.connect(self._on_regenerate_clicked)
         header_row.addWidget(self._regenerate_button, 0, Qt.AlignmentFlag.AlignBottom)
-
-        self._feedback_button = QPushButton("调整难度")
-        self._feedback_button.setObjectName("secondaryButton")
-        self._feedback_button.setToolTip("读完写一句感受，AI 重新定级并换一篇更合适的文章")
-        self._feedback_button.clicked.connect(self._on_feedback_clicked)
-        header_row.addWidget(self._feedback_button, 0, Qt.AlignmentFlag.AlignBottom)
         layout.addLayout(header_row)
 
         self._title_label = QLabel("今日文章")
@@ -167,9 +155,7 @@ class ReaderPage(QWidget):
 
         self._generate_button.setVisible(False)
         self._quiz_button.setEnabled(False)
-        self._back_translation_button.setEnabled(False)
         self._regenerate_button.setEnabled(False)
-        self._feedback_button.setEnabled(False)
         set_status(self._status, "进入本页会自动准备今天的文章。", "hint")
 
     # ------------------------------------------------------------------ 字体
@@ -200,8 +186,6 @@ class ReaderPage(QWidget):
             self._meta_label.setText("")
             self._quiz_button.setText("阅读完成")
             self._quiz_button.setEnabled(False)
-            self._back_translation_button.setEnabled(False)
-            self._feedback_button.setEnabled(False)
             if self._generation_failed:
                 # 自动生成失败过：只把按钮亮出来，等用户主动重试。
                 # 否则每次切回阅读页都会再发一轮请求（超时时一轮要等好几分钟）。
@@ -239,9 +223,7 @@ class ReaderPage(QWidget):
         self._meta_label.setText(" · ".join(meta_parts))
 
         self._generate_button.setVisible(False)
-        self._back_translation_button.setEnabled(True)
         self._regenerate_button.setEnabled(True)
-        self._feedback_button.setEnabled(self._context.profile() is not None)
         self._refresh_quiz_button(article)
         set_status(self._status, "双击单词查看释义，加入生词本即自动高亮。", "hint")
 
@@ -279,7 +261,7 @@ class ReaderPage(QWidget):
 
     def _on_prefetch_finished(self) -> None:
         self._prefetch_worker = None
-        # 预取期间换了文章（换一篇 / 调整难度）：为当前文章补一次预取。
+        # 预取期间换了文章（换一篇，含按说明调级）：为当前文章补一次预取。
         if self._article is not None and self._article.id != self._prefetched_article_id:
             self._start_prefetch(self._article)
 
@@ -370,13 +352,48 @@ class ReaderPage(QWidget):
         self._worker = worker
         worker.start()
 
+    def _start_level_adjust(self, feedback: str) -> None:
+        """“换一篇”里写了说明：先按说明重新评估等级，再重写今日文章。"""
+        if self._article is None:
+            return
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self._hide_word_card()
+        if self._context.profile() is None:
+            set_status(
+                self._status,
+                "请先在「今日」页完成水平测评，再按说明调整难度。",
+                "hint",
+            )
+            return
+
+        service = self._context.level_feedback_service()
+        self._busy_phase = "feedback"
+        set_status(
+            self._status,
+            "正在根据你的说明重新评估等级并生成新文章，可能需要 20~40 秒…",
+            "loading",
+        )
+        self._set_busy(True)
+        worker = TaskWorker(lambda: service.adjust(feedback))
+        worker.succeeded.connect(self._on_level_adjusted)
+        worker.failed.connect(self._on_article_failed)
+        worker.cancelled.connect(self._on_worker_finished)
+        worker.finished.connect(self._on_worker_finished)
+        self._worker = worker
+        worker.start()
+
     def _on_generate_clicked(self) -> None:
         # 用户主动重试：清掉失败标记，允许本次会话继续自动生成。
         self._generation_failed = False
         self._start_generation(regenerate=False)
 
     def _on_regenerate_clicked(self) -> None:
-        """弹窗收集方向（可留空），再交给后台任务换一篇。"""
+        """弹窗收集主题或阅读感受（可留空）。
+
+        有输入：先按这句话重新评估等级，再重写文章（原「调整难度」流程）；
+        留空：保持当前等级，只换一个选题。
+        """
         if self._article is None:
             return
         if self._worker is not None and self._worker.isRunning():
@@ -385,7 +402,11 @@ class ReaderPage(QWidget):
         dialog = RegenerateDialog(parent=self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        self._start_generation(regenerate=True, user_request=dialog.request_text())
+        feedback = dialog.request_text()
+        if feedback:
+            self._start_level_adjust(feedback)
+        else:
+            self._start_generation(regenerate=True, user_request="")
 
     def _on_quiz_clicked(self) -> None:
         """阅读完成 → 出题 / 查看结果。AI 调用都在弹窗自己的 worker 里。"""
@@ -433,57 +454,23 @@ class ReaderPage(QWidget):
             )
         set_status(self._status, text, "success")
 
-    def _on_back_translation_clicked(self) -> None:
-        """回译练习：看中文写英文，AI 只做练习反馈，不影响等级与复习。"""
-        if self._article is None or self._article.id is None:
+    def _on_level_adjusted(self, result: object) -> None:
+        """按“换一篇”里的说明完成调级 + 重写后的回填。"""
+        if not isinstance(result, LevelAdjustment):
+            set_status(self._status, "调整完成，但返回了意外数据。", "error")
             return
-        if self._worker is not None and self._worker.isRunning():
-            return
-
-        self._hide_word_card()
-        dialog = BackTranslationDialog(self._context, self._article, parent=self)
-        dialog.exec()
-
-        attempts = dialog.result_attempts
-        if not attempts:
-            return
-        total = sum(item.score for item in attempts)
-        maximum = len(attempts) * SCORE_PER_SENTENCE
-        correct = sum(1 for item in attempts if item.score >= SCORE_PER_SENTENCE)
-        set_status(
-            self._status,
-            f"回译练习完成：{total}/{maximum} 分，{correct} 句完全正确；修改与原因见练习弹窗。",
-            "success",
-        )
-
-    def _on_feedback_clicked(self) -> None:
-        """写下阅读感受 → AI 重新定级并换一篇。"""
-        if self._article is None:
-            return
-        if self._worker is not None and self._worker.isRunning():
-            return
-        if self._context.profile() is None:
-            set_status(self._status, "请先在「今日」页完成水平测评，再调整难度。", "hint")
-            return
-
-        self._hide_word_card()
-        dialog = LevelFeedbackDialog(self._context, self._article, parent=self)
-        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.result_outcome is None:
-            return
-
-        outcome = dialog.result_outcome
-        self._load_article(outcome.article)
-        if outcome.level_changed:
+        self._load_article(result.article)
+        if result.level_changed:
             set_status(
                 self._status,
-                f"已按你的反馈把等级从 {outcome.previous_level} 调整为 "
-                f"{outcome.profile.cefr_level}，并重新生成了文章。",
+                f"已按你的说明把等级从 {result.previous_level} 调整为 "
+                f"{result.profile.cefr_level}，并重新生成了文章。",
                 "success",
             )
         else:
             set_status(
                 self._status,
-                f"已按你的反馈重写文章，等级保持 {outcome.profile.cefr_level}。",
+                f"已按你的说明重写文章，等级保持 {result.profile.cefr_level}。",
                 "success",
             )
 
@@ -648,11 +635,7 @@ class ReaderPage(QWidget):
         self._quiz_button.setEnabled(
             (not busy) and has_article and self._context.profile() is not None
         )
-        self._back_translation_button.setEnabled((not busy) and has_article)
         self._regenerate_button.setEnabled((not busy) and has_article)
-        self._feedback_button.setEnabled(
-            (not busy) and has_article and self._context.profile() is not None
-        )
         self._busy_progress.setVisible(busy)
         self._cancel_button.setVisible(busy)
         self._cancel_button.setEnabled(busy)
@@ -677,6 +660,13 @@ class ReaderPage(QWidget):
             self._current_word_id = None
             self._panel.hide()
             set_status(self._status, "已取消查词。", "hint")
+            return
+        if phase == "feedback":
+            set_status(
+                self._status,
+                "已取消重新评估，当前等级与文章保持不变。",
+                "hint",
+            )
             return
         if self._article is None:
             # 没有旧文章时，取消后必须把“重试生成”亮出来，否则用户没有入口。

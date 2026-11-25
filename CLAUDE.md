@@ -109,6 +109,12 @@ uv run ruff format src/english_learner tests
 - **M6.5（2026-11-20）**：档内难度浮动。`difficulty_hint()` 推导 low / mid / high
   并注入文章 prompt（空值 / mid 与旧版逐字节一致），hint 与理由写入
   `articles.metrics_json`；可读性重试会撤掉 high，用户阅读反馈优先于 hint。
+- **阅读页交互（2026-11-25）**：移除「回译练习」与「调整难度」按钮；调级合并进
+  「换一篇」。弹窗输入非空时走 `LevelFeedbackService.adjust()`（重新定级 + 重写），
+  留空则只按当前等级换选题。`LevelFeedbackService` 会区分“太难/太简单”类反馈与
+  主题要求：前者作为 `learner_feedback`，后者作为 `user_request`，避免把
+  “写一篇深海生物”误当成“请简化文章”。回译服务与弹窗代码保留以兼容历史数据，
+  但阅读页没有入口。
 - **学习统计页（2026-11-24）**：侧边栏新增「统计」页（页面栈索引 4，
   设置页顺延到 5）。`services/stats_overview.py` 纯本地聚合
   `daily_stats / words / reading_quizzes`，产出累计数字、26 周打卡热力图、

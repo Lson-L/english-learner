@@ -1580,7 +1580,7 @@ def lookup(word: str, sentence: str, article_id: int, level: str) -> WordDefinit
 - 新增 `test_english_learner_stats_overview.py`（纯服务口径）与
   `test_english_learner_stats_page.py`（offscreen 页面 / 空态 / 主题切换 /
   失败兜底）；
-- 全量 **675 passed**（`uv run pytest`），`ruff check` 与
+- 全量 **678 passed**（`uv run pytest`），`ruff check` 与
   `ruff format --check` 通过；
 - 图表色用 dataviz 校验脚本在浅色 `#FFFFFF` 与深色 `#252526` 卡片底上
   分别验证分类色与 ordinal 阶梯，无 FAIL；浅色下 aqua / yellow 的
@@ -1594,4 +1594,31 @@ def lookup(word: str, sentence: str, article_id: int, level: str) -> WordDefinit
 单元格 13→18px、间距 3→4px；低调主题 0 档改为不填色（只保留网格描边），
 1~4 档按“从深到浅”排列（`#1C5CAB / #256ABF / #3987E5 / #86B6EF`），
 深色卡片上越亮表示越多。新增“26 周宽度”与“暗色空白格描边对比度 ≥1.25:1”
-两个回归断言，全量 675 passed。
+两个回归断言，全量 678 passed。
+
+## 阅读页按钮精简与「换一篇」合并调级（2026-11-25）
+
+**目标**：回译练习基本不用，阅读页不再保留独立入口；「调整难度」也不适合单独
+占一个按钮，合并进「换一篇」，让用户在一个输入框里同时表达“想读什么”和
+“这篇读起来怎么样”。
+
+**改动**：
+
+- 阅读页移除「回译练习」「调整难度」两个按钮及其启用/禁用状态机；
+  回译服务、弹窗与历史数据保留，阅读页不再有入口；
+- 「换一篇」弹窗改文案：输入框可以写主题/方向，也可以写“太难了/太简单”；
+  有输入时阅读页调用 `LevelFeedbackService.adjust()` 先重新定级再重写文章，
+  留空则走原来的 `ArticleService.regenerate_today()`，保持当前等级随机换选题；
+- `LevelFeedbackService` 区分输入类型：带“太难/太简单”等方向词时作为
+  `learner_feedback` 控制生词密度与句长；其他内容（如“写一篇深海生物”）
+  作为 `user_request`，并附带当前文章帮助理解指代，避免把主题要求误当成
+  “请简化文章”；
+- 取消逻辑新增 `feedback` 阶段：取消后提示“当前等级与文章保持不变”。
+
+**测试**：
+
+- 阅读页测试改为断言两个旧按钮不存在，并覆盖“有输入走调级、空输入只换选题”
+  两条分支；
+- 反馈服务新增“主题要求 → user_request”“难度说明 → learner_feedback”
+  两个 prompt 断言；
+- 全量 **678 passed**，`ruff check` 与 `ruff format --check` 通过。

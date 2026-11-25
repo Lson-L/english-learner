@@ -79,13 +79,13 @@ src/english_learner/
     └── pages/
         ├── common.py           Card / PageHeader / StatCard(可刷新) / set_status
         ├── today.py            今日页：连续天数/到期复习/累计生词/文章状态/测评入口
-        ├── reader.py           阅读页：正文全宽 + 悬浮释义卡、换一篇、调整难度、阅读完成、回译练习
+        ├── reader.py           阅读页：正文全宽 + 悬浮释义卡、换一篇（含按输入调级）、阅读完成
         ├── vocabulary.py       生词本页：筛选/搜索/排序/编辑/批量删除/脏检查/求助记录回显
         ├── review.py           复习页：自动编排卡片、每日目标、分批检查点、随时结束（M3.18/M3.19）
         ├── stats.py            统计页：累计数字 + 热力图 + 累计曲线 + 近 30 天 + 词汇分布 + 检测趋势 + 成就
         └── settings.py         配置、学习效果、调用记录摘要与入口、字体、数据位置、JSON/CSV 导出
 
-tests/（共 675 个用例，全部 mock AI、无网络）
+tests/（共 678 个用例，全部 mock AI、无网络）
 ├── test_english_learner_config.py        配置读写/校验/脱敏
 ├── test_english_learner_ai_client.py     连接测试与错误翻译
 ├── test_english_learner_ai_usage.py      AI 调用仓库汇总/筛选、客户端埋点与重试、AppContext 注入
@@ -297,7 +297,8 @@ tests/（共 675 个用例，全部 mock AI、无网络）
 
 ### 6.13 阅读反馈调难度（M1.5）
 
-入口：阅读页标题栏「调整难度」（在「换一篇」右边）。
+入口：阅读页标题栏「调整难度」（在「换一篇」右边）。**2026-11-25 起按钮已移除**，
+调级流程合并到「换一篇」：输入框有内容时先按这句话重新评估等级，再重写文章。
 
 - **数据来源**：`WordRepo.list_highlighted_words(article_id)`（本篇标过的词，优先）
   + `WordRepo.list_created_on(today)`（今天查过的词，补充），去重后最多 8 个；
@@ -768,7 +769,8 @@ tests/（共 675 个用例，全部 mock AI、无网络）
 - **学习者记忆**：`LearnerMemoryService` 读取近 7 天已批改记录的错误类型 Top2，
   渲染为文章 prompt 的“英文写作薄弱”一行；没有回译数据时不出现该行，
   空记忆 prompt 仍逐字节一致；
-- **界面**：阅读页「回译练习」只依赖当天文章，不需要先做测评；弹窗打开时
+- **界面**：2026-11-25 起阅读页不再提供「回译练习」入口，服务、弹窗与历史数据
+  保留；原入口只依赖当天文章，不需要先做测评；弹窗打开时
   同步读缓存（本地 SQL），无缓存才起 `TaskWorker` 出题；请求中拒绝关闭，
   已批改再次打开只读展示，不重复判分；
 - **边界**：只作练习反馈，不写 `profile`、不写 `review_logs`、不触发等级或
@@ -1081,4 +1083,4 @@ tests/（共 675 个用例，全部 mock AI、无网络）
   热力分档、累计基线、词档过滤、检测分组与成就阈值；
   `test_english_learner_stats_page.py` 覆盖页面渲染、指标切换、主题切换、
   空态绘制与统计失败兜底；主题测试额外校验两套调色板的图表 key 与热力
-  阶梯单调性。全量 675 passed。
+  阶梯单调性。全量 678 passed。
