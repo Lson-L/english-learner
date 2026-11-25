@@ -32,7 +32,7 @@ from ..models.entities import (
     normalize_cefr_level,
     today_str,
 )
-from ..storage.repositories import QuizRepo, StatsRepo, WordRepo
+from ..storage.repositories import ArticleRepo, QuizRepo, StatsRepo, WordRepo
 
 # 热力图展示半年：26 周 × 7 天。
 HEATMAP_WEEKS = 26
@@ -159,6 +159,26 @@ class Achievement:
 
 
 @dataclass(frozen=True)
+class ReadingVolume:
+    """阅读剂量（M7.3）：按“打开过文章”统计的累计词数。
+
+    口径：`articles.read_at IS NOT NULL` 的 `word_count` 之和，包含真实文章；
+    界面文案写「累计阅读（按打开文章计）」，不代表逐字读完。
+    `est_books` 按每本 9 万词粗略换算，只用于给用户一个直觉参照。
+    """
+
+    total_words: int = 0
+    words_7d: int = 0
+    words_30d: int = 0
+    read_articles: int = 0
+    est_books: float = 0.0
+
+    @property
+    def has_data(self) -> bool:
+        return self.read_articles > 0
+
+
+@dataclass(frozen=True)
 class StatsOverview:
     """一次统计快照；界面只读这个对象，不自己拼 SQL。"""
 
@@ -176,6 +196,7 @@ class StatsOverview:
     word_status: WordStatusSplit = WordStatusSplit()
     quiz_series: tuple[QuizSeries, ...] = ()
     achievements: tuple[Achievement, ...] = ()
+    reading_volume: ReadingVolume = ReadingVolume()
 
     @property
     def unlocked_achievements(self) -> int:
@@ -187,7 +208,12 @@ class StatsOverview:
 
     @property
     def has_data(self) -> bool:
-        return bool(self.active_days or self.total_words or self.total_quizzes)
+        return bool(
+            self.active_days
+            or self.total_words
+            or self.total_quizzes
+            or self.reading_volume.read_articles
+        )
 
 
 class StatsOverviewService:
@@ -198,11 +224,14 @@ class StatsOverviewService:
         stats_repo: StatsRepo,
         word_repo: WordRepo,
         quiz_repo: QuizRepo,
+        article_repo: ArticleRepo | None = None,
+        *,
         today=today_str,
     ) -> None:
         self._stats = stats_repo
         self._words = word_repo
         self._quizzes = quiz_repo
+        self._articles = article_repo
         self._today = today
 
     def build(self, *, on: date | None = None) -> StatsOverview:
@@ -247,9 +276,41 @@ class StatsOverviewService:
             word_status=word_status,
             quiz_series=self._quiz_series(quizzes),
             achievements=achievements,
+            reading_volume=self._reading_volume(day),
         )
 
     # ------------------------------------------------------------------ 内部
+    def _reading_volume(self, today: date) -> ReadingVolume:
+        """累计打开过的文章词数；7 / 30 天窗口按 `read_at` 的日期归属。"""
+        if self._articles is None:
+            return ReadingVolume()
+        total_words = 0
+        read_articles = 0
+        words_7d = 0
+        words_30d = 0
+        window_7 = today - timedelta(days=6)
+        window_30 = today - timedelta(days=29)
+        for article in self._articles.list_all():
+            if not article.read_at:
+                continue
+            read_articles += 1
+            count = max(0, int(article.word_count or 0))
+            total_words += count
+            read_day = _parse_day(article.read_at)
+            if read_day is None or read_day > today:
+                continue
+            if read_day >= window_7:
+                words_7d += count
+            if read_day >= window_30:
+                words_30d += count
+        return ReadingVolume(
+            total_words=total_words,
+            words_7d=words_7d,
+            words_30d=words_30d,
+            read_articles=read_articles,
+            est_books=round(total_words / 90000, 1),
+        )
+
     def _parse_today(self) -> date:
         try:
             return date.fromisoformat(self._today())
@@ -440,3 +501,14 @@ __all__ = [
     "heat_level",
     "nice_max",
 ]
+
+
+def _parse_day(value: str | None) -> date | None:
+    """取 ISO 时间的前 10 位解析日期；失败返回 None。"""
+    text = str(value or "").strip()[:10]
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None

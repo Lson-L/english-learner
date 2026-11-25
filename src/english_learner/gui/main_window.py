@@ -100,6 +100,9 @@ class MainWindow(QMainWindow):
         self._ui = store.load_ui()
         self._db = db if db is not None else Database()
         self._context = AppContext(config, store, self._db)
+        # M7.0：启动时把真实文章库种子写入 SQLite。只读本地资源，
+        # 内容为空或失败都只记日志，绝不阻塞界面。
+        self._context.prepare_startup()
         self._assessment_dialog: AssessmentDialog | None = None
         # 低调主题影响窗口标题、侧边栏文案与按钮语言；QSS 由 app.main() 按同一偏好生成。
         self._low_profile = self._ui.low_profile

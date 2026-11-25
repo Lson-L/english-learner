@@ -301,6 +301,7 @@ class ReadingQuizDialog(QDialog):
         if locked and not self._stage_one_answers:
             self._stage_one_answers = tuple(quiz.answers[: quiz.choice_total])
         self._practice_hint = self._detect_practice_hint(quiz)
+        is_real = (self._article.source or "") == "real"
 
         productions = [question for question in quiz.questions if question.is_short]
         all_translation = bool(productions) and all(
@@ -308,7 +309,13 @@ class ReadingQuizDialog(QDialog):
         )
 
         intro = Card()
-        if stage == 1:
+        if is_real:
+            title = QLabel(f"真实文章练习 · {quiz.choice_total} 道理解题")
+            hint = (
+                "本地判分、逐题讲评，不调整等级；读起来轻松 / 吃力会用来安排下一篇。"
+                f"不会的题可以选「{UNKNOWN_LABEL}」，并写明哪里没看懂。"
+            )
+        elif stage == 1:
             title = QLabel(f"第 1 轮 · {quiz.choice_total} 道当前等级题")
             hint = (
                 "先做 3 道当前等级的选择题。提交后系统会按正确率决定第二轮"
@@ -339,7 +346,12 @@ class ReadingQuizDialog(QDialog):
         hint_label.setWordWrap(True)
         intro.body.addWidget(hint_label)
         if self._practice_hint:
-            practice = QLabel("今天已经完成过一次正式检测；本次为练习模式，完成后不会调整等级。")
+            practice_text = (
+                "真实文章练习：本地判分，不调整等级。"
+                if is_real
+                else "今天已经完成过一次正式检测；本次为练习模式，完成后不会调整等级。"
+            )
+            practice = QLabel(practice_text)
             practice.setObjectName("muted")
             practice.setWordWrap(True)
             intro.body.addWidget(practice)
@@ -356,7 +368,11 @@ class ReadingQuizDialog(QDialog):
             self._self_report_combo.addItem("刚好", "ok")
             self._self_report_combo.addItem("吃力", "hard")
             self._self_report_combo.setCurrentIndex(1)
-            self._self_report_combo.setToolTip("作为弱证据参与后验，不会单独决定升降级")
+            self._self_report_combo.setToolTip(
+                "用于安排下一篇真实文章，不参与等级调整"
+                if is_real
+                else "作为弱证据参与后验，不会单独决定升降级"
+            )
             report_row.addWidget(self._self_report_combo)
             report_row.addStretch(1)
             intro.body.addLayout(report_row)
@@ -390,7 +406,10 @@ class ReadingQuizDialog(QDialog):
         self._quiz_layout.addWidget(self._quiz_status)
         self._quiz_layout.addStretch(1)
 
-        if stage == 1:
+        if is_real:
+            self._subtitle.setText(f"共 {quiz.choice_total} 道理解题；本地判分、不调整等级。")
+            self._set_mode(MODE_QUIZ, "提交答案", primary_enabled=True)
+        elif stage == 1:
             self._subtitle.setText(
                 f"第 1 轮共 {quiz.choice_total} 道题；提交后会按正确率生成第二轮题目。"
             )
@@ -740,15 +759,25 @@ class ReadingQuizDialog(QDialog):
             report.setWordWrap(True)
             card.body.addWidget(report)
 
+        is_real = (self._article.source or "") == "real"
         if quiz.practice_mode:
-            practice = QLabel("今天已经完成过一次正式检测；本次为练习模式，不调整等级。")
+            practice = QLabel(
+                "真实文章练习：本地判分，不调整等级，也不计入等级证据。"
+                if is_real
+                else "今天已经完成过一次正式检测；本次为练习模式，不调整等级。"
+            )
             practice.setObjectName("muted")
             practice.setWordWrap(True)
             card.body.addWidget(practice)
 
-        evidence = QLabel(
-            f"证据强度：{quiz.evidence_ratio:+.2f}（正数说明整体表现强于当前等级，负数偏弱）"
-        )
+        if is_real:
+            # 真实文章永远不写等级证据，展示“+0.00”会误导用户。
+            evidence_text = "真实文章不计等级证据；读起来轻松 / 吃力会用来安排下一篇。"
+        else:
+            evidence_text = (
+                f"证据强度：{quiz.evidence_ratio:+.2f}（正数说明整体表现强于当前等级，负数偏弱）"
+            )
+        evidence = QLabel(evidence_text)
         evidence.setObjectName("muted")
         evidence.setWordWrap(True)
         card.body.addWidget(evidence)

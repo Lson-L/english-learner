@@ -98,6 +98,43 @@ def test_tooltip_colors_stay_readable_in_both_themes() -> None:
         assert (light + 0.05) / (dark + 0.05) >= 4.5
 
 
+def _message_box_button_rule(css: str, selector: str) -> str:
+    """截出低调主题里消息框按钮的某一条规则，避免误匹配其它控件。"""
+    start = css.index(selector)
+    return css[start : css.index("}", start)]
+
+
+def test_low_profile_restyles_native_message_box_buttons() -> None:
+    """回归：深色消息框里曾出现 Windows 原生浅色按钮，和整体主题完全脱节。"""
+    css = build_stylesheet("lexend", low_profile=True)
+    palette = LOW_PROFILE_PALETTE
+
+    # 标准按钮盒里的按钮（QMessageBox 与自建 QDialogButtonBox）都要接回深色。
+    base = _message_box_button_rule(css, "QMessageBox QPushButton,")
+    assert palette["BG_SUBTLE"] in base
+    assert palette["TEXT_FIELD"] in base
+    assert "QDialogButtonBox QPushButton {" in base
+
+    # 默认按钮用强调色，和页面里的 primaryButton 保持同一档。
+    default_rule = _message_box_button_rule(css, "QMessageBox QPushButton:default,")
+    assert palette["ACCENT_STRONG"] in default_rule
+    assert palette["ON_ACCENT"] in default_rule
+
+    # 普通按钮的文字/底色对比度要够（WCAG ≥ 4.5）。
+    light, dark = sorted(
+        (_relative_luminance(palette["BG_SUBTLE"]), _relative_luminance(palette["TEXT_FIELD"])),
+        reverse=True,
+    )
+    assert (light + 0.05) / (dark + 0.05) >= 4.5
+
+
+def test_light_theme_keeps_native_message_box_buttons() -> None:
+    """浅色主题不覆盖系统按钮，保持 Windows 原生观感。"""
+    css = build_stylesheet("literata")
+    assert "QMessageBox QPushButton" not in css
+    assert "QDialogButtonBox QPushButton" not in css
+
+
 def test_chart_palette_defines_all_slots_and_heat_ramp() -> None:
     """图表色必须完整；热力阶梯要按主题方向单调变化，不能出现“越多越浅”。"""
     for low_profile, palette in ((False, LIGHT_PALETTE), (True, LOW_PROFILE_PALETTE)):

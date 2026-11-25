@@ -15,6 +15,7 @@ from english_learner.services.config_store import (
     AIConfig,
     ConfigError,
     ConfigStore,
+    RealTextConfig,
     ReviewConfig,
     UiConfig,
     config_dir,
@@ -311,3 +312,25 @@ def test_save_ui_migrates_flat_config_without_losing_ai(tmp_path: Path) -> None:
     assert "api_key" not in payload
     assert payload["ui"]["english_font"] == "literata"
     assert store.load() is not None and store.load().model == "deepseek-chat"
+
+
+def test_real_text_config_roundtrip_and_defaults(tmp_path: Path) -> None:
+    """M7.1：real_text 段独立保存，损坏时回退默认（自动安排开启）。"""
+    store = ConfigStore(tmp_path / "config.json")
+
+    assert store.load_real_text() == RealTextConfig()
+
+    saved = store.save_real_text(RealTextConfig(auto_enabled=False, last_decision_on="2026-11-25"))
+    assert saved.auto_enabled is False
+    assert store.load_real_text() == RealTextConfig(
+        auto_enabled=False, last_decision_on="2026-11-25"
+    )
+
+    payload = json.loads(store.path.read_text(encoding="utf-8"))
+    assert payload["real_text"] == {
+        "auto_enabled": False,
+        "last_decision_on": "2026-11-25",
+    }
+
+    store.path.write_text(json.dumps({"real_text": "broken"}), encoding="utf-8")
+    assert store.load_real_text() == RealTextConfig()

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from typing import Any
 
@@ -92,6 +92,25 @@ def dump_json_dict(value: dict[str, Any] | None) -> str:
     return json.dumps(value, ensure_ascii=False) if value else ""
 
 
+def load_json_list(value: Any) -> list[Any]:
+    """把 JSON 数组列读成 list；空串、非法 JSON、非数组一律返回空列表。"""
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def dump_json_list(values: list[Any] | tuple[Any, ...]) -> str:
+    """JSON 数组 → 文本；空序列写空串，便于区分“没有数据”和“空列表”。"""
+    return json.dumps(list(values), ensure_ascii=False) if values else ""
+
+
 # --------------------------------------------------------------- 学习画像
 @dataclass(frozen=True)
 class Profile:
@@ -161,6 +180,10 @@ class Article:
     target_words: tuple[str, ...] = ()
     # M5.3 本地可读性指标（不参与等级判定）；旧文章为 None。
     metrics: dict[str, Any] | None = None
+    # M7：generated = AI 生成；real = 真实文章；imported = 用户粘贴（以后）
+    source: str = "generated"
+    source_url: str = ""
+    source_ref: str = ""
     read_at: str | None = None
     created_at: str = ""
     id: int | None = None
@@ -177,6 +200,9 @@ class Article:
             word_count=int(row["word_count"]),
             target_words=load_str_list(row["target_words_json"]),
             metrics=load_json_dict(row["metrics_json"]),
+            source=str(row["source"] or "generated"),
+            source_url=str(row["source_url"] or ""),
+            source_ref=str(row["source_ref"] or ""),
             read_at=row["read_at"],
             created_at=str(row["created_at"] or ""),
         )
@@ -192,7 +218,251 @@ class Article:
             "word_count": int(self.word_count),
             "target_words_json": dump_str_list(self.target_words),
             "metrics_json": dump_json_dict(self.metrics),
+            "source": self.source,
+            "source_url": self.source_url,
+            "source_ref": self.source_ref,
             "read_at": self.read_at,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True)
+class RealText:
+    """真实文章库的一篇（`real_texts` 表）。
+
+    既可以从 `corpus.json` 的 dict 解析（`from_dict`），也可以从 SQLite 行解析
+    （`from_row`）。`questions` 复用 `QuizQuestion`，当前只存选择题。
+    """
+
+    id: str
+    title: str
+    content: str
+    level: str
+    level_source: str = ""
+    source: str = ""
+    source_url: str = ""
+    license: str = ""
+    license_url: str = ""
+    published: str = ""
+    topics: tuple[str, ...] = ()
+    word_count: int = 0
+    excerpt: bool = False
+    attribution: str = ""
+    questions: tuple[QuizQuestion, ...] = ()
+    fetched_at: str = ""
+    content_hash: str = ""
+    questions_source: str = "bundled"
+    corpus_version: int = 1
+    created_at: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RealText:
+        """解析 `corpus.json` 的一项；字段缺失时由调用方校验。"""
+        paragraphs = data.get("paragraphs")
+        if isinstance(paragraphs, list) and paragraphs:
+            content = "\n\n".join(str(item).strip() for item in paragraphs if str(item).strip())
+        else:
+            content = str(data.get("content") or "").strip()
+        raw_topics = data.get("topics")
+        if isinstance(raw_topics, str):
+            raw_topics = load_json_list(raw_topics)
+        raw_questions = data.get("questions")
+        if isinstance(raw_questions, str):
+            raw_questions = load_json_list(raw_questions)
+        questions = tuple(
+            question
+            for question in (
+                QuizQuestion.from_dict(item)
+                for item in (raw_questions or [])
+                if isinstance(item, dict)
+            )
+            if question is not None
+        )
+        return cls(
+            id=str(data.get("id") or "").strip(),
+            title=str(data.get("title") or "").strip(),
+            content=content,
+            level=normalize_cefr_level(data.get("level"), ""),
+            level_source=str(data.get("level_source") or "").strip(),
+            source=str(data.get("source") or "").strip(),
+            source_url=str(data.get("source_url") or "").strip(),
+            license=str(data.get("license") or "").strip(),
+            license_url=str(data.get("license_url") or "").strip(),
+            published=str(data.get("published") or "").strip(),
+            topics=tuple(str(item).strip() for item in (raw_topics or []) if str(item).strip()),
+            word_count=int(data.get("word_count") or len(content.split())),
+            excerpt=bool(data.get("excerpt")),
+            attribution=str(data.get("attribution") or "").strip(),
+            questions=questions,
+            fetched_at=str(data.get("fetched_at") or "").strip(),
+            content_hash=str(data.get("content_hash") or "").strip(),
+            questions_source=str(data.get("questions_source") or "bundled").strip(),
+            corpus_version=int(data.get("corpus_version") or 1),
+            created_at=str(data.get("created_at") or "").strip(),
+        )
+
+    @classmethod
+    def from_row(cls, row: Any) -> RealText:
+        questions = tuple(
+            question
+            for question in (
+                QuizQuestion.from_dict(item)
+                for item in load_json_list(row["questions_json"])
+                if isinstance(item, dict)
+            )
+            if question is not None
+        )
+        return cls(
+            id=str(row["id"]),
+            title=str(row["title"]),
+            content=str(row["content"]),
+            level=str(row["level"]),
+            level_source=str(row["level_source"] or ""),
+            source=str(row["source"] or ""),
+            source_url=str(row["source_url"] or ""),
+            license=str(row["license"] or ""),
+            license_url=str(row["license_url"] or ""),
+            published=str(row["published"] or ""),
+            topics=load_str_list(row["topics_json"]),
+            word_count=int(row["word_count"]),
+            excerpt=bool(row["excerpt"]),
+            attribution=str(row["attribution"] or ""),
+            questions=questions,
+            fetched_at=str(row["fetched_at"] or ""),
+            content_hash=str(row["content_hash"] or ""),
+            questions_source=str(row["questions_source"] or "bundled"),
+            corpus_version=int(row["corpus_version"]),
+            created_at=str(row["created_at"] or ""),
+        )
+
+    def to_params(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "content": self.content,
+            "level": self.level,
+            "level_source": self.level_source,
+            "source": self.source,
+            "source_url": self.source_url,
+            "license": self.license,
+            "license_url": self.license_url,
+            "published": self.published,
+            "topics_json": dump_str_list(self.topics),
+            "word_count": int(self.word_count),
+            "excerpt": 1 if self.excerpt else 0,
+            "attribution": self.attribution,
+            "questions_json": json.dumps(
+                [asdict(question) for question in self.questions], ensure_ascii=False
+            ),
+            "fetched_at": self.fetched_at,
+            "content_hash": self.content_hash,
+            "questions_source": self.questions_source,
+            "corpus_version": int(self.corpus_version),
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True)
+class RealTextHistory:
+    """真实文章供给历史（`real_text_history` 表）。
+
+    status: served / completed / overridden / abandoned。
+    outcome: success / neutral / struggle / skip / abandon。
+    """
+
+    text_id: str
+    served_on: str
+    created_at: str
+    updated_at: str
+    article_id: int | None = None
+    level: str = ""
+    word_count: int = 0
+    status: str = "served"
+    score: float = 0.0
+    self_report: str = ""
+    outcome: str = ""
+    completed_at: str = ""
+    id: int | None = None
+
+    @classmethod
+    def from_row(cls, row: Any) -> RealTextHistory:
+        return cls(
+            id=int(row["id"]),
+            text_id=str(row["text_id"]),
+            served_on=str(row["served_on"]),
+            article_id=int(row["article_id"]) if row["article_id"] is not None else None,
+            level=str(row["level"] or ""),
+            word_count=int(row["word_count"]),
+            status=str(row["status"] or "served"),
+            score=float(row["score"]),
+            self_report=str(row["self_report"] or ""),
+            outcome=str(row["outcome"] or ""),
+            completed_at=str(row["completed_at"] or ""),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    def to_params(self) -> dict[str, Any]:
+        return {
+            "text_id": self.text_id,
+            "served_on": self.served_on,
+            "article_id": self.article_id,
+            "level": self.level,
+            "word_count": int(self.word_count),
+            "status": self.status,
+            "score": float(self.score),
+            "self_report": self.self_report,
+            "outcome": self.outcome,
+            "completed_at": self.completed_at,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass(frozen=True)
+class ContentSource:
+    """内置在线源（`content_sources` 表，M7.7 使用；v9 先建表）。"""
+
+    id: str
+    url: str
+    title: str = ""
+    level: str = ""
+    license: str = ""
+    source: str = ""
+    enabled: bool = True
+    last_attempt_at: str = ""
+    last_error: str = ""
+    failure_count: int = 0
+    created_at: str = ""
+
+    @classmethod
+    def from_row(cls, row: Any) -> ContentSource:
+        return cls(
+            id=str(row["id"]),
+            url=str(row["url"]),
+            title=str(row["title"] or ""),
+            level=str(row["level"] or ""),
+            license=str(row["license"] or ""),
+            source=str(row["source"] or ""),
+            enabled=bool(row["enabled"]),
+            last_attempt_at=str(row["last_attempt_at"] or ""),
+            last_error=str(row["last_error"] or ""),
+            failure_count=int(row["failure_count"]),
+            created_at=str(row["created_at"] or ""),
+        )
+
+    def to_params(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "url": self.url,
+            "title": self.title,
+            "level": self.level,
+            "license": self.license,
+            "source": self.source,
+            "enabled": 1 if self.enabled else 0,
+            "last_attempt_at": self.last_attempt_at,
+            "last_error": self.last_error,
+            "failure_count": int(self.failure_count),
             "created_at": self.created_at,
         }
 
@@ -382,6 +652,7 @@ class ReviewLog:
     answer_text: str = ""
     verdict: str = ""
     distance: int = 0
+    mode: str = ""
     id: int | None = None
 
     @classmethod
@@ -398,6 +669,7 @@ class ReviewLog:
             answer_text=str(row["answer_text"] or ""),
             verdict=str(row["verdict"] or ""),
             distance=int(row["distance"] or 0),
+            mode=str(row["mode"] or ""),
         )
 
     def to_params(self) -> dict[str, Any]:
@@ -412,6 +684,7 @@ class ReviewLog:
             "answer_text": self.answer_text,
             "verdict": self.verdict,
             "distance": int(self.distance),
+            "mode": self.mode,
         }
 
 

@@ -1619,3 +1619,85 @@ def lookup(word: str, sentence: str, article_id: int, level: str) -> WordDefinit
   “选择调整难度 → 打开原反馈弹窗”“空输入 → 随机换选题”三条分支；
 - `RegenerateDialog` 测试补充默认模式与点击调整难度后的 `mode()/result()`；
 - 相关测试与 `ruff check` / `ruff format --check` 通过。
+
+## M7.0 真实文章库存储与种子（2026-11-25）
+
+**目标**：为 M7 真实文章自动供给打底——内容进 SQLite、可校验、可导出，
+启动时幂等种子；不联网、不改等级、不做供给决策（留给 M7.1）。
+
+**改动**：
+
+- schema v9：`articles` 增加 `source / source_url / source_ref`；`review_logs`
+  增加 `mode`；新增 `real_texts`、`real_text_history`、`content_sources` 三张表。
+  全部幂等建表 / 加列，不重建表；v8 旧库升级后旧文章默认 `generated`。
+- `models/entities.py`：`Article` 来源字段；新增 `RealText` / `RealTextHistory` /
+  `ContentSource` 冻结 dataclass；补 `load_json_list` / `dump_json_list` 辅助。
+- `storage/repositories.py`：`RealTextRepo`（upsert / list_unread / mark_served /
+  record_completion / mark_overridden / expire_abandoned / served_ids / history），
+  `ContentSourceRepo`；`Database` 增加两个仓库属性。
+- `services/real_text_library.py`：`corpus.json` 加载、字段校验（许可白名单、
+  等级、词数、4 道选择题、HTML / Gutenberg 头尾）、`seed_real_texts()` 按
+  `corpus_version` 只升不降。
+- `AppContext.prepare_startup()` + `MainWindow` 启动调用：只读本地资源，
+  内容为空 / 校验失败 / 种子失败只记日志，不阻塞启动。
+- `export_service`：JSON / CSV 从 12 张表扩到 15 张，`articles` 导出带来源字段。
+- `assets/real_texts/corpus.json`（`version=1`，2 篇 China Daily）与 `NOTICE.md`。
+
+**测试**：新增 `tests/test_english_learner_real_text.py`（加载 / 校验 / 种子幂等
+与只升不降 / 历史状态机 / 在线源表 / 生产语料结构）；存储测试补 v8→v9 升级与
+来源字段往返；导出测试补三张新表。全量 **694 passed**；`ruff check` /
+`ruff format --check` 通过。
+
+**内容**：已入库 2 篇 China Daily（B1 277 词 / B2 445 词，`Personal use`，
+仅限本机个人使用）。国内站点实测：China Daily、人民网英文、CGTN、新华网英文、
+英文巴士可访问；Gutenberg 不可达（curl 000 / WebFetch 503）。
+
+**待补**：A2 / C1 每档再补 2 篇；随后进入 M7.1。
+
+---
+
+## M7.1 ~ M7.4 交付（2026-11-25）
+
+**目标**：把真实文章从「能入库」推进到「自动供给 → 阅读 → 本地判分 →
+反馈驱动下一篇」，并补阅读剂量与语境识别复习；全程离线优先、0 新增 AI 类型。
+
+**改动**：
+
+- `services/real_text_supply.py`：G0~G10 硬门槛（开关 / 当天已有文章 / 每天一次 /
+  活跃度 / 降级保护 / 均分 / 生词率 / 回归保护 / 调级保护 / 反馈间隔 / 候选），
+  间隔表 success 3 / neutral 7 / struggle 14 / abandoned 10 / skip 7 天，
+  候选按新鲜度 / 检测均分 / 生词率贴合度 / 题材差异打分，同分按 hash 确定性打散。
+- `services/real_text_feedback.py`：完成 → outcome（struggle > success > neutral），
+  写回 `real_text_history`；7 天弃读结算、换回 AI 记 `overridden/skip` 沿用仓库层。
+- `ArticleService.serve_real_text()`：文章 + 预置题目 + 供给历史原子写入，
+  任一步失败删除当天文章并返回 None，阅读页自动回退 AI 文章。
+- `AppContext.prepare_startup()`：种子 → 弃读结算 → 今日决策 → 上架；
+  失败只记日志，不阻塞启动；设置页新增「自动安排真实文章」开关。
+- `ReadingQuizService.seed_bundled_quiz()` / `_submit_real_practice()`：真实文章
+  `stage=2 / practice_mode=True`，提交阶段 0 AI、本地判分、用预置解析讲评，
+  不写等级证据、不改画像；完成回写 score / self_report / outcome。
+- 阅读页：真实文章 meta、顶部横幅、来源弹窗（`gui/real_text_source_dialog.py`）、
+  「换回 AI 文章」（确认 → 原换一篇流程 → `mark_overridden`）；今日页标记真实文章。
+- 阅读检测弹窗：真实文章标题 / 说明 / 自评 tooltip 改为练习口径。
+- `services/stats_overview.py`：新增 `ReadingVolume`（累计 / 7 天 / 30 天词数、
+  打开篇数、约合书本数），统计页新增「累计阅读」数字卡。
+- `services/context_review.py`：`build_context_question()` 用挖空例句 + 3 个
+  同词性 / 同词档干扰项；干扰项不得出现在原句里，不足 3 个回退看词回忆。
+- 复习页：新词优先语境识别，可单卡「切换题型」；`review_logs.mode` 落库
+  （context / spelling / recall）并进入 CSV 导出。
+- `articles.source='real'` 已接入档内进度 / 难度提示过滤（D7，不污染 M6 口径）。
+
+**测试**：新增 `test_english_learner_real_text_supply.py`（门槛 / 间隔 / 打分 /
+outcome）、`test_english_learner_real_text_practice.py`（上架原子性 / 本地判分 /
+反馈回写 / 0 AI 断言）、`test_english_learner_context_review.py`（题面 / 干扰项 /
+回退 / 编排）；存储、导出、配置、统计、复习页补 mode 与阅读剂量用例。
+全量 **748 passed**；`ruff check` / `ruff format --check` 通过。
+
+**验收**：外部独立静态审查 3 轮通过。第 1 轮发现并修复：abandoned 间隔键不一致
+（P1）、换一篇 / 调整难度未记 overridden（P2）、取消后残留 overridden 标记（P2）；
+第 2 轮把“替换真实文章 → overridden”下沉到 `ArticleService.replace_today()`，
+覆盖协作式取消下已写库的场景；第 3 轮确认无 P0/P1/P2。
+报告见 `verification/VERIFICATION_M7.1-M7.4.md`，M7.0 报告见
+`verification/VERIFICATION_M7.0.md`。
+
+**待办**：A2 / C1 内容补到每档 2 篇；M7.6 内容包导入、M7.7 在线源与手动 URL 可选。

@@ -47,11 +47,18 @@ from ..models.entities import (
     QuizProduction,
     QuizQuestion,
     ReadingQuiz,
+    RealText,
     normalize_cefr_level,
     now_iso,
 )
 from ..storage.db import DuplicateError
-from ..storage.repositories import LevelEvidenceRepo, ProfileRepo, QuizRepo, ReviewRepo
+from ..storage.repositories import (
+    LevelEvidenceRepo,
+    ProfileRepo,
+    QuizRepo,
+    RealTextRepo,
+    ReviewRepo,
+)
 from .ai_client import AIError
 from .ai_protocol import TextCompleter
 from .assessment_bank import UNKNOWN_ANSWER, UNKNOWN_LABEL
@@ -81,6 +88,7 @@ from .prompts import (
     build_quiz_stage_two_messages,
 )
 from .quiz_calibration import difficulty_stats, skill_stats
+from .real_text_feedback import record_completion as record_real_text_completion
 
 logger = logging.getLogger(__name__)
 
@@ -700,6 +708,7 @@ class ReadingQuizService:
         shuffle_options: bool = True,
         rng: random.Random | None = None,
         memory_provider: Callable[[], LearnerMemory] | None = None,
+        real_text_repo: RealTextRepo | None = None,
     ) -> None:
         self._client = client
         self._quizzes = quiz_repo
@@ -709,6 +718,8 @@ class ReadingQuizService:
         self._shuffle_options = shuffle_options
         self._rng = rng
         self._memory_provider = memory_provider
+        # M7.1 / M7.2：真实文章练习完成时回写供给历史（失败不阻断结果落库）。
+        self._real_texts = real_text_repo
 
     # ------------------------------------------------------------ 出题 / 缓存
     def get_cached(self, article_id: int) -> ReadingQuiz | None:
@@ -718,12 +729,51 @@ class ReadingQuizService:
     def is_practice_day(self, article: Article, quiz_id: int | None = None) -> bool:
         """今天是否已经完成过一次正式检测（本次只能练手）。
 
-        证据表不随文章替换删除，因此优先用它判断；没有注入证据仓库时
-        （旧测试/降级场景）退回按检测完成日期统计。
+        真实文章（M7.1）恒为练习模式：难度是预估的，不能写等级证据。
+        正式检测仍以证据表为准；没有注入证据仓库时退回按完成日期统计。
         """
+        if (article.source or "") == "real":
+            return True
         if self._evidence is not None:
             return self._evidence.count_on(article.article_date, exclude_quiz_id=quiz_id) > 0
         return self._quizzes.count_completed_on(article.article_date, exclude_id=quiz_id) > 0
+
+    def seed_bundled_quiz(self, article: Article, text: RealText) -> ReadingQuiz:
+        """把真实文章自带的 4 道预置题落库（M7.1，0 次 AI）。
+
+        - 同一篇文章已有题目（含用户先手动出题的情况）直接返回，避免重复插入；
+        - `stage=2`：界面不会触发第二轮出题，也不会等 AI 讲评；
+        - `practice_mode=True`：提交时走本地判分、不调等级。
+        """
+        if article.id is None:
+            raise AIError("文章还没有保存", "请先让今天的文章生成完成，再做阅读检测。")
+        cached = self._quizzes.get_by_article(article.id)
+        if cached is not None:
+            return cached
+        questions = tuple(text.questions)
+        if not questions:
+            raise AIError("这篇真实文章没有预置题目", "可以换一篇，或让 AI 生成一篇文章。")
+        quiz = ReadingQuiz(
+            article_id=article.id,
+            article_date=article.article_date,
+            level=normalize_cefr_level(article.level, text.level),
+            questions=questions,
+            explanations=tuple(question.explanation for question in questions),
+            practice_mode=True,
+            stage=2,
+            created_at=now_iso(),
+        )
+        try:
+            stored = self._quizzes.insert(quiz)
+        except DuplicateError:
+            existing = self._quizzes.get_by_article(article.id)
+            if existing is None:
+                raise
+            stored = existing
+        logger.info(
+            "真实文章预置题目已入库：article=%s 题目数=%s", article.id, len(stored.questions)
+        )
+        return stored
 
     def get_or_create(self, article: Article, level: str) -> ReadingQuiz:
         """当天文章已有题目就直接返回；否则生成第一轮题目并落库。"""
@@ -1010,6 +1060,19 @@ class ReadingQuizService:
             if chosen == question.answer_index
         )
 
+        # M7.1：真实文章固定练习模式——本地判分、逐题讲评用预置解析，
+        # 不调用 AI、不写等级证据、不改画像。
+        if (article.source or "") == "real":
+            return self._submit_real_practice(
+                article,
+                quiz,
+                normalized,
+                notes,
+                profile,
+                self_report,
+                choice_correct,
+            )
+
         # 练习模式的历史只用于展示，不进入讲评历史/难度统计，避免影响后续判断。
         recent = [
             (item_quiz, title)
@@ -1242,6 +1305,87 @@ class ReadingQuizService:
             confidence=posterior.confidence,
             practice_mode=practice_mode,
             blind_level=blind_level,
+        )
+
+    def _submit_real_practice(
+        self,
+        article: Article,
+        quiz: ReadingQuiz,
+        normalized: tuple[int, ...],
+        notes: tuple[str, ...],
+        profile: Profile,
+        self_report: str,
+        choice_correct: int,
+    ) -> QuizOutcome:
+        """真实文章练习：0 次 AI 的本地判分 + 供给反馈回写（M7.1 / M7.2）。"""
+        if quiz.id is None:
+            raise AIError("题目还没有保存", "请先重新打开阅读检测。")
+        questions = quiz.choice_questions
+        explanations = tuple(
+            quiz.explanations[index]
+            if index < len(quiz.explanations) and quiz.explanations[index]
+            else question.explanation
+            for index, question in enumerate(questions)
+        )
+        total = len(questions)
+        score = int(choice_correct)
+        feedback = "真实文章练习：本地判分，不调整等级"
+        timestamp = now_iso()
+
+        stored = self._quizzes.save_result(
+            quiz.id,
+            answers=normalized,
+            choice_notes=notes,
+            explanations=explanations,
+            score=score,
+            previous_level=profile.cefr_level,
+            result_level=profile.cefr_level,
+            feedback=feedback,
+            self_report=self_report,
+            recommended_level=profile.cefr_level,
+            pending_level=profile.pending_level,
+            pending_count=profile.pending_count,
+            practice_mode=True,
+            completed_at=timestamp,
+        )
+
+        # 完成反馈驱动下一篇的间隔与难度；失败只记日志，不能把答题结果搞丢。
+        if self._real_texts is not None and article.source_ref:
+            ratio = score / total if total else 0.0
+            try:
+                record_real_text_completion(
+                    self._real_texts,
+                    article.source_ref,
+                    score=ratio,
+                    self_report=self_report,
+                    completed_at=timestamp,
+                )
+            except Exception:  # noqa: BLE001 - 反馈是增强信息
+                logger.warning("回写真实文章完成反馈失败：%s", article.source_ref, exc_info=True)
+
+        result = AssessmentResult(
+            cefr=profile.cefr_level,
+            vocab_estimate=profile.vocab_estimate,
+            strengths=profile.strengths,
+            weaknesses=profile.weaknesses,
+            comment=feedback,
+        )
+        logger.info(
+            "真实文章练习完成：article=%s 选择 %s/%s，自评=%s",
+            article.id,
+            score,
+            total,
+            self_report,
+        )
+        return QuizOutcome(
+            quiz=stored,
+            profile=profile,
+            result=result,
+            previous_level=profile.cefr_level,
+            recommended_level=profile.cefr_level,
+            pending_level=profile.pending_level,
+            pending_count=profile.pending_count,
+            practice_mode=True,
         )
 
     def _grade_with_repair(

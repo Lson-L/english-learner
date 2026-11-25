@@ -1085,3 +1085,51 @@ tests/（共 678 个用例，全部 mock AI、无网络）
   `test_english_learner_stats_page.py` 覆盖页面渲染、指标切换、主题切换、
   空态绘制与统计失败兜底；主题测试额外校验两套调色板的图表 key 与热力
   阶梯单调性。全量 678 passed。
+
+## M7 真实文章库（schema v9，2026-11-25）
+
+- **资源与运行期分离**：`assets/real_texts/corpus.json` 是构建期种子，
+  `services/real_text_library.py` 负责加载 / 校验 / `seed_real_texts()`；
+  运行期 app 只读 SQLite 的 `real_texts`，不读 JSON、不联网。
+- **表**：`real_texts`（正文、等级、许可、题目 JSON、`corpus_version`）、
+  `real_text_history`（served / completed / overridden / abandoned）、
+  `content_sources`（M7.7 在线源，先建表）。
+- **文章来源**：`articles.source` = `generated` / `real`（以后 `imported`）；
+  `source_ref` 存 `real_texts.id`。v8 旧库升级后旧文章默认 `generated`。
+- **启动**：`MainWindow` 构造完 `AppContext` 后调 `prepare_startup()`；
+  只做本地种子，内容为空 / 失败只记日志，不阻塞界面。
+- **种子策略**：按 `corpus_version` 只升不降，`upsert` 幂等；导入更高版本
+  数据库后由下次启动自愈。
+- **导出**：`export_service` 现在覆盖 15 张表；`database_transfer` 整库快照
+  自动包含，`REQUIRED_TABLES` 不新增（否则合法 v8 旧库会被拒绝导入）。
+- **当前内容**：2 篇 China Daily（B1 277 词 / B2 445 词，`Personal use`）；
+  Gutenberg 在当前网络不可达，先走国内可访问源；A2 / C1 待补。
+- **尚未接入**：真实文章供给、练习判分、等级过滤在 M7.1；当前只保证
+  内容可入库、可校验、可导出。
+
+## M7.1 ~ M7.4 真实文章供给 / 练习 / 反馈 / 语境复习
+
+- **供给决策**：`services/real_text_supply.py` 只读 `profile / daily_stats /
+  articles / reading_quizzes / real_text_history / real_texts / config.real_text`，
+  0 AI / 0 网络；门槛与间隔表集中在文件顶部常量，改策略先改这里并补测试。
+- **每天一次**：`config.json` 的 `real_text.last_decision_on` 由
+  `AppContext._prepare_real_text_day()` 写入；启动顺序是种子 → 弃读结算 →
+  决策 → `ArticleService.serve_real_text()`，全部在页面创建前完成。
+- **原子上架**：`serve_real_text()` 内部「写文章 → 种预置题 → 写历史」，
+  失败 `delete_by_date(today)` 回滚并返回 None；题目种子通过构造函数注入
+  `quiz_seeder`，避免 ArticleService 反向依赖 ReadingQuizService。
+- **本地练习**：`submit()` 看到 `article.source == 'real'` 直接走
+  `_submit_real_practice()`：本地判分、预置解析、`practice_mode=True`、
+  `stage=2`，不写 `level_evidence`、不改画像；同时回写
+  `real_text_history` 的 score / self_report / outcome。
+- **反馈间隔**：`real_text_feedback.outcome_from_completion()` 判定
+  struggle > success > neutral；供给层按 outcome 取间隔与等级窗口
+  （struggle / abandoned 只允许当前档与下一档）。
+- **阅读剂量**：`StatsOverviewService` 新增 `article_repo` 可选依赖，
+  `ReadingVolume` 统计 `read_at IS NOT NULL` 的 `word_count`；
+  真实文章计入剂量，但不进入档内进度 / 难度提示（AppContext 过滤 `source`）。
+- **语境复习**：`services/context_review.py` 纯函数出题，干扰项同词性 /
+  同 `cefr_band` 且不出现在原句；复习页 `CARD_CONTEXT` 由 review_plan 编排，
+  首次学习优先，用户可单卡切换；`review_logs.mode` 只做统计，不参与 SRS。
+- **回退**：`real_text.auto_enabled=false` 即停止自动供给；阅读页「换回 AI 文章」
+  随时可用，失败保留原真实文章。

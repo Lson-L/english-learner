@@ -385,13 +385,16 @@ class TodayPage(QWidget):
 
         self._article_title.setText(f"今日文章 · {article.title}")
         meta = [article.level, f"{article.word_count} 词"]
+        if (article.source or "") == "real":
+            meta.append("真实文章")
         if article.topic:
             meta.append(article.topic)
         quiz = (
             self._context.quiz_repo.get_by_article(article.id) if article.id is not None else None
         )
         if quiz is not None and quiz.completed:
-            state = f"已完成检测 · 答对 {quiz.score}/{quiz.total}"
+            label = "已完成练习" if quiz.practice_mode else "已完成检测"
+            state = f"{label} · 答对 {quiz.score}/{quiz.total}"
         elif article.read_at:
             state = "已读完"
         else:

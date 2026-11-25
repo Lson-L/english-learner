@@ -83,6 +83,7 @@ class SettingsPage(QWidget):
         self._context = context
         self._ui = store.load_ui()
         self._review = store.load_review()
+        self._real_text = store.load_real_text()
         self._worker: TaskWorker | None = None
 
         # 卡片较多，小窗口下放进滚动区，避免内容被挤压或截断。
@@ -415,6 +416,13 @@ class SettingsPage(QWidget):
         self._prefetch_check.setChecked(self._ui.prefetch_enabled)
         self._prefetch_check.toggled.connect(self._on_prefetch_toggled)
         form.addRow(self._form_label("查词预取"), self._prefetch_check)
+
+        # M7.1：真实文章自动供给的总开关；关闭后阅读页仍可手动换回 AI。
+        self._real_text_check = QCheckBox("自动安排真实文章")
+        self._real_text_check.setChecked(self._real_text.auto_enabled)
+        self._real_text_check.setToolTip("每天根据阅读与检测状态，自动安排一篇分级真实文章")
+        self._real_text_check.toggled.connect(self._on_real_text_toggled)
+        form.addRow(self._form_label("真实文章"), self._real_text_check)
         card.body.addLayout(form)
 
         self._prefetch_status = QLabel("")
@@ -429,6 +437,23 @@ class SettingsPage(QWidget):
         note.setWordWrap(True)
         card.body.addWidget(note)
         return card
+
+    def _on_real_text_toggled(self, checked: bool) -> None:
+        self._real_text = replace(self._real_text, auto_enabled=bool(checked))
+        try:
+            self._real_text = self._store.save_real_text(self._real_text)
+        except (ConfigError, OSError) as exc:
+            set_status(self._prefetch_status, f"真实文章偏好保存失败：{exc}", "error")
+        else:
+            set_status(
+                self._prefetch_status,
+                (
+                    "已保存；下一次启动时生效。"
+                    if checked
+                    else "已关闭自动安排；阅读页仍可手动换回 AI 文章。"
+                ),
+                "hint",
+            )
 
     def _on_prefetch_toggled(self, checked: bool) -> None:
         self._ui = replace(self._ui, prefetch_enabled=bool(checked))

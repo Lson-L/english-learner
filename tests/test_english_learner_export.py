@@ -17,6 +17,7 @@ from english_learner.models.entities import (
     Profile,
     QuizQuestion,
     ReadingQuiz,
+    RealText,
     WeeklyReview,
     Word,
     WritingAttempt,
@@ -45,6 +46,8 @@ def make_service(db: Database) -> ExportService:
         db.weekly_reviews,
         db.ai_calls,
         db.writing_attempts,
+        db.real_texts,
+        db.content_sources,
     )
 
 
@@ -260,6 +263,9 @@ def test_export_json_contains_all_tables(db: Database, tmp_path: Path) -> None:
         "weekly_reviews": 1,
         "ai_calls": 1,
         "writing_attempts": 1,
+        "real_texts": 0,
+        "real_text_history": 0,
+        "content_sources": 0,
     }
     assert data["profile"]["cefr_level"] == "B1"
     assert data["profile"]["strengths"] == ["阅读理解"]
@@ -296,6 +302,40 @@ def test_export_json_contains_all_tables(db: Database, tmp_path: Path) -> None:
     assert "AI 调用记录 1" in result.summary()
 
 
+def test_export_json_includes_real_texts_and_history(db: Database, tmp_path: Path) -> None:
+    seed(db)
+    text = db.real_texts.upsert(
+        RealText(
+            id="a2-1",
+            title="A Small Story",
+            content="The sun is warm.",
+            level="A2",
+            license="Public Domain",
+            questions=(
+                QuizQuestion(
+                    prompt="What is warm?",
+                    options=("The sun.", "The moon.", "The wind.", "The rain."),
+                    answer_index=0,
+                    explanation="第一句说太阳很暖。",
+                ),
+            ),
+            created_at=now_iso(),
+        )
+    )
+    db.real_texts.mark_served(text, served_on="2026-11-25", article_id=None)
+    db.real_texts.record_completion(text.id, score=0.5, self_report="hard", outcome="struggle")
+
+    result = make_service(db).export_json(tmp_path / "backup.json")
+    data = json.loads(result.files[0].read_text(encoding="utf-8"))
+
+    assert data["counts"]["real_texts"] == 1
+    assert data["counts"]["real_text_history"] == 1
+    assert data["real_texts"][0]["id"] == "a2-1"
+    assert data["real_texts"][0]["questions"][0]["prompt"] == "What is warm?"
+    assert data["real_text_history"][0]["outcome"] == "struggle"
+    assert "真实文章库 1" in result.summary()
+
+
 def test_export_json_adds_suffix_and_overwrites_atomically(db: Database, tmp_path: Path) -> None:
     seed(db)
     service = make_service(db)
@@ -327,8 +367,18 @@ def test_export_csv_writes_one_file_per_table(db: Database, tmp_path: Path) -> N
         "weekly_reviews.csv",
         "ai_calls.csv",
         "writing_attempts.csv",
+        "real_texts.csv",
+        "real_text_history.csv",
+        "content_sources.csv",
     }
     assert all(path.is_file() for path in result.files)
+
+    article_rows = list(
+        csv.DictReader(io.StringIO((target / "articles.csv").read_text(encoding="utf-8-sig")))
+    )
+    # M7：CSV 分表也要带上文章来源，否则真实文章的 source_ref 会静默丢失。
+    assert {"source", "source_url", "source_ref"} <= set(article_rows[0])
+    assert article_rows[0]["source"] == "generated"
 
     words_text = (target / "words.csv").read_text(encoding="utf-8-sig")
     assert "有韧性的" in words_text
@@ -345,6 +395,8 @@ def test_export_csv_writes_one_file_per_table(db: Database, tmp_path: Path) -> N
     assert reviews_rows[0]["advice"].startswith("resilient 里有 sil")
     assert reviews_rows[0]["answer_text"] == "resilent"
     assert reviews_rows[0]["verdict"] == "near"
+    # M7.4：复习题型进入 CSV；旧数据没有 mode 时为空串。
+    assert reviews_rows[0]["mode"] == ""
     assert reviews_rows[0]["distance"] == "1"
 
     articles_rows = list(
@@ -402,7 +454,7 @@ def test_export_empty_database(db: Database, tmp_path: Path) -> None:
     csv_result = service.export_csv(tmp_path / "empty_csv")
     words_text = (tmp_path / "empty_csv" / "words.csv").read_text(encoding="utf-8-sig")
     assert words_text.strip().startswith("id,lemma")
-    assert len(csv_result.files) == 12
+    assert len(csv_result.files) == 15
 
 
 def test_export_csv_directory_is_created(db: Database, tmp_path: Path) -> None:

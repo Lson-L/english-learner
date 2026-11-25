@@ -11,16 +11,20 @@ Service 组装好，页面只依赖它，不自己 new 这些东西，方便测�
 
 from __future__ import annotations
 
+import logging
 import threading
+from dataclasses import replace
 
-from ..models.entities import Profile
+from ..models.entities import Profile, today_str
 from ..storage.db import Database
 from ..storage.repositories import (
     AICallRepo,
     ArticleRepo,
+    ContentSourceRepo,
     LevelEvidenceRepo,
     ProfileRepo,
     QuizRepo,
+    RealTextRepo,
     ReviewRepo,
     StatsRepo,
     WeeklyReviewRepo,
@@ -41,10 +45,14 @@ from .level_progress import difficulty_hint as build_difficulty_hint
 from .metrics_service import MetricsService
 from .readability import ReadabilityThresholds
 from .reading_quiz_service import ReadingQuizService
+from .real_text_library import load_corpus, seed_real_texts, validate_corpus
+from .real_text_supply import RealTextSupplyService
 from .review_help_service import ReviewHelpService
 from .srs import ReviewService
 from .stats_overview import StatsOverview, StatsOverviewService
 from .weekly_review_service import WeeklyReviewService
+
+logger = logging.getLogger(__name__)
 
 
 class AppContext:
@@ -138,6 +146,72 @@ class AppContext:
     def writing_attempt_repo(self) -> WritingAttemptRepo:
         return self.db.writing_attempts
 
+    @property
+    def real_text_repo(self) -> RealTextRepo:
+        return self.db.real_texts
+
+    @property
+    def content_source_repo(self) -> ContentSourceRepo:
+        return self.db.content_sources
+
+    # ------------------------------------------------------------ 启动任务
+    def prepare_startup(self) -> None:
+        """启动准备（M7.0 / M7.1）：种子 → 弃读结算 → 今日真实文章决策。
+
+        全部是本地 SQLite 操作，不发网络请求；任何失败只记日志，
+        绝不阻塞启动。内容为空（version <= 0）时静默跳过种子。
+        """
+        self._seed_real_texts()
+        self._prepare_real_text_day()
+
+    def _seed_real_texts(self) -> None:
+        try:
+            corpus = load_corpus()
+        except Exception:  # noqa: BLE001 - 内容问题不能影响启动
+            logger.warning("真实文章库加载失败，跳过种子", exc_info=True)
+            return
+
+        if corpus.version <= 0 or not corpus.texts:
+            logger.info("真实文章库为空（version=%s），跳过种子", corpus.version)
+            return
+
+        errors = validate_corpus(corpus, require_levels=False)
+        if errors:
+            logger.warning("真实文章库校验未通过：%s", "; ".join(errors))
+            return
+
+        try:
+            seed_real_texts(self.db, corpus)
+        except Exception:  # noqa: BLE001 - 种子失败不影响 app 使用
+            logger.warning("真实文章库种子失败", exc_info=True)
+
+    def _prepare_real_text_day(self) -> None:
+        """M7.1：结算超期弃读，再决定今天是否安排一篇真实文章。"""
+        try:
+            today = today_str()
+            self.real_text_repo.expire_abandoned(today)
+            profile = self.profile()
+            config = self.store.load_real_text()
+            if profile is None or not config.auto_enabled:
+                return
+
+            decision = self.real_text_supply_service().decide(profile, config, today=today)
+            logger.info("真实文章供给决策：%s reason=%s", decision.action, decision.reason)
+            if not decision.should_serve:
+                if config.last_decision_on != today:
+                    self.store.save_real_text(replace(config, last_decision_on=today))
+                return
+
+            article = self.article_service().serve_real_text(decision.text, today=today)
+            if article is None:
+                # 上架失败时当天回退 AI 文章；不写 last_decision_on，
+                # 让用户重启后还有机会再试一次。
+                return
+            self.store.save_real_text(replace(config, last_decision_on=today))
+            logger.info("真实文章已安排：%s", decision.text.id)
+        except Exception:  # noqa: BLE001 - 供给失败必须回退 AI 文章
+            logger.warning("真实文章供给失败，回退 AI 文章", exc_info=True)
+
     # ------------------------------------------------------------------ 服务
     def learner_memory_service(self) -> LearnerMemoryService:
         """M5.2 学习者记忆：纯本地派生，0 次 AI 调用。"""
@@ -166,6 +240,11 @@ class AppContext:
             memory_provider=memory.build,
             hint_provider=self.difficulty_hint,
             readability=self.readability_thresholds(),
+            # M7.1：真实文章上架时顺带种预置题目、写供给历史。
+            quiz_seeder=lambda article, text: self.reading_quiz_service().seed_bundled_quiz(
+                article, text
+            ),
+            real_text_repo=self.real_text_repo,
         )
 
     def dictionary_service(self) -> DictionaryService:
@@ -185,6 +264,8 @@ class AppContext:
             self.word_repo,
             hint_provider=self.difficulty_hint,
             readability=self.readability_thresholds(),
+            # M7.2：调整难度替换真实文章时，由 ArticleService 统一记 overridden。
+            real_text_repo=self.real_text_repo,
         )
 
     def reading_quiz_service(self) -> ReadingQuizService:
@@ -197,6 +278,7 @@ class AppContext:
             self.level_evidence_repo,
             self.review_repo,
             memory_provider=memory.build,
+            real_text_repo=self.real_text_repo,
         )
 
     def weekly_review_service(self) -> WeeklyReviewService:
@@ -241,12 +323,23 @@ class AppContext:
         )
 
     def stats_overview(self) -> StatsOverview:
-        """统计页快照：热力图 / 累计曲线 / 成就全部本地计算，0 次 AI 调用。"""
+        """统计页快照：热力图 / 累计曲线 / 阅读剂量全部本地计算，0 次 AI 调用。"""
         return StatsOverviewService(
             self.stats_repo,
             self.word_repo,
             self.quiz_repo,
+            self.article_repo,
         ).build()
+
+    def real_text_supply_service(self) -> RealTextSupplyService:
+        """M7.1 自动供给决策：只读本地数据，0 次 AI / 0 次网络。"""
+        return RealTextSupplyService(
+            self.article_repo,
+            self.stats_repo,
+            self.quiz_repo,
+            self.real_text_repo,
+            self.word_repo,
+        )
 
     def export_service(self) -> ExportService:
         """数据导出同样是纯本地操作。"""
@@ -261,6 +354,8 @@ class AppContext:
             self.weekly_review_repo,
             self.ai_call_repo,
             self.writing_attempt_repo,
+            self.real_text_repo,
+            self.content_source_repo,
         )
 
     # ------------------------------------------------------------ 等级进度
@@ -279,7 +374,8 @@ class AppContext:
             profile,
             quizzes,
             self.review_repo.list_band_stats(),
-            self.article_repo.list_recent(limit=12),
+            # M7：真实文章是预估难度，不参与档内把握 / 生词趋势口径（D7）。
+            [a for a in self.article_repo.list_recent(limit=12) if _is_generated(a)],
         )
 
     def difficulty_hint(self) -> DifficultyHint:
@@ -291,7 +387,7 @@ class AppContext:
         return build_difficulty_hint(
             profile,
             self.quiz_repo.list_recent_formal_completed(limit=8),
-            self.article_repo.list_recent(limit=6),
+            [a for a in self.article_repo.list_recent(limit=6) if _is_generated(a)],
             max_unknown_ratio=thresholds.max_unknown_ratio,
         )
 
@@ -303,3 +399,8 @@ class AppContext:
         """当前学习等级；没测评过时先按 B1 处理（只影响 prompt 难度）。"""
         profile = self.profile()
         return profile.cefr_level if profile is not None else "B1"
+
+
+def _is_generated(article) -> bool:
+    """M7：真实文章不参与档内进度 / 难度提示的聚合（D7）。"""
+    return (getattr(article, "source", "") or "generated") == "generated"

@@ -11,7 +11,7 @@ Java 对照：
 - 自动提交模式（isolation_level=None），需要原子性时用 `transaction()` 显式包一层。
 
 迁移：
-- 版本号存在 `PRAGMA user_version` 里，当前 SCHEMA_VERSION = 8；
+- 版本号存在 `PRAGMA user_version` 里，当前 SCHEMA_VERSION = 9；
 - 建表语句全部是 `CREATE ... IF NOT EXISTS`，重复初始化不会报错；
 - v1 → v2：words 增加 mnemonic，review_logs 增加 note/advice，新增 word_forms
   词形缓存表；用 `ALTER TABLE ... ADD COLUMN` 原地升级，旧数据不丢；
@@ -33,7 +33,11 @@ Java 对照：
 - v8 内新增 writing_attempts（M5.4 回译练习）：新表由 `CREATE TABLE IF NOT EXISTS`
   自动补齐，不需要再升版本号，旧库启动后即可用；
 - v8 内新增 reading_quizzes.choice_notes_json（阅读检测“不知道”补充说明）：
-  与 articles.metrics_json 一样用幂等 `_add_column` 补齐，不升版本号。
+  与 articles.metrics_json 一样用幂等 `_add_column` 补齐，不升版本号；
+- v8 → v9（M7）：articles 增加 source / source_url / source_ref（文章来源）；
+  review_logs 增加 mode（语境复习，M7.4 使用）；新增 real_texts（真实文章库）、
+  real_text_history（供给历史）、content_sources（内置在线源，M7.7 使用）三张表。
+  新表由 `CREATE TABLE IF NOT EXISTS` 自动补齐，旧库只加列、不重建表。
 """
 
 from __future__ import annotations
@@ -51,9 +55,11 @@ from ..services.config_store import config_dir
 from .repositories import (
     AICallRepo,
     ArticleRepo,
+    ContentSourceRepo,
     LevelEvidenceRepo,
     ProfileRepo,
     QuizRepo,
+    RealTextRepo,
     ReviewRepo,
     StatsRepo,
     WeeklyReviewRepo,
@@ -61,7 +67,7 @@ from .repositories import (
     WritingAttemptRepo,
 )
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS profile (
@@ -92,6 +98,10 @@ CREATE TABLE IF NOT EXISTS articles (
     target_words_json TEXT   NOT NULL DEFAULT '[]',
     -- M5.3 本地可读性指标（生词比例 / 句长 / 目标词覆盖），空串表示旧文章没有指标
     metrics_json     TEXT    NOT NULL DEFAULT '',
+    -- M7 文章来源：generated（AI 生成）/ real（真实文章）/ imported（以后）
+    source           TEXT    NOT NULL DEFAULT 'generated',
+    source_url       TEXT    NOT NULL DEFAULT '',
+    source_ref       TEXT    NOT NULL DEFAULT '',
     read_at          TEXT,
     created_at       TEXT    NOT NULL
 );
@@ -144,7 +154,9 @@ CREATE TABLE IF NOT EXISTS review_logs (
     -- M5.1 拼写证据：用户输入、判定（correct/near/wrong/skipped）、编辑距离
     answer_text   TEXT    NOT NULL DEFAULT '',
     verdict       TEXT    NOT NULL DEFAULT '',
-    distance      INTEGER NOT NULL DEFAULT 0
+    distance      INTEGER NOT NULL DEFAULT 0,
+    -- M7.4 语境复习：normal / context（v9 先建列，旧库由 _add_column 补齐）
+    mode          TEXT    NOT NULL DEFAULT ''
 );
 
 -- 词形缓存：went → go。查询命中这里就不用再调用 AI 判断原形。
@@ -250,6 +262,62 @@ CREATE TABLE IF NOT EXISTS daily_stats (
     reviews_done INTEGER NOT NULL DEFAULT 0
 );
 
+-- M7 真实文章库：构建期 corpus.json 种子写入；运行期只读这里。
+CREATE TABLE IF NOT EXISTS real_texts (
+    id               TEXT    PRIMARY KEY,
+    title            TEXT    NOT NULL,
+    content          TEXT    NOT NULL,
+    level            TEXT    NOT NULL,
+    level_source     TEXT    NOT NULL DEFAULT '',
+    source           TEXT    NOT NULL DEFAULT '',
+    source_url       TEXT    NOT NULL DEFAULT '',
+    license          TEXT    NOT NULL DEFAULT '',
+    license_url      TEXT    NOT NULL DEFAULT '',
+    published        TEXT    NOT NULL DEFAULT '',
+    topics_json      TEXT    NOT NULL DEFAULT '[]',
+    word_count       INTEGER NOT NULL DEFAULT 0,
+    excerpt          INTEGER NOT NULL DEFAULT 0,
+    attribution      TEXT    NOT NULL DEFAULT '',
+    questions_json   TEXT    NOT NULL DEFAULT '[]',
+    fetched_at       TEXT    NOT NULL DEFAULT '',
+    content_hash     TEXT    NOT NULL DEFAULT '',
+    questions_source TEXT    NOT NULL DEFAULT 'bundled',
+    corpus_version   INTEGER NOT NULL DEFAULT 1,
+    created_at       TEXT    NOT NULL
+);
+
+-- 真实文章供给历史：每次上架一行，完成 / 换回 / 弃读都回写这里。
+CREATE TABLE IF NOT EXISTS real_text_history (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    text_id      TEXT    NOT NULL REFERENCES real_texts(id) ON DELETE CASCADE,
+    served_on    TEXT    NOT NULL,
+    article_id   INTEGER,
+    level        TEXT    NOT NULL DEFAULT '',
+    word_count   INTEGER NOT NULL DEFAULT 0,
+    status       TEXT    NOT NULL DEFAULT 'served',
+    score        REAL    NOT NULL DEFAULT 0,
+    self_report  TEXT    NOT NULL DEFAULT '',
+    outcome      TEXT    NOT NULL DEFAULT '',
+    completed_at TEXT    NOT NULL DEFAULT '',
+    created_at   TEXT    NOT NULL,
+    updated_at   TEXT    NOT NULL
+);
+
+-- M7.7 内置在线源：只存 URL 与抓取状态，正文成功抓取后写 real_texts。
+CREATE TABLE IF NOT EXISTS content_sources (
+    id              TEXT    PRIMARY KEY,
+    title           TEXT    NOT NULL DEFAULT '',
+    url             TEXT    NOT NULL,
+    level           TEXT    NOT NULL DEFAULT '',
+    license         TEXT    NOT NULL DEFAULT '',
+    source          TEXT    NOT NULL DEFAULT '',
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    last_attempt_at TEXT    NOT NULL DEFAULT '',
+    last_error      TEXT    NOT NULL DEFAULT '',
+    failure_count   INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT    NOT NULL
+);
+
 -- AI 调用记录：每次真实 HTTP 尝试一行（重试/降级会产生多行）。
 -- 只保存用量元数据，不保存提示词与模型回复；tokens 允许为空（网关不返回 usage）。
 CREATE TABLE IF NOT EXISTS ai_calls (
@@ -281,6 +349,8 @@ CREATE INDEX IF NOT EXISTS idx_writing_attempts_article ON writing_attempts(arti
 CREATE INDEX IF NOT EXISTS idx_writing_attempts_time ON writing_attempts(created_at);
 CREATE INDEX IF NOT EXISTS idx_ai_calls_time ON ai_calls(called_at);
 CREATE INDEX IF NOT EXISTS idx_ai_calls_task ON ai_calls(task);
+CREATE INDEX IF NOT EXISTS idx_real_text_history_text ON real_text_history(text_id);
+CREATE INDEX IF NOT EXISTS idx_real_text_history_served ON real_text_history(served_on);
 """
 
 
@@ -309,6 +379,8 @@ class Database:
         self._weekly: WeeklyReviewRepo | None = None
         self._ai_calls: AICallRepo | None = None
         self._writing: WritingAttemptRepo | None = None
+        self._real_texts: RealTextRepo | None = None
+        self._content_sources: ContentSourceRepo | None = None
         if initialize:
             self.connect()
 
@@ -389,6 +461,13 @@ class Database:
             self._add_column(conn, "review_logs", "answer_text", "TEXT NOT NULL DEFAULT ''")
             self._add_column(conn, "review_logs", "verdict", "TEXT NOT NULL DEFAULT ''")
             self._add_column(conn, "review_logs", "distance", "INTEGER NOT NULL DEFAULT 0")
+
+        if version < 9:
+            # M7：旧文章统一视为 AI 生成；新表由上面的 CREATE TABLE IF NOT EXISTS 补齐。
+            self._add_column(conn, "articles", "source", "TEXT NOT NULL DEFAULT 'generated'")
+            self._add_column(conn, "articles", "source_url", "TEXT NOT NULL DEFAULT ''")
+            self._add_column(conn, "articles", "source_ref", "TEXT NOT NULL DEFAULT ''")
+            self._add_column(conn, "review_logs", "mode", "TEXT NOT NULL DEFAULT ''")
 
         # articles.metrics_json 属于 v8 的 M5.3 增量，但 M5.1 已经把 v8 发布出去了
         # （当时还没有这一列），所以不能放进 `version < 8` 分支，否则已经是 v8 的
@@ -510,3 +589,15 @@ class Database:
         if self._writing is None:
             self._writing = WritingAttemptRepo(self)
         return self._writing
+
+    @property
+    def real_texts(self) -> RealTextRepo:
+        if self._real_texts is None:
+            self._real_texts = RealTextRepo(self)
+        return self._real_texts
+
+    @property
+    def content_sources(self) -> ContentSourceRepo:
+        if self._content_sources is None:
+            self._content_sources = ContentSourceRepo(self)
+        return self._content_sources

@@ -83,6 +83,9 @@ def test_initialize_is_idempotent(tmp_path: Path) -> None:
         "daily_stats",
         "reading_quizzes",
         "writing_attempts",
+        "real_texts",
+        "real_text_history",
+        "content_sources",
     } <= tables
     second.close()
 
@@ -1143,3 +1146,115 @@ def test_migrate_v8_database_adds_quiz_choice_notes_column(tmp_path: Path) -> No
         assert int(reopened.query_one("PRAGMA user_version")["user_version"]) == SCHEMA_VERSION
     finally:
         reopened.close()
+
+
+def test_article_source_columns_roundtrip(db: Database) -> None:
+    """M7：文章来源三列要能完整往返，旧代码不传时默认 generated。"""
+    article = db.articles.insert(
+        make_article(
+            source="real",
+            source_url="https://example.com/story",
+            source_ref="gutenberg-the-gift-of-the-magi",
+        )
+    )
+    assert article.id is not None
+    loaded = db.articles.get_by_date(article.article_date)
+    assert loaded is not None
+    assert loaded.source == "real"
+    assert loaded.source_url == "https://example.com/story"
+    assert loaded.source_ref == "gutenberg-the-gift-of-the-magi"
+
+    default = db.articles.insert(make_article(article_date="2026-11-20"))
+    assert default.source == "generated"
+
+
+def test_migrate_v8_database_adds_real_text_tables_and_source_columns(tmp_path: Path) -> None:
+    """v8 旧库升级到 v9：加来源列 / mode，建三张新表，旧文章默认 generated。"""
+    path = tmp_path / "v8.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE articles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            article_date TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            level TEXT NOT NULL,
+            topic TEXT NOT NULL DEFAULT '',
+            word_count INTEGER NOT NULL DEFAULT 0,
+            target_words_json TEXT NOT NULL DEFAULT '[]',
+            metrics_json TEXT NOT NULL DEFAULT '',
+            read_at TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE review_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            word_id INTEGER NOT NULL,
+            rating INTEGER NOT NULL,
+            prev_interval INTEGER NOT NULL,
+            next_interval INTEGER NOT NULL,
+            reviewed_at TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            advice TEXT NOT NULL DEFAULT '',
+            answer_text TEXT NOT NULL DEFAULT '',
+            verdict TEXT NOT NULL DEFAULT '',
+            distance INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO articles (article_date, title, content, level, created_at)
+            VALUES ('2026-11-19', 'Old', 'Old content.', 'B1', '2026-11-19T08:00:00');
+        PRAGMA user_version = 8;
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    try:
+        article_columns = {str(row["name"]) for row in db.query_all("PRAGMA table_info(articles)")}
+        assert {"source", "source_url", "source_ref"} <= article_columns
+        log_columns = {str(row["name"]) for row in db.query_all("PRAGMA table_info(review_logs)")}
+        assert "mode" in log_columns
+        tables = {
+            str(item["name"])
+            for item in db.query_all("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert {"real_texts", "real_text_history", "content_sources"} <= tables
+
+        old = db.articles.get_by_date("2026-11-19")
+        assert old is not None
+        assert old.source == "generated"
+        assert old.source_url == ""
+        assert old.source_ref == ""
+    finally:
+        db.close()
+
+
+def test_review_log_mode_roundtrip(db: Database) -> None:
+    """M7.4：review_logs.mode 要能落库并按词读回。"""
+    word = db.words.upsert(
+        Word(
+            lemma="contextual",
+            in_vocabulary=True,
+            created_at=now_iso(),
+            updated_at=now_iso(),
+        )
+    )
+    assert word.id is not None
+
+    db.reviews.log(
+        word_id=word.id,
+        rating=3,
+        prev_interval=0,
+        next_interval=1,
+        mode="context",
+    )
+    db.reviews.log(
+        word_id=word.id,
+        rating=2,
+        prev_interval=1,
+        next_interval=2,
+        mode="spelling",
+    )
+
+    logs = db.reviews.list_for_word(word.id)
+    assert {log.mode for log in logs} == {"context", "spelling"}

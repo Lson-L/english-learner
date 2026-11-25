@@ -20,6 +20,7 @@ from english_learner.services.recall import (  # noqa: E402
     STATUS_WRONG,
 )
 from english_learner.services.review_plan import (  # noqa: E402
+    CARD_CONTEXT,
     CARD_DUAL,
     CARD_RECOGNITION,
     CARD_SPELLING,
@@ -922,3 +923,58 @@ def test_end_session_early_saves_partial_progress(db: Database, tmp_path: Path) 
     assert page._finish_button.isHidden() is True
     assert "继续复习" in page._continue_button.text()
     assert db.stats.get().reviews_done == 2
+
+
+def test_context_card_masks_sentence_and_logs_mode(db: Database, tmp_path: Path) -> None:
+    """M7.4：新词优先语境识别；选中后按实际评分，日志记录 context 模式。"""
+    get_app()
+    for lemma in ("alpha", "beta", "gamma", "delta"):
+        db.words.upsert(make_word(lemma))
+
+    page = ReviewPage(make_context(db, tmp_path))
+    page.on_activated()
+    page._start_session()
+
+    assert page._current_mode == CARD_CONTEXT
+    assert page._mode_label.text() == "语境识别"
+    question = page._context_question
+    assert question is not None
+    assert page._context_prompt.text() == question.masked_sentence
+    assert "____" in question.masked_sentence
+    assert page._context_box.isHidden() is False
+    assert page._word_label.isHidden() is True
+
+    page._choose_context(question.answer_index)
+
+    assert page._revealed is True
+    assert page._rating_hint.text().startswith("选对了")
+    current_id = page._current.id
+    assert current_id is not None
+    page._rate(RATING_KNOWN)
+
+    logs = db.reviews.list_for_word(current_id)
+    assert logs and logs[0].mode == "context"
+
+
+def test_switch_mode_cycles_between_available_modes(db: Database, tmp_path: Path) -> None:
+    """M7.4：允许单卡切换题型，且不写库、不影响排期。"""
+    get_app()
+    for lemma in ("alpha", "beta", "gamma", "delta"):
+        db.words.upsert(make_word(lemma))
+
+    page = ReviewPage(make_context(db, tmp_path))
+    page.on_activated()
+    page._start_session()
+    word_id = page._current.id
+    assert page._current_mode == CARD_CONTEXT
+
+    page._switch_mode()
+    assert page._current_mode != CARD_CONTEXT
+    assert page._session[page._index].context is None
+
+    page._switch_mode()
+    page._switch_mode()
+    assert page._current_mode == CARD_CONTEXT
+
+    # 切换题型只是内存状态：没有评分、没有日志。
+    assert db.reviews.list_for_word(word_id) == []

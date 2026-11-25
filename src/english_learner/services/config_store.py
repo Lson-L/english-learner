@@ -241,6 +241,38 @@ class WindowState:
 
 
 @dataclass(frozen=True)
+class RealTextConfig:
+    """真实文章供给偏好，放在 config.json 的 `real_text` 段（M7.1）。
+
+    `auto_enabled`：关掉后永不再自动供给；阅读页仍可手动「换回 AI 文章」。
+    `last_decision_on`：保证每天只决策一次（成功或跳过都算已决策）。
+    """
+
+    auto_enabled: bool = True
+    last_decision_on: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "auto_enabled": bool(self.auto_enabled),
+            "last_decision_on": str(self.last_decision_on or "").strip(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> RealTextConfig:
+        if not isinstance(data, dict):
+            return cls()
+        raw_enabled = data.get("auto_enabled", True)
+        if isinstance(raw_enabled, str):
+            enabled = raw_enabled.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            enabled = bool(raw_enabled)
+        return cls(
+            auto_enabled=enabled,
+            last_decision_on=str(data.get("last_decision_on") or "").strip(),
+        )
+
+
+@dataclass(frozen=True)
 class ReviewConfig:
     """复习偏好，放在 config.json 的 `review` 段。
 
@@ -384,6 +416,18 @@ class ConfigStore:
         payload["review"] = normalized.to_dict()
         self._write_payload(payload)
         return normalized
+
+    def load_real_text(self) -> RealTextConfig:
+        """读取真实文章供给偏好；文件缺失或格式损坏一律回退默认值。"""
+        return RealTextConfig.from_dict(self._read_payload().get("real_text", {}))
+
+    def save_real_text(self, config: RealTextConfig) -> RealTextConfig:
+        """只更新 `real_text` 段，与 `save_ui` 一样保留其它配置。"""
+        payload = self._strip_legacy_ai_fields(self._read_payload())
+        payload.setdefault("version", CONFIG_VERSION)
+        payload["real_text"] = config.to_dict()
+        self._write_payload(payload)
+        return config
 
     def load_readability(self) -> ReadabilityThresholds:
         """读取本地可读性阈值；缺失或非法一律回退默认值。"""

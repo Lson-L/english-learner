@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -39,6 +40,7 @@ from ...services.readability import ReadabilityMetrics, threshold_warnings
 from ...services.reading_quiz_service import UPGRADE_EVIDENCE_REQUIRED
 from ..level_feedback_dialog import LevelFeedbackDialog
 from ..reading_quiz_dialog import ReadingQuizDialog
+from ..real_text_source_dialog import RealTextSourceDialog
 from ..regenerate_dialog import RegenerateDialog
 from ..widgets import ArticleView, WordPanel, busy_progress_bar
 from ..workers import TaskWorker, retire_worker
@@ -66,6 +68,8 @@ class ReaderPage(QWidget):
         self._generation_failed = False
         # 当前 UI 槽位里的任务类型，取消后据此恢复不同状态。
         self._busy_phase = ""
+        # M7.1：用户点「换回 AI 文章」后暂存 text_id，生成成功再标记 overridden。
+        self._real_override_ref = ""
 
         self._build_ui()
 
@@ -115,6 +119,27 @@ class ReaderPage(QWidget):
         self._meta_label = QLabel("")
         self._meta_label.setObjectName("mutedCompact")
         layout.addWidget(self._meta_label)
+
+        # M7.1：真实文章顶部细横幅：说明来源 + 换回 AI 文章的逃生口。
+        self._real_banner = QWidget()
+        banner_row = QHBoxLayout(self._real_banner)
+        banner_row.setContentsMargins(0, 0, 0, 0)
+        banner_row.setSpacing(10)
+        self._real_banner_label = QLabel("")
+        self._real_banner_label.setObjectName("muted")
+        self._real_banner_label.setWordWrap(True)
+        banner_row.addWidget(self._real_banner_label, 1)
+        self._real_source_button = QPushButton("来源")
+        self._real_source_button.setObjectName("linkButton")
+        self._real_source_button.clicked.connect(self._on_real_source_clicked)
+        banner_row.addWidget(self._real_source_button)
+        self._real_override_button = QPushButton("换回 AI 文章")
+        self._real_override_button.setObjectName("secondaryButton")
+        self._real_override_button.setToolTip("替换今天的真实文章，之后不会再自动出现")
+        self._real_override_button.clicked.connect(self._on_real_override_clicked)
+        banner_row.addWidget(self._real_override_button)
+        self._real_banner.setVisible(False)
+        layout.addWidget(self._real_banner)
 
         status_row = QHBoxLayout()
         status_row.setSpacing(10)
@@ -183,6 +208,7 @@ class ReaderPage(QWidget):
             self._view.set_article(None)
             self._title_label.setText("今日文章 · 尚未生成")
             self._meta_label.setText("")
+            self._real_banner.setVisible(False)
             self._quiz_button.setText("阅读完成")
             self._quiz_button.setEnabled(False)
             if self._generation_failed:
@@ -208,7 +234,10 @@ class ReaderPage(QWidget):
         self._current_word_id = None
 
         self._title_label.setText(article.title)
+        is_real = (article.source or "") == "real"
         meta_parts = [article.level, f"{article.word_count} 词"]
+        if is_real:
+            meta_parts.append(f"真实文章 · 约 {article.level}（预估）")
         if article.topic:
             meta_parts.append(article.topic)
         # M5.3：本地可读性指标（旧文章没有 metrics 时整段不显示）。
@@ -220,6 +249,13 @@ class ReaderPage(QWidget):
             if threshold_warnings(metrics, self._context.readability_thresholds()):
                 meta_parts.append("偏难")
         self._meta_label.setText(" · ".join(meta_parts))
+
+        self._real_banner.setVisible(is_real)
+        if is_real:
+            ratio_text = ""
+            if metrics is not None and metrics.wordlist_size > 0 and metrics.word_total:
+                ratio_text = f" · 预计生词 {metrics.unknown_ratio:.0%}"
+            self._real_banner_label.setText(f"为你安排的真实文章{ratio_text}")
 
         self._generate_button.setVisible(False)
         self._regenerate_button.setEnabled(True)
@@ -328,6 +364,11 @@ class ReaderPage(QWidget):
             return
 
         service = self._context.article_service()
+        if regenerate and self._article is not None:
+            # 无论是「换一篇」还是横幅上的「换回 AI」，替换掉真实文章后
+            # 都要在生成成功时记 overridden/skip（M7.2）。
+            if (self._article.source or "") == "real":
+                self._real_override_ref = self._real_override_ref or self._article.source_ref
         if regenerate:
             self._busy_phase = "regenerate"
             if user_request:
@@ -350,6 +391,32 @@ class ReaderPage(QWidget):
         worker.finished.connect(self._on_worker_finished)
         self._worker = worker
         worker.start()
+
+    # ------------------------------------------------------------ 真实文章
+    def _on_real_source_clicked(self) -> None:
+        """展示真实文章的来源 / 许可（只读，不发网络请求）。"""
+        if self._article is None or (self._article.source or "") != "real":
+            return
+        text = self._context.real_text_repo.get(self._article.source_ref)
+        RealTextSourceDialog(text, parent=self).exec()
+
+    def _on_real_override_clicked(self) -> None:
+        """用户主动换回 AI 文章：确认后走原「换一篇」生成流程。"""
+        if self._article is None or (self._article.source or "") != "real":
+            return
+        if self._worker is not None and self._worker.isRunning():
+            return
+        confirm = QMessageBox.question(
+            self,
+            "换回 AI 文章",
+            "今天这篇真实文章会被替换，之后不会再出现。确定换回 AI 文章吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self._real_override_ref = self._article.source_ref
+        self._start_generation(regenerate=True)
 
     def _on_generate_clicked(self) -> None:
         # 用户主动重试：清掉失败标记，允许本次会话继续自动生成。
@@ -387,6 +454,18 @@ class ReaderPage(QWidget):
             return
 
         outcome = dialog.result_outcome
+        previous = self._article
+        if (
+            previous is not None
+            and (previous.source or "") == "real"
+            and (outcome.article.source or "") == "generated"
+            and previous.source_ref
+        ):
+            try:
+                self._context.real_text_repo.mark_overridden(previous.source_ref)
+            except Exception:  # noqa: BLE001 - 标记失败不影响新文章
+                logger.warning("标记真实文章已换回失败", exc_info=True)
+        self._real_override_ref = ""
         self._load_article(outcome.article)
         if outcome.level_changed:
             set_status(
@@ -452,9 +531,17 @@ class ReaderPage(QWidget):
         if not isinstance(result, Article):
             set_status(self._status, "生成完成，但返回了意外数据。", "error")
             return
+        if self._real_override_ref and (result.source or "") == "generated":
+            try:
+                self._context.real_text_repo.mark_overridden(self._real_override_ref)
+            except Exception:  # noqa: BLE001 - 标记失败不影响新文章
+                logger.warning("标记真实文章已换回失败", exc_info=True)
+        self._real_override_ref = ""
         self._load_article(result)
 
     def _on_article_failed(self, message: str) -> None:
+        # 换回 AI 失败：保留真实文章，下次还能再点。
+        self._real_override_ref = ""
         # 已有文章时只是“换一篇/重写”失败，旧文章还在，不要显示“重试生成”。
         if self._article is None:
             self._generation_failed = True
@@ -617,6 +704,8 @@ class ReaderPage(QWidget):
 
     def _on_cancel_clicked(self) -> None:
         """取消当前查词/生成：旧请求转入后台自行结束，界面立刻可继续操作。"""
+        # 取消后这次「换回 AI / 换一篇」没有发生，不能把标记留到后续生成。
+        self._real_override_ref = ""
         worker = self._worker
         if worker is None or worker.isFinished():
             self._set_busy(False)
@@ -648,6 +737,8 @@ class ReaderPage(QWidget):
     def _on_worker_finished(self) -> None:
         self._worker = None
         self._busy_phase = ""
+        # 兜底：任务以任何终态结束时都不应留下“待标记 overridden”的旧引用。
+        self._real_override_ref = ""
         self._set_busy(False)
         if self._article is not None:
             self._regenerate_button.setEnabled(True)

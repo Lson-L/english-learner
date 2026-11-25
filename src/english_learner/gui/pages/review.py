@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from ...models.entities import Word, today_str
 from ...services.app_context import AppContext
 from ...services.config_store import ReviewConfig
+from ...services.context_review import ContextQuestion, build_context_question
 from ...services.recall import (
     STATUS_CORRECT,
     STATUS_NEAR,
@@ -44,6 +45,7 @@ from ...services.recall import (
     check_spelling,
 )
 from ...services.review_plan import (
+    CARD_CONTEXT,
     CARD_DUAL,
     CARD_RECOGNITION,
     CARD_SPELLING,
@@ -79,6 +81,15 @@ _MODE_TITLES = {
     CARD_RECOGNITION: "看词回忆",
     CARD_SPELLING: "拼写回忆",
     CARD_DUAL: "看词 + 拼写",
+    CARD_CONTEXT: "语境识别",
+}
+
+# review_logs.mode 的取值：只记录“实际用了什么题型”，不参与 SRS 调度。
+_LOG_MODES = {
+    CARD_CONTEXT: "context",
+    CARD_RECOGNITION: "recall",
+    CARD_SPELLING: "spelling",
+    CARD_DUAL: "spelling",
 }
 
 _IDLE_HINT = (
@@ -111,7 +122,12 @@ class ReviewPage(QWidget):
         self._revealed = False
         self._reviewed = 0
         self._recalled = 0
-        self._mode_counts = {CARD_RECOGNITION: 0, CARD_SPELLING: 0, CARD_DUAL: 0}
+        self._mode_counts = {
+            CARD_CONTEXT: 0,
+            CARD_RECOGNITION: 0,
+            CARD_SPELLING: 0,
+            CARD_DUAL: 0,
+        }
 
         # 分批关卡：_round_start 是本轮第一张卡的下标，_round_* 只统计本轮。
         self._round_start = 0
@@ -124,6 +140,11 @@ class ReviewPage(QWidget):
         self._prompt: SpellingPrompt | None = None
         self._recall_result: RecallResult | None = None
         self._spell_input_active = False
+
+        # M7.4 语境识别：当前题、干扰项池与可复现种子。
+        self._context_question: ContextQuestion | None = None
+        self._context_pool: tuple[Word, ...] = ()
+        self._context_seed = 0
 
         # 撤销上一张：记录评分前的词条与刚写入的日志 id。
         self._last_undo: _UndoState | None = None
@@ -242,7 +263,39 @@ class ReviewPage(QWidget):
         self._mode_label = QLabel("")
         self._mode_label.setObjectName("muted")
         progress_row.addWidget(self._mode_label)
+        # M7.4：允许用户单卡切换题型（语境 / 看词 / 拼写），不改变调度。
+        self._switch_button = QPushButton("切换题型")
+        self._switch_button.setObjectName("linkButton")
+        self._switch_button.setToolTip("只切换当前这张卡的题型，不影响复习排期")
+        self._switch_button.clicked.connect(self._switch_mode)
+        progress_row.addWidget(self._switch_button)
         box.addLayout(progress_row)
+
+        # 语境识别正面：挖空例句 + 4 个选项，原词 / 音标 / 原形都先藏起来。
+        self._context_box = QWidget()
+        context_layout = QVBoxLayout(self._context_box)
+        context_layout.setContentsMargins(0, 0, 0, 0)
+        context_layout.setSpacing(10)
+
+        self._context_hint = QLabel("根据句子选择最合适的词")
+        self._context_hint.setObjectName("muted")
+        context_layout.addWidget(self._context_hint)
+
+        self._context_prompt = QLabel("")
+        self._context_prompt.setObjectName("reviewPrompt")
+        self._context_prompt.setWordWrap(True)
+        context_layout.addWidget(self._context_prompt)
+
+        self._context_options: list[QPushButton] = []
+        for index in range(4):
+            option = QPushButton("")
+            option.setObjectName("secondaryButton")
+            option.clicked.connect(lambda _checked=False, item=index: self._choose_context(item))
+            context_layout.addWidget(option)
+            self._context_options.append(option)
+
+        self._context_box.setVisible(False)
+        box.addWidget(self._context_box)
 
         # 拼写正面 / 双阶段默写：只给释义和挖空例句，原词 / 音标 / 原形都藏起来。
         self._spelling_box = QWidget()
@@ -539,6 +592,8 @@ class ReviewPage(QWidget):
         self._prompt = None
         self._recall_result = None
         self._spell_input_active = False
+        self._context_question = None
+        self._context_pool = ()
         # 回到概览等于放弃本轮内存状态；已评分的卡片早已落库，不受影响。
         self._session = []
         self._index = 0
@@ -572,13 +627,25 @@ class ReviewPage(QWidget):
         history = self._context.review_repo.last_reviews(
             [word.id for word in words if word.id is not None]
         )
+        # M7.4：语境题的干扰项从全部生词里取；种子按当天固定，同一天可复现。
+        self._context_pool = tuple(self._context.word_repo.list_all())
+        self._context_seed = int(today_str().replace("-", "") or 0)
         self._session = build_session_plan(
-            words, history, spelling_enabled=review_config.spelling_enabled
+            words,
+            history,
+            spelling_enabled=review_config.spelling_enabled,
+            context_pool=self._context_pool,
+            context_seed=self._context_seed,
         )
         self._index = 0
         self._reviewed = 0
         self._recalled = 0
-        self._mode_counts = {CARD_RECOGNITION: 0, CARD_SPELLING: 0, CARD_DUAL: 0}
+        self._mode_counts = {
+            CARD_CONTEXT: 0,
+            CARD_RECOGNITION: 0,
+            CARD_SPELLING: 0,
+            CARD_DUAL: 0,
+        }
         self._round_start = 0
         self._round_no = 1
         self._round_reviewed = 0
@@ -605,6 +672,7 @@ class ReviewPage(QWidget):
         self._prompt = (
             build_spelling_prompt(word) if card.mode in (CARD_SPELLING, CARD_DUAL) else None
         )
+        self._context_question = card.context if card.mode == CARD_CONTEXT else None
 
         # 换卡时回到正文顶部，避免沿用上一张卡翻到底后的滚动位置。
         self._scroll.verticalScrollBar().setValue(0)
@@ -649,13 +717,19 @@ class ReviewPage(QWidget):
         self._spelling_input.setEnabled(True)
         self._spelling_submit.setVisible(True)
         self._spelling_submit.setEnabled(True)
+        self._context_box.setVisible(False)
+        for option in self._context_options:
+            option.setEnabled(True)
 
-        if card.mode == CARD_SPELLING:
+        if card.mode == CARD_CONTEXT:
+            self._show_context_front()
+        elif card.mode == CARD_SPELLING:
             self._show_spelling_front()
         else:
             self._show_recognition_front()
             if card.mode == CARD_DUAL:
                 self._reveal_button.setText("显示释义并默写（空格）")
+        self._switch_button.setEnabled(len(self._available_modes()) > 1)
         self._refresh_undo_buttons()
 
     def _show_spelling_front(self) -> None:
@@ -702,6 +776,106 @@ class ReviewPage(QWidget):
         self._rating_hint.setVisible(False)
         self._set_shortcuts_enabled(True)
 
+    # -------------------------------------------------------------- 语境识别
+    def _context_question_for(self, word: Word) -> ContextQuestion | None:
+        if not self._context_pool:
+            return None
+        return build_context_question(
+            word, self._context_pool, seed=self._context_seed + self._index
+        )
+
+    def _show_context_front(self) -> None:
+        """语境识别正脸：挖空例句 + 4 个选项。"""
+        question = self._context_question
+        if question is None:
+            # 题面不可用（例句被删 / 词形对不上）时回退看词回忆，不能让界面卡住。
+            self._current_mode = CARD_RECOGNITION
+            self._mode_label.setText(_MODE_TITLES[CARD_RECOGNITION])
+            self._show_recognition_front()
+            return
+
+        self._spelling_box.setVisible(False)
+        self._context_box.setVisible(True)
+        self._context_prompt.setText(question.masked_sentence)
+        for index, option in enumerate(self._context_options):
+            option.setText(question.options[index] if index < len(question.options) else "")
+            option.setVisible(index < len(question.options))
+            option.setEnabled(True)
+
+        # 正面不能露题：原词、原形、音标、原文都先藏起来。
+        self._word_label.setVisible(False)
+        self._lemma_label.setVisible(False)
+        self._phonetic_label.setVisible(False)
+        self._pos_label.setVisible(False)
+        self._context_label.setVisible(False)
+
+        self._reveal_button.setText("想不起来，直接看答案（跳过）")
+        self._reveal_button.setVisible(True)
+        self._answer_box.setVisible(False)
+        self._rating_bar.setVisible(False)
+        self._rating_hint.setVisible(False)
+        self._set_shortcuts_enabled(True)
+
+    def _choose_context(self, index: int) -> None:
+        """选中一个选项：本地判分 → 展示答案 → 允许按 1~4 评分。"""
+        question = self._context_question
+        if question is None or self._revealed:
+            return
+        correct = index == question.answer_index
+        for position, option in enumerate(self._context_options):
+            option.setEnabled(False)
+            if position == question.answer_index:
+                option.setText(f"✓ {option.text()}")
+            elif position == index:
+                option.setText(f"✗ {option.text()}")
+        self._revealed = True
+        self._answer_box.setVisible(True)
+        self._show_rating_bar()
+        if correct:
+            self._rating_hint.setText("选对了，建议「认识」；最终按你的实际记忆评分。")
+        else:
+            self._rating_hint.setText("选错了，建议「忘记」；最终按你的实际记忆评分。")
+        self._scroll_to(self._answer_box)
+
+    def _reveal_context_answer(self) -> None:
+        """语境题直接看答案：标出正确选项，不预设评分。"""
+        question = self._context_question
+        if question is not None:
+            for position, option in enumerate(self._context_options):
+                option.setEnabled(False)
+                if position == question.answer_index:
+                    option.setText(f"✓ {option.text()}")
+        self._rating_hint.setText("已显示正确答案，按实际记忆程度评分。")
+
+    def _available_modes(self) -> list[str]:
+        """当前词可用的题型：语境（有题时）/ 看词 / 拼写（能出题时）。"""
+        word = self._current
+        if word is None:
+            return [self._current_mode]
+        modes: list[str] = []
+        if self._context_question is not None or self._context_question_for(word) is not None:
+            modes.append(CARD_CONTEXT)
+        modes.append(CARD_RECOGNITION)
+        if build_spelling_prompt(word) is not None:
+            modes.append(CARD_SPELLING)
+        return modes
+
+    def _switch_mode(self) -> None:
+        """单卡切换题型；只改当前卡的内存形态，不改调度与历史。"""
+        if not self._is_session_active() or self._revealed or self._current is None:
+            return
+        modes = self._available_modes()
+        if len(modes) < 2:
+            return
+        current = self._current_mode if self._current_mode in modes else modes[0]
+        new_mode = modes[(modes.index(current) + 1) % len(modes)]
+        context = self._context_question_for(self._current) if new_mode == CARD_CONTEXT else None
+        self._session[self._index] = replace(
+            self._session[self._index], mode=new_mode, context=context
+        )
+        self._show_current()
+        self.setFocus()
+
     def _fill_spelling_prompt(self, hint: str) -> None:
         """把题面写进拼写区；拼写正面与双阶段默写共用。"""
         prompt = self._prompt
@@ -722,7 +896,12 @@ class ReviewPage(QWidget):
             return
         self._revealed = True
 
-        if self._current_mode == CARD_SPELLING:
+        if self._current_mode == CARD_CONTEXT:
+            self._reveal_context_answer()
+            self._answer_box.setVisible(True)
+            self._show_rating_bar()
+            self._scroll_to(self._answer_box)
+        elif self._current_mode == CARD_SPELLING:
             self._reveal_spelling_answer()
             self._answer_box.setVisible(True)
             self._show_rating_bar()
@@ -919,6 +1098,7 @@ class ReviewPage(QWidget):
                 answer_text=answer_text,
                 verdict=verdict,
                 distance=distance,
+                mode=_LOG_MODES.get(mode, ""),
             )
         except Exception as exc:  # noqa: BLE001 - 本地写库失败不能让界面崩掉
             logger.exception("复习评分失败")

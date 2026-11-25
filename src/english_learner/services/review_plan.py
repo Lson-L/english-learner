@@ -33,13 +33,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from ..models.entities import Word
+from .context_review import ContextQuestion, build_context_question
 from .recall import build_spelling_prompt
 from .srs import RATING_VAGUE, VERDICT_NEAR, VERDICT_WRONG
 
-# 卡片形态；复习页按这三个值分支展示。
+# 卡片形态；复习页按这些值分支展示。
 CARD_RECOGNITION = "recognition"
 CARD_SPELLING = "spelling"
 CARD_DUAL = "dual"
+# M7.4：首次学习优先语境识别（挖空例句 + 4 选 1），数据不足回退看词回忆。
+CARD_CONTEXT = "context"
 
 # 同一种卡面连续出现的上限；超过就尝试把后面最近的异类卡提前。
 MAX_CONSECUTIVE_SAME_FRONT = 2
@@ -58,6 +61,8 @@ class ReviewCard:
 
     word: Word
     mode: str
+    # M7.4：语境识别题的题面；只有 mode == CARD_CONTEXT 时非空。
+    context: ContextQuestion | None = None
 
 
 def _meaning_has_hint(text: str) -> bool:
@@ -70,18 +75,25 @@ def _meaning_has_hint(text: str) -> bool:
     return bool(re.sub(r"[_\W]+", "", str(text or "")))
 
 
-def plan_card(word: Word, *, last_rating: int = 0, last_verdict: str = "") -> str:
+def plan_card(
+    word: Word,
+    *,
+    last_rating: int = 0,
+    last_verdict: str = "",
+    context_available: bool = False,
+) -> str:
     """返回该词本次应使用的卡片形态。
 
     `last_rating` / `last_verdict` 来自 `review_logs` 最近一条记录；
-    没有历史时传 0 / 空串即可。
+    没有历史时传 0 / 空串即可。`context_available` 表示已成功生成语境识别题
+    （有例句、能挖空、干扰项足够），首次学习时优先用它。
     """
+    # 首次学习（或上次评“忘记”后重置）先认义：有语境题就用语境题。
+    if int(word.repetitions) <= 0:
+        return CARD_CONTEXT if context_available else CARD_RECOGNITION
     # 拼写不可用（短语、缺释义、题面生成失败）直接回退看词。
     prompt = build_spelling_prompt(word)
     if prompt is None or not _meaning_has_hint(prompt.meaning):
-        return CARD_RECOGNITION
-    # 首次学习（或上次评“忘记”后重置）先认义，不要求产出。
-    if int(word.repetitions) <= 0:
         return CARD_RECOGNITION
     # 上次没记牢：先重新认一遍，再默写一次。
     if last_rating and int(last_rating) <= RATING_VAGUE:
@@ -100,23 +112,43 @@ def build_session_plan(
     history: ReviewHistory | None = None,
     *,
     spelling_enabled: bool = True,
+    context_pool: tuple[Word, ...] | list[Word] | None = None,
+    context_seed: int = 0,
 ) -> list[ReviewCard]:
     """把到期词列表编排成本轮卡片序列（已做穿插）。
 
-    `spelling_enabled=False` 时全部排成看词回忆：用户当前只需要「看到词
-    能想起意思」，不要求产出拼写。关闭时也不再穿插，因为只有一种卡面。
+    `spelling_enabled=False` 时只排认义类卡片（语境识别 / 看词回忆）：
+    用户当前只需要「看到词能想起意思」，不要求产出拼写。
+    `context_pool` 是语境题的干扰项池（通常是全部生词）；不传则本轮回退
+    旧的看词 / 拼写编排，保证旧测试与旧行为不变。
     """
     records = history or {}
+    pool = tuple(context_pool or ())
     cards: list[ReviewCard] = []
-    for word in words:
+    for index, word in enumerate(words):
         rating, verdict = records.get(word.id or -1, (0, ""))
-        mode = (
-            plan_card(word, last_rating=rating, last_verdict=verdict)
-            if spelling_enabled
-            else CARD_RECOGNITION
+        context = None
+        if pool and int(word.repetitions) <= 0:
+            context = build_context_question(word, pool, seed=context_seed + index)
+        if spelling_enabled:
+            mode = plan_card(
+                word,
+                last_rating=rating,
+                last_verdict=verdict,
+                context_available=context is not None,
+            )
+        else:
+            mode = CARD_CONTEXT if context is not None else CARD_RECOGNITION
+        cards.append(
+            ReviewCard(
+                word=word,
+                mode=mode,
+                context=context if mode == CARD_CONTEXT else None,
+            )
         )
-        cards.append(ReviewCard(word=word, mode=mode))
-    return _interleave(cards) if spelling_enabled else cards
+    if spelling_enabled or any(card.mode == CARD_CONTEXT for card in cards):
+        return _interleave(cards)
+    return cards
 
 
 def _front(mode: str) -> str:

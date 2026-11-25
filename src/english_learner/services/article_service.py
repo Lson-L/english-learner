@@ -16,9 +16,9 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import date
 
-from ..models.entities import Article, Profile, Word, now_iso, today_str
+from ..models.entities import Article, Profile, RealText, Word, now_iso, today_str
 from ..storage.db import DuplicateError
-from ..storage.repositories import ArticleRepo, WordRepo
+from ..storage.repositories import ArticleRepo, RealTextRepo, WordRepo
 from .ai_client import AIError
 from .ai_protocol import TextCompleter
 from .json_utils import JsonParseError, as_str_list, as_text, parse_json_object
@@ -135,6 +135,10 @@ class ArticleDraft:
     # M6.5 档内位置：low / mid / high 及推导理由，随指标一起入库。
     within_level: str = ""
     hint_reason: str = ""
+    # M7：文章来源。AI 生成保持 generated；真实文章写 real + real_texts.id。
+    source: str = "generated"
+    source_url: str = ""
+    source_ref: str = ""
 
     @property
     def content(self) -> str:
@@ -311,6 +315,8 @@ class ArticleService:
         hint_provider: Callable[[], DifficultyHint | None] | None = None,
         readability: ReadabilityThresholds | None = None,
         wordlist_provider: Callable[[], dict[str, str]] = default_wordlist,
+        quiz_seeder: Callable[[Article, RealText], object] | None = None,
+        real_text_repo: RealTextRepo | None = None,
     ) -> None:
         self._client = client
         self._articles = article_repo
@@ -321,6 +327,10 @@ class ArticleService:
         # 可读性指标是“记录 / 告警 / 展示”用的增强信息，阈值可配、默认不强制重试。
         self._readability = readability or ReadabilityThresholds()
         self._wordlist_provider = wordlist_provider
+        # M7：真实文章上架需要“文章 + 预置题目 + 供给历史”原子完成。
+        # 用可调用对象注入题目种子，避免 ArticleService 反向依赖检测服务。
+        self._quiz_seeder = quiz_seeder
+        self._real_texts = real_text_repo
 
     # ------------------------------------------------------------ 对外入口
     def get_or_create_today(self, profile: Profile, today: str | None = None) -> Article:
@@ -563,12 +573,69 @@ class ArticleService:
             word_count=draft.word_count,
             target_words=draft.target_words,
             metrics=self._metrics_payload(draft),
+            source=draft.source,
+            source_url=draft.source_url,
+            source_ref=draft.source_ref,
             created_at=now_iso(),
         )
+        # M7.2：替换掉真实文章时，无论调用方来自界面还是后台任务（甚至用户
+        # 点了取消但请求已经写库），都在服务层记一次 overridden/skip。
+        previous = self._articles.get_by_date(day)
         stored = self._articles.replace_by_date(article)
         self._seed_glossary(stored, draft)
+        if (
+            previous is not None
+            and (previous.source or "") == "real"
+            and draft.source != "real"
+            and previous.source_ref
+            and self._real_texts is not None
+        ):
+            try:
+                self._real_texts.mark_overridden(previous.source_ref)
+            except Exception:  # noqa: BLE001 - 标记失败不影响新文章
+                logger.warning("标记真实文章已换回失败", exc_info=True)
         logger.info("文章已替换：%s《%s》%s 词", day, stored.title, stored.word_count)
         return stored
+
+    def serve_real_text(self, text: RealText, today: str | None = None) -> Article | None:
+        """把一篇真实文章写成当天文章 + 预置题目 + 供给历史（M7.1）。
+
+        三步必须原子完成：任一步失败都删除当天刚写入的文章并返回 None，
+        阅读页自然回退到 AI 生成，绝不留下“有文章没题目”的半截状态。
+        """
+        day = today or today_str()
+        if self._articles.get_by_date(day) is not None:
+            logger.info("当天已有文章，跳过真实文章供给：%s", day)
+            return None
+        if self._quiz_seeder is None or self._real_texts is None:
+            logger.warning("真实文章供给缺少题目种子或历史仓库，跳过")
+            return None
+
+        paragraphs = tuple(part.strip() for part in str(text.content).split("\n\n") if part.strip())
+        if not paragraphs:
+            logger.warning("真实文章正文为空，跳过：%s", text.id)
+            return None
+        draft = ArticleDraft(
+            title=text.title,
+            level=text.level,
+            topic=text.topics[0] if text.topics else "",
+            paragraphs=paragraphs,
+            source="real",
+            source_url=text.source_url,
+            source_ref=text.id,
+        )
+        draft = replace(draft, metrics=self._analyze(draft))
+
+        try:
+            article = self.replace_today(draft, today=day)
+            self._quiz_seeder(article, text)
+            self._real_texts.mark_served(text, served_on=day, article_id=article.id)
+        except Exception:  # noqa: BLE001 - 供给失败必须回退 AI，不能留半截状态
+            logger.exception("真实文章上架失败，回滚当天文章：%s", text.id)
+            self._articles.delete_by_date(day)
+            return None
+        logger.info("真实文章已上架：id=%s level=%s words=%s", text.id, text.level, text.word_count)
+        return article
 
     # -------------------------------------------------------------- 内部
     def _thresholds_for(self, within_level: str) -> ReadabilityThresholds:
@@ -638,6 +705,9 @@ class ArticleService:
             word_count=draft.word_count,
             target_words=draft.target_words,
             metrics=self._metrics_payload(draft),
+            source=draft.source,
+            source_url=draft.source_url,
+            source_ref=draft.source_ref,
             created_at=now_iso(),
         )
         try:

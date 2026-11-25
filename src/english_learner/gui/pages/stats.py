@@ -93,10 +93,12 @@ class StatsPage(QWidget):
         self._active_card = StatCard("累计学习", "0 天", "有学习记录的天数")
         self._words_card = StatCard("累计生词", "0 词", "只统计加入生词本的词")
         self._reviews_card = StatCard("累计复习", "0 次", "每次四档反馈都会计数")
+        self._reading_card = StatCard("累计阅读", "0 词", "按打开过的文章计，含真实文章")
         stats.addWidget(self._streak_card)
         stats.addWidget(self._active_card)
         stats.addWidget(self._words_card)
         stats.addWidget(self._reviews_card)
+        stats.addWidget(self._reading_card)
         layout.addLayout(stats)
 
         layout.addWidget(self._build_heatmap_card())
@@ -258,6 +260,12 @@ class StatsPage(QWidget):
         self._active_card.set_hint(f"最长连续 {overview.longest_streak} 天")
         self._words_card.set_value(f"{overview.total_words:,} 词")
         self._reviews_card.set_value(f"{overview.total_reviews:,} 次")
+        volume = overview.reading_volume
+        self._reading_card.set_value(f"{volume.total_words:,} 词")
+        self._reading_card.set_hint(
+            f"近 7 天 {volume.words_7d:,} 词 · 近 30 天 {volume.words_30d:,} 词"
+            f" · 约 {volume.est_books} 本 9 万词的书"
+        )
 
         self._heatmap.set_days(overview.heatmap_days)
         self._cumulative_chart.set_points(overview.cumulative)
@@ -275,6 +283,7 @@ class StatsPage(QWidget):
             self._active_card,
             self._words_card,
             self._reviews_card,
+            self._reading_card,
         ):
             card.set_value("—")
         self._heatmap.set_days(())

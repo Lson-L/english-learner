@@ -165,6 +165,13 @@ uv run ruff format src/english_learner tests
   **不要把 `gui.main_window` / `gui.onboarding` / `gui.workers` 挪回 app.py
   顶层**，否则 `import english_learner.app` 重新变成 1.5s，遮罩来不及显示；
   `splash.py` 本身也不能 import `gui.main_window`。
-- **剩余为 M6.6 / M6.7**（强证据升级与边界文案）、可选 M4（深色模式、
-  安装器 / 自动更新）与真实环境调优。当前看板见
-  `docs/english_learner/PROGRESS.md`，已知技术债见 `TECH_DEBT.md`。
+- **当前重点为 M7 真实文章自动供给（2026-11-25 排期）**：本地分级真实文章库
+  入 SQLite、按最近阅读/检测状态自动选题、预置题目 + 本地判分、反馈驱动下一篇；
+  离线优先，M7.7 可选在线源（内置稳定 URL + 手动 URL / 粘贴）作为补充，抓取失败
+  一律回退缓存 / AI 文章。M7.0 ~ M7.4 已完成：schema v9 + 种子 / 校验 / 导出、
+  自动供给（G0~G10）、真实文章本地练习与反馈闭环、阅读剂量、语境识别复习；
+  已入库 2 篇 China Daily（B1/B2，`Personal use`），A2 / C1 待补；
+  下一步可选 M7.6 内容包导入或 M7.7 在线源。
+  详细计划见 `docs/english_learner/M7_REAL_TEXT.md`，**执行以该文件为准**。
+  M6.6 / M6.7 顺延，可选 M4（深色模式、安装器 / 自动更新）与真实环境调优排后。
+  当前看板见 `docs/english_learner/PROGRESS.md`，已知技术债见 `TECH_DEBT.md`。

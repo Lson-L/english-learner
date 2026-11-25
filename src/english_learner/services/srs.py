@@ -189,6 +189,7 @@ class ReviewService:
         answer_text: str = "",
         verdict: str = "",
         distance: int = 0,
+        mode: str = "",
     ) -> ReviewOutcome:
         """应用评分：写回调度字段 → 记一条复习历史 → 今日复习数 +1。
 
@@ -196,6 +197,9 @@ class ReviewService:
         `answer_text / verdict / distance` 是拼写回忆的客观证据（用户写了什么、
         判成什么、差几个字母）。这五项只进 review_logs，**不参与 schedule()**，
         调度结果仍只由用户确认的 rating 决定。
+
+        `mode` 是本次卡片形态（context / spelling / recall），只进日志供统计，
+        同样不参与 schedule()。
         """
         if word.id is None:
             raise ValueError("review() 需要已落库的词条（word.id 不能为空）")
@@ -218,6 +222,7 @@ class ReviewService:
                 answer_text=answer_text[:500],
                 verdict=verdict,
                 distance=int(distance),
+                mode=mode,
             )
         if self._stats is not None:
             self._stats.bump(self._today(), reviews_done=1)

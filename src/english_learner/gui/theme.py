@@ -775,6 +775,65 @@ LOW_PROFILE_PALETTE: dict[str, str] = {
 }
 
 
+# 只在低调主题下追加的补充样式。浅色主题保留 Windows 原生按钮观感，不做覆盖。
+# 背景：QMessageBox 的标准按钮由 Qt 原生样式绘制，深色消息框里会露出一排
+# 浅色圆角按钮，和整体配色完全脱节。这里把它们接回 secondary / primary
+# 两档按钮的外观；`QDialogButtonBox` 覆盖所有使用标准按钮盒的弹窗
+# （例如真实文章来源弹窗的「关闭」）。
+_LOW_PROFILE_ONLY_STYLES = """
+/* ---------- 低调主题：系统消息框与标准按钮盒 ---------- */
+QMessageBox QPushButton,
+QDialogButtonBox QPushButton {
+    background: __BG_SUBTLE__;
+    color: __TEXT_FIELD__;
+    border: 1px solid __BORDER_INPUT__;
+    border-radius: 8px;
+    padding: 7px 18px;
+    min-width: 72px;
+}
+QMessageBox QPushButton:hover,
+QDialogButtonBox QPushButton:hover {
+    border-color: __ACCENT_STRONG__;
+    color: __ACCENT__;
+}
+QMessageBox QPushButton:pressed,
+QDialogButtonBox QPushButton:pressed {
+    background: __BG_DISABLED__;
+}
+QMessageBox QPushButton:default,
+QDialogButtonBox QPushButton:default {
+    background: __ACCENT_STRONG__;
+    color: __ON_ACCENT__;
+    border: 1px solid __ACCENT_STRONG__;
+    font-weight: 600;
+}
+QMessageBox QPushButton:default:hover,
+QDialogButtonBox QPushButton:default:hover {
+    background: __ACCENT_STRONG_HOVER__;
+    border-color: __ACCENT_STRONG_HOVER__;
+    color: __ON_ACCENT__;
+}
+QMessageBox QPushButton:default:pressed,
+QDialogButtonBox QPushButton:default:pressed {
+    background: __ACCENT_STRONG_PRESSED__;
+    border-color: __ACCENT_STRONG_PRESSED__;
+}
+QMessageBox QPushButton:disabled,
+QDialogButtonBox QPushButton:disabled {
+    background: __BG_DISABLED__;
+    color: __TEXT_DISABLED__;
+    border-color: __BORDER__;
+}
+"""
+
+
+def _fill_placeholders(template: str, palette: dict[str, str]) -> str:
+    """把 `__KEY__` 占位符替换成调色板里的色值。"""
+    for name, value in palette.items():
+        template = template.replace(f"__{name}__", value)
+    return template
+
+
 def build_stylesheet(english_font: str | None = None, *, low_profile: bool = False) -> str:
     """生成全局 QSS。`english_font` 是用户选的英文字体 key（见 gui.fonts）。
 
@@ -785,10 +844,10 @@ def build_stylesheet(english_font: str | None = None, *, low_profile: bool = Fal
     （低调模式下用户选的英文字体会被忽略，见 `gui.fonts.font_stack`）。
     """
     font = font_stack(english_font, mono=low_profile)
-    qss = _STYLESHEET_TEMPLATE.replace("__ENGLISH_FONT__", font)
     palette = LOW_PROFILE_PALETTE if low_profile else LIGHT_PALETTE
-    for name, value in palette.items():
-        qss = qss.replace(f"__{name}__", value)
+    qss = _fill_placeholders(_STYLESHEET_TEMPLATE.replace("__ENGLISH_FONT__", font), palette)
+    if low_profile:
+        qss += _fill_placeholders(_LOW_PROFILE_ONLY_STYLES, palette)
     return qss
 
 

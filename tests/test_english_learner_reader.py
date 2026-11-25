@@ -25,6 +25,7 @@ from english_learner.models.entities import (  # noqa: E402
     Profile,
     QuizQuestion,
     ReadingQuiz,
+    RealText,
     Word,
     now_iso,
     today_str,
@@ -963,3 +964,158 @@ def test_reader_old_article_without_metrics_still_renders(db: Database) -> None:
     meta = page._meta_label.text()
     assert "生词" not in meta
     assert "偏难" not in meta
+
+
+class _FakeSignal:
+    def __init__(self) -> None:
+        self.slots: list = []
+
+    def connect(self, slot) -> None:
+        self.slots.append(slot)
+
+
+class _StubWorker:
+    """只用于 `_start_generation`：不真正跑线程，只提供信号接口。"""
+
+    def __init__(self, task) -> None:
+        self.task = task
+        self.succeeded = _FakeSignal()
+        self.failed = _FakeSignal()
+        self.cancelled = _FakeSignal()
+        self.finished = _FakeSignal()
+
+    def start(self) -> None:
+        pass
+
+    def isRunning(self) -> bool:
+        return False
+
+
+def make_real_setup(db: Database) -> tuple[RealText, Article]:
+    text = db.real_texts.upsert(
+        RealText(
+            id="b1-real",
+            title="A Real Article",
+            content="First paragraph.\n\nSecond paragraph.",
+            level="B1",
+            source="Test Source",
+            license="Public Domain",
+            created_at=now_iso(),
+        )
+    )
+    article = db.articles.insert(make_article(source="real", source_ref="b1-real", topic="science"))
+    db.real_texts.mark_served(text, served_on=today_str(), article_id=article.id)
+    return text, article
+
+
+def make_reader_context(db: Database) -> AppContext:
+    return AppContext(
+        AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
+        ConfigStore(Path("unused.json")),
+        db,
+    )
+
+
+def test_start_generation_marks_real_article_overridden_on_success(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M7.2：真实文章被「换一篇 / 换回 AI」替换后，成功生成要记 overridden/skip。"""
+    get_app()
+    make_real_setup(db)
+    db.profiles.save(Profile(cefr_level="B1"))
+    context = make_reader_context(db)
+    page = ReaderPage(context)
+    page.on_activated()
+
+    monkeypatch.setattr("english_learner.gui.pages.reader.TaskWorker", _StubWorker)
+    monkeypatch.setattr(context, "article_service", lambda: None)
+
+    page._start_generation(regenerate=True)
+
+    assert page._real_override_ref == "b1-real"
+    page._on_article_ready(make_article(source="generated", title="AI replacement"))
+
+    history = db.real_texts.last_history()
+    assert history is not None
+    assert history.status == "overridden"
+    assert history.outcome == "skip"
+    assert page._real_override_ref == ""
+
+
+def test_cancel_and_finish_clear_pending_real_override(db: Database) -> None:
+    """M7.2：取消 / 任务结束不能把 overridden 标记留给后续无关生成。"""
+    get_app()
+    context = make_reader_context(db)
+    page = ReaderPage(context)
+
+    page._real_override_ref = "b1-real"
+    page._on_worker_finished()
+    assert page._real_override_ref == ""
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def task() -> str:
+        started.set()
+        release.wait(3)
+        return "done"
+
+    worker = TaskWorker(task)
+    worker.start()
+    assert started.wait(2.0) is True
+    page._worker = worker
+    page._busy_phase = "regenerate"
+    page._real_override_ref = "b1-real"
+
+    page._on_cancel_clicked()
+
+    assert page._real_override_ref == ""
+    release.set()
+    assert worker.wait(3000) is True
+
+
+def test_level_feedback_replacement_marks_real_article_overridden(
+    db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M7.2：通过「调整难度」替换真实文章，同样要记 overridden/skip。"""
+    get_app()
+    make_real_setup(db)
+    db.profiles.save(Profile(cefr_level="B1"))
+    generated = db.articles.insert(
+        make_article(
+            article_date="2099-01-01",
+            title="AI replacement",
+            source="generated",
+        )
+    )
+    context = make_reader_context(db)
+    page = ReaderPage(context)
+    page.on_activated()
+
+    class StubDialog:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        @property
+        def result_outcome(self):
+            from types import SimpleNamespace
+
+            return SimpleNamespace(
+                article=generated,
+                level_changed=False,
+                previous_level="B1",
+                profile=Profile(cefr_level="B1"),
+            )
+
+    monkeypatch.setattr("english_learner.gui.pages.reader.LevelFeedbackDialog", StubDialog)
+
+    page._open_level_feedback()
+
+    history = db.real_texts.last_history()
+    assert history is not None
+    assert history.status == "overridden"
+    assert history.outcome == "skip"
+    assert page._real_override_ref == ""

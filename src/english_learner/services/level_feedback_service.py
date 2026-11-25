@@ -129,6 +129,7 @@ class LevelFeedbackService:
         hint_provider: Callable[[], DifficultyHint | None] | None = None,
         readability: ReadabilityThresholds | None = None,
         wordlist_provider: Callable[[], dict[str, str]] = default_wordlist,
+        real_text_repo=None,
     ) -> None:
         self._client = client
         self._profiles = profile_repo
@@ -143,6 +144,7 @@ class LevelFeedbackService:
             hint_provider=hint_provider,
             readability=readability,
             wordlist_provider=wordlist_provider,
+            real_text_repo=real_text_repo,
         )
 
     # ------------------------------------------------------------------ 生词

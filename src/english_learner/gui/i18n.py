@@ -42,6 +42,8 @@ BUTTON_EN: dict[str, str] = {
     "阅读完成": "Finish reading",
     "回译练习": "Back-translation",
     "换一篇": "New article",
+    "换回 AI 文章": "Switch to AI article",
+    "来源": "Source",
     "调整难度": "Adjust level",
     "调整难度…": "Adjust level…",
     "取消": "Cancel",
@@ -63,6 +65,7 @@ BUTTON_EN: dict[str, str] = {
     "显示": "Show",
     "打开文章后自动预查生词": "Prefetch words after opening",
     "复习时要求默写英文单词": "Type answers during review",
+    "自动安排真实文章": "Auto real articles",
     "不知道": "I don't know",
     # 生词本
     "删除": "Delete",
@@ -71,6 +74,7 @@ BUTTON_EN: dict[str, str] = {
     "刷新": "Refresh",
     # 复习
     "开始复习": "Start review",
+    "切换题型": "Switch mode",
     "显示答案（空格）": "Show answer (Space)",
     "显示释义并默写（空格）": "Show meaning & type (Space)",
     "想不起来，直接看答案（跳过）": "Show answer (skip)",

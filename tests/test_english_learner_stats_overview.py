@@ -286,3 +286,46 @@ def test_achievements_use_all_time_totals(tmp_path) -> None:
     assert "words_200" not in unlocked
     assert "reviews_500" not in unlocked
     assert overview.unlocked_achievements == 4
+
+
+def test_reading_volume_counts_opened_articles_only(tmp_path) -> None:
+    """M7.3：累计阅读 = 打开过的文章词数，含真实文章，排除没打开的文章。"""
+    today = date(2026, 11, 24)
+    db = Database(tmp_path / "data.db")
+    try:
+
+        def add(day: str, words: int, *, read: bool = True) -> None:
+            db.articles.insert(
+                Article(
+                    article_date=day,
+                    title=day,
+                    content="content",
+                    level="B1",
+                    word_count=words,
+                    read_at=f"{day}T10:00:00" if read else None,
+                    created_at=now_iso(),
+                )
+            )
+
+        add("2026-11-24", 300)
+        add("2026-11-20", 200)
+        add("2026-10-01", 100)
+        add("2026-11-23", 50, read=False)
+
+        overview = StatsOverviewService(
+            db.stats,
+            db.words,
+            db.quizzes,
+            db.articles,
+            today=lambda: today.isoformat(),
+        ).build(on=today)
+    finally:
+        db.close()
+
+    volume = overview.reading_volume
+    assert volume.total_words == 600
+    assert volume.read_articles == 3
+    assert volume.words_7d == 500
+    assert volume.words_30d == 500
+    assert volume.est_books == round(600 / 90000, 1)
+    assert overview.has_data is True

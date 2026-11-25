@@ -1,9 +1,10 @@
 """学习数据导出：JSON 全量备份 / CSV 分表。
 
-导出的数据来自 SQLite 的十二张表：
+导出的数据来自 SQLite 的十五张表：
 `profile` / `articles` / `words` / `word_forms` / `highlights` /
 `review_logs` / `daily_stats` / `reading_quizzes` / `level_evidence` /
-`weekly_reviews` / `ai_calls` / `writing_attempts`。
+`weekly_reviews` / `ai_calls` / `writing_attempts` /
+`real_texts` / `real_text_history` / `content_sources`。
 
 设计：
 - 纯 Python，不依赖 PySide6；界面只负责选路径，导出本身可以放进 TaskWorker；
@@ -29,9 +30,11 @@ from ..models.entities import now_iso
 from ..storage.repositories import (
     AICallRepo,
     ArticleRepo,
+    ContentSourceRepo,
     LevelEvidenceRepo,
     ProfileRepo,
     QuizRepo,
+    RealTextRepo,
     ReviewRepo,
     StatsRepo,
     WeeklyReviewRepo,
@@ -55,11 +58,16 @@ TABLE_LABELS: dict[str, str] = {
     "weekly_reviews": "每周复盘",
     "ai_calls": "AI 调用记录",
     "writing_attempts": "回译练习",
+    "real_texts": "真实文章库",
+    "real_text_history": "真实文章供给",
+    "content_sources": "在线源",
 }
 
 # 摘要展示顺序：先看学习内容，再看历史。
 SUMMARY_ORDER: tuple[str, ...] = (
     "articles",
+    "real_texts",
+    "real_text_history",
     "words",
     "word_forms",
     "highlights",
@@ -70,6 +78,7 @@ SUMMARY_ORDER: tuple[str, ...] = (
     "daily_stats",
     "weekly_reviews",
     "ai_calls",
+    "content_sources",
     "profile",
 )
 
@@ -95,6 +104,9 @@ CSV_COLUMNS: dict[str, tuple[str, ...]] = {
         "level",
         "topic",
         "word_count",
+        "source",
+        "source_url",
+        "source_ref",
         "target_words",
         "metrics",
         "read_at",
@@ -149,6 +161,7 @@ CSV_COLUMNS: dict[str, tuple[str, ...]] = {
         "answer_text",
         "verdict",
         "distance",
+        "mode",
     ),
     "daily_stats": (
         "stat_date",
@@ -246,6 +259,56 @@ CSV_COLUMNS: dict[str, tuple[str, ...]] = {
         "created_at",
         "graded_at",
     ),
+    "real_texts": (
+        "id",
+        "title",
+        "level",
+        "level_source",
+        "source",
+        "source_url",
+        "license",
+        "license_url",
+        "published",
+        "topics",
+        "word_count",
+        "excerpt",
+        "attribution",
+        "questions",
+        "fetched_at",
+        "content_hash",
+        "questions_source",
+        "corpus_version",
+        "created_at",
+        "content",
+    ),
+    "real_text_history": (
+        "id",
+        "text_id",
+        "served_on",
+        "article_id",
+        "level",
+        "word_count",
+        "status",
+        "score",
+        "self_report",
+        "outcome",
+        "completed_at",
+        "created_at",
+        "updated_at",
+    ),
+    "content_sources": (
+        "id",
+        "title",
+        "url",
+        "level",
+        "license",
+        "source",
+        "enabled",
+        "last_attempt_at",
+        "last_error",
+        "failure_count",
+        "created_at",
+    ),
 }
 
 
@@ -276,6 +339,8 @@ class ExportService:
         weekly_reviews: WeeklyReviewRepo | None = None,
         ai_calls: AICallRepo | None = None,
         writing_attempts: WritingAttemptRepo | None = None,
+        real_texts: RealTextRepo | None = None,
+        content_sources: ContentSourceRepo | None = None,
     ) -> None:
         self._profiles = profiles
         self._articles = articles
@@ -287,6 +352,8 @@ class ExportService:
         self._weekly_reviews = weekly_reviews
         self._ai_calls = ai_calls
         self._writing_attempts = writing_attempts
+        self._real_texts = real_texts
+        self._content_sources = content_sources
 
     # ------------------------------------------------------------------ 快照
     def snapshot(self) -> dict[str, object]:
@@ -321,6 +388,21 @@ class ExportService:
             "writing_attempts": (
                 [asdict(item) for item in self._writing_attempts.list_all()]
                 if self._writing_attempts is not None
+                else []
+            ),
+            "real_texts": (
+                [asdict(item) for item in self._real_texts.list_all()]
+                if self._real_texts is not None
+                else []
+            ),
+            "real_text_history": (
+                [asdict(item) for item in self._real_texts.list_history()]
+                if self._real_texts is not None
+                else []
+            ),
+            "content_sources": (
+                [asdict(item) for item in self._content_sources.list_all()]
+                if self._content_sources is not None
                 else []
             ),
         }
