@@ -726,6 +726,18 @@ class ReadingQuizService:
         """读取已缓存的题目（不论是否已作答），不调用 AI。"""
         return self._quizzes.get_by_article(article_id)
 
+    def save_self_report(self, quiz_id: int | None, self_report: str) -> None:
+        """首次检测开场先记录阅读自评（还没作答也能保存，重开检测不丢）。
+
+        `submit` 落库时会用第二轮页面上最终确认的值再写一次。
+        """
+        if quiz_id is None:
+            return
+        report = (self_report or "").strip()
+        if not report:
+            return
+        self._quizzes.save_self_report(int(quiz_id), report)
+
     def is_practice_day(self, article: Article, quiz_id: int | None = None) -> bool:
         """今天是否已经完成过一次正式检测（本次只能练手）。
 

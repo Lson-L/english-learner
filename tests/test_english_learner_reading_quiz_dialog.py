@@ -13,9 +13,9 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, Qt  # noqa: E402
+from PySide6.QtCore import QEvent, Qt, QTimer  # noqa: E402
 from PySide6.QtGui import QKeyEvent  # noqa: E402
-from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog, QLabel  # noqa: E402
 
 from english_learner.gui.reading_quiz_dialog import (  # noqa: E402
     MODE_QUIZ,
@@ -191,10 +191,14 @@ class StubQuizService:
         self.last_advance_notes: tuple[str, ...] = ()
         self.last_submit_answers: tuple[int, ...] = ()
         self.last_submit_notes: tuple[str, ...] = ()
+        self.saved_self_reports: list[tuple[int | None, str]] = []
 
     def get_cached(self, article_id: int) -> ReadingQuiz | None:
         self.get_cached_calls += 1
         return self.cached
+
+    def save_self_report(self, quiz_id: int | None, self_report: str) -> None:
+        self.saved_self_reports.append((quiz_id, self_report))
 
     def is_practice_day(self, article, quiz_id=None) -> bool:
         return self.practice_day
@@ -521,6 +525,105 @@ def test_missing_cache_generates_stage_one_in_background(tmp_path: Path) -> None
     assert dialog._mode == MODE_QUIZ
     assert len(dialog._groups) == 3
     assert dialog._primary_button.text() == "提交第一轮"
+    dialog.close()
+    db.close()
+
+
+# ------------------------------------------------- 首次检测的强制阅读自评
+def test_first_detection_asks_self_report_while_ai_generates(tmp_path: Path) -> None:
+    """首次检测：出题 worker 先启动，自评弹窗只是并行等一个选择。"""
+    get_app()
+    db = Database(tmp_path / "data.db")
+    article = make_article(db)
+    generated = make_stage_two_quiz(article)
+    service = StubQuizService(cached=None, generated=generated)
+
+    dialog = ReadingQuizDialog(make_context(db, tmp_path), article, service=service)  # type: ignore[arg-type]
+
+    assert dialog._needs_self_report is True
+    # 还没打开检测（没有调用 exec），AI 出题已经在后台跑。
+    assert dialog._worker is not None
+
+    seen: dict[str, object] = {}
+
+    def fake_ask() -> str:
+        seen["worker"] = dialog._worker
+        return "hard"
+
+    dialog._ask_self_report = fake_ask  # type: ignore[method-assign]
+    assert dialog._prepare_self_report() is True
+    assert seen["worker"] is not None
+    assert dialog._initial_self_report == "hard"
+
+    worker = dialog._worker
+    assert worker is not None
+    assert worker.wait(3000) is True
+    get_app().processEvents()
+
+    assert dialog._mode == MODE_QUIZ
+    assert dialog._self_report_combo is not None
+    assert dialog._self_report_combo.currentData() == "hard"
+    assert service.saved_self_reports == [(generated.id, "hard")]
+    dialog.close()
+    db.close()
+
+
+def test_exec_runs_self_report_popup_and_opens_ready_quiz(tmp_path: Path) -> None:
+    """exec() 先弹自评；期间 AI 已出完题，选完直接看到题目而不是加载页。"""
+    get_app()
+    db = Database(tmp_path / "data.db")
+    article = make_article(db)
+    service = StubQuizService(cached=None, generated=make_stage_one_quiz(article))
+
+    dialog = ReadingQuizDialog(make_context(db, tmp_path), article, service=service)  # type: ignore[arg-type]
+
+    def fake_ask() -> str:
+        worker = dialog._worker
+        assert worker is not None
+        assert worker.wait(3000) is True
+        get_app().processEvents()  # 自评期间出题线程已经跑完
+        QTimer.singleShot(0, dialog.accept)
+        return "hard"
+
+    dialog._ask_self_report = fake_ask  # type: ignore[method-assign]
+    result = dialog.exec()
+
+    assert result == QDialog.DialogCode.Accepted
+    assert dialog._mode == MODE_QUIZ
+    assert len(dialog._groups) == 3
+    assert dialog._initial_self_report == "hard"
+    dialog.close()
+    db.close()
+
+
+def test_cancelling_self_report_abandons_generation(tmp_path: Path) -> None:
+    """不选自评直接关窗：本次检测不打开，后台出题请求被放弃。"""
+    get_app()
+    db = Database(tmp_path / "data.db")
+    article = make_article(db)
+    service = StubQuizService(cached=None, generated=make_stage_one_quiz(article))
+
+    dialog = ReadingQuizDialog(make_context(db, tmp_path), article, service=service)  # type: ignore[arg-type]
+    dialog._ask_self_report = lambda: ""  # type: ignore[method-assign]
+
+    assert dialog._prepare_self_report() is False
+    assert dialog._worker is None
+    assert dialog.result_quiz is None
+    dialog.close()
+    db.close()
+
+
+def test_cached_quiz_does_not_ask_self_report(tmp_path: Path) -> None:
+    """已有题目（继续检测 / 查看结果）不再弹自评。"""
+    get_app()
+    db = Database(tmp_path / "data.db")
+    article = make_article(db)
+    service = StubQuizService(cached=make_stage_one_quiz(article))
+
+    dialog = ReadingQuizDialog(make_context(db, tmp_path), article, service=service)  # type: ignore[arg-type]
+
+    assert dialog._needs_self_report is False
+    assert dialog._prepare_self_report() is True
     dialog.close()
     db.close()
 

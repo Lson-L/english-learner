@@ -577,6 +577,26 @@ def test_get_or_create_generates_stage_one_and_reviews(db: Database) -> None:
     assert first.completed is False
 
 
+def test_save_self_report_persists_before_answering(db: Database) -> None:
+    """首次检测的自评要先落库：中途关窗重开时还能回显。"""
+    article = make_article(db)
+    service = make_service(db, RoutingCompleter())
+    quiz = service.get_or_create(article, "B1")
+
+    service.save_self_report(quiz.id, "hard")
+
+    stored = db.quizzes.get_by_article(article.id)
+    assert stored is not None
+    assert stored.self_report == "hard"
+    assert stored.completed is False
+
+    # 空值不覆盖已有自评。
+    service.save_self_report(quiz.id, "   ")
+    again = db.quizzes.get_by_article(article.id)
+    assert again is not None
+    assert again.self_report == "hard"
+
+
 def test_get_or_create_retries_when_stage_one_invalid(db: Database) -> None:
     article = make_article(db)
     fake = RoutingCompleter(stage_one=["垃圾", stage_one_payload()])

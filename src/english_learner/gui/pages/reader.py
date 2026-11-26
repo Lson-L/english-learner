@@ -99,7 +99,9 @@ class ReaderPage(QWidget):
 
         self._quiz_button = QPushButton("阅读完成")
         self._quiz_button.setObjectName("primaryButton")
-        self._quiz_button.setToolTip("读完后做几道题，AI 会讲评并根据答题情况调整等级")
+        self._quiz_button.setToolTip(
+            "读完后做几道题，AI 会讲评并根据答题情况调整等级；首次检测会先记录这篇读起来的感受"
+        )
         self._quiz_button.clicked.connect(self._on_quiz_clicked)
         header_row.addWidget(self._quiz_button, 0, Qt.AlignmentFlag.AlignBottom)
 
@@ -234,21 +236,9 @@ class ReaderPage(QWidget):
         self._current_word_id = None
 
         self._title_label.setText(article.title)
+        self._render_meta()
         is_real = (article.source or "") == "real"
-        meta_parts = [article.level, f"{article.word_count} 词"]
-        if is_real:
-            meta_parts.append(f"真实文章 · 约 {article.level}（预估）")
-        if article.topic:
-            meta_parts.append(article.topic)
-        # M5.3：本地可读性指标（旧文章没有 metrics 时整段不显示）。
         metrics = ReadabilityMetrics.from_dict(article.metrics)
-        if metrics is not None and metrics.wordlist_size > 0 and metrics.word_total:
-            meta_parts.append(f"生词 {metrics.unknown_ratio:.1%}")
-            if metrics.target_total:
-                meta_parts.append(f"目标词 {metrics.target_total} 个")
-            if threshold_warnings(metrics, self._context.readability_thresholds()):
-                meta_parts.append("偏难")
-        self._meta_label.setText(" · ".join(meta_parts))
 
         self._real_banner.setVisible(is_real)
         if is_real:
@@ -494,6 +484,11 @@ class ReaderPage(QWidget):
         self._hide_word_card()
         dialog = ReadingQuizDialog(self._context, self._article, parent=self)
         dialog.exec()
+        if dialog.self_report_cancelled:
+            # 首次检测先弹阅读自评；用户点「暂不检测」时本次不开始。
+            self._refresh_quiz_button(self._article)
+            set_status(self._status, "已取消本次阅读检测，随时可以再做。", "hint")
+            return
 
         quiz = dialog.result_quiz
         if quiz is None:
@@ -677,13 +672,42 @@ class ReaderPage(QWidget):
             self._quiz_button.setText("阅读完成")
         self._quiz_button.setEnabled(self._context.profile() is not None)
 
+    def _render_meta(self) -> None:
+        """重绘标题下的信息行：文章属性 + 本篇已加入生词本的词数。
+
+        词数按词去重，同一个词换位置再标一次也只算一个；没有文章时清空。
+        """
+        article = self._article
+        if article is None:
+            self._meta_label.setText("")
+            return
+
+        meta_parts = [article.level, f"{article.word_count} 词"]
+        if (article.source or "") == "real":
+            meta_parts.append(f"真实文章 · 约 {article.level}（预估）")
+        if article.topic:
+            meta_parts.append(article.topic)
+        # M5.3：本地可读性指标（旧文章没有 metrics 时整段不显示）。
+        metrics = ReadabilityMetrics.from_dict(article.metrics)
+        if metrics is not None and metrics.wordlist_size > 0 and metrics.word_total:
+            meta_parts.append(f"生词 {metrics.unknown_ratio:.1%}")
+            if metrics.target_total:
+                meta_parts.append(f"目标词 {metrics.target_total} 个")
+            if threshold_warnings(metrics, self._context.readability_thresholds()):
+                meta_parts.append("偏难")
+        count = len({item.word_id for item in self._highlights})
+        meta_parts.append(f"本篇生词本 {count} 个")
+        self._meta_label.setText(" · ".join(meta_parts))
+
     def _reload_highlights(self) -> None:
         if self._article is None or self._article.id is None:
             self._highlights = []
             self._view.set_highlights([])
+            self._render_meta()
             return
         self._highlights = self._context.word_repo.list_highlights(self._article.id)
         self._view.set_highlights(self._highlights)
+        self._render_meta()
 
     def _has_highlight_at(self, start: int, end: int) -> bool:
         return any(

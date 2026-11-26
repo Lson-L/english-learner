@@ -544,6 +544,40 @@ def test_reader_page_loads_cached_article_without_worker(db: Database) -> None:
     assert db.stats.get(today_str()).article_read == 1
 
 
+def test_reader_shows_vocab_count_for_current_article(db: Database) -> None:
+    """信息行末尾显示本篇已加入生词本的词数：按词去重，加入后立即刷新。"""
+    get_app()
+    article = db.articles.insert(make_article())
+    context = AppContext(
+        AIConfig(base_url="https://api.example.com/v1", api_key="sk-test", model="test"),
+        ConfigStore(Path("unused.json")),
+        db,
+    )
+    page = ReaderPage(context)
+    page.on_activated()
+
+    assert page._meta_label.text().endswith("本篇生词本 0 个")
+
+    first = db.words.upsert(make_word(lemma="habits", in_vocabulary=False))
+    second = db.words.upsert(make_word(lemma="resilient", in_vocabulary=False))
+    service = DictionaryService(FakeCompleter(), db.words, db.stats)
+    service.add_to_vocabulary(first, article_id=article.id, start_offset=0, end_offset=6)
+    page._reload_highlights()
+    assert page._meta_label.text().endswith("本篇生词本 1 个")
+
+    # 同一个词换个位置再标一次，仍然只算一个词。
+    service.add_to_vocabulary(first, article_id=article.id, start_offset=13, end_offset=16)
+    page._reload_highlights()
+    assert page._meta_label.text().endswith("本篇生词本 1 个")
+
+    # 走阅读页自己的「加入生词本」路径，信息行要立即更新。
+    page._current_word_id = second.id
+    page._pending = ("resilient", 27, 36, "Resilient people keep going.")
+    page._start_enrich = lambda *args, **kwargs: None  # 不联网补全
+    page._on_add_requested()
+    assert page._meta_label.text().endswith("本篇生词本 2 个")
+
+
 def test_reader_auto_generates_first_visit(db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
     """第一次进阅读页（当天没有文章）仍然自动生成。"""
     get_app()
@@ -962,8 +996,11 @@ def test_reader_old_article_without_metrics_still_renders(db: Database) -> None:
     page.on_activated()
 
     meta = page._meta_label.text()
-    assert "生词" not in meta
+    # 没有可读性指标时不显示「生词 x%」；末尾的「本篇生词本 N 个」不受影响。
+    assert "生词 " not in meta
+    assert "目标词" not in meta
     assert "偏难" not in meta
+    assert meta.endswith("本篇生词本 0 个")
 
 
 class _FakeSignal:

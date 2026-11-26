@@ -1144,6 +1144,13 @@ class QuizRepo(_BaseRepo):
         row = self._db.query_one("SELECT * FROM reading_quizzes WHERE id = ?", (int(quiz_id),))
         return ReadingQuiz.from_row(row) if row is not None else None
 
+    def save_self_report(self, quiz_id: int, self_report: str) -> None:
+        """单独记录阅读自评：首次检测还没作答时也能写，重开不丢。"""
+        self._db.execute(
+            "UPDATE reading_quizzes SET self_report = ? WHERE id = ?",
+            ((self_report or "").strip(), int(quiz_id)),
+        )
+
     def insert(self, quiz: ReadingQuiz) -> ReadingQuiz:
         """插入一套题；同一篇文章重复插入时抛 DuplicateError。"""
         params = quiz.to_params()

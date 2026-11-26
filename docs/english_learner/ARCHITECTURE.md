@@ -63,7 +63,8 @@ src/english_learner/
     ├── onboarding.py           3 步配置向导
     ├── assessment_dialog.py     摸底测评弹窗（答题 → 评分 → 结果/手动选级）
     ├── level_feedback_dialog.py 阅读感受弹窗（快捷选项 + 文本 → 调级并换文章）
-    ├── reading_quiz_dialog.py  阅读检测弹窗（两轮自适应 + 产出题 + 置信度结果）
+    ├── reading_quiz_dialog.py  阅读检测弹窗（首次强制自评 + 两轮自适应 + 产出题 + 置信度结果）
+    ├── self_assessment_dialog.py 阅读自评弹窗（首次检测开场：轻松/刚好/吃力 三选一）
     ├── back_translation_dialog.py 回译练习弹窗（中文 → 写英文 → 最小修改与原因）
     ├── review_help_dialog.py   复习求助弹窗（原因 → AI 建议 → 更新记忆方法）
     ├── weekly_review_dialog.py 每周复盘弹窗（AI 总结 → 用户确认后改级）
@@ -97,7 +98,8 @@ tests/（共 678 个用例，全部 mock AI、无网络）
 ├── test_english_learner_article.py       生成校验/软约束/重试/缓存/换一篇
 ├── test_english_learner_feedback.py      反馈调级/软约束重写/失败不改旧数据
 ├── test_english_learner_reading_quiz.py  混合难度/短答/证据评分/连续调级/失败兜底
-├── test_english_learner_reading_quiz_dialog.py 弹窗：缓存/答题/短答/自评/结果/全屏
+├── test_english_learner_reading_quiz_dialog.py 弹窗：缓存/首次自评/答题/短答/结果/全屏
+├── test_english_learner_self_assessment_dialog.py 自评弹窗：三选一/必须选择/取消
 ├── test_english_learner_level_estimator.py 后验估计：先验/证据/置信度/跳档
 ├── test_english_learner_weekly_review.py 复盘汇总/缓存/建议应用/无数据跳过
 ├── test_english_learner_weekly_review_dialog.py 复盘弹窗：展示/确认改级/取消

@@ -1,6 +1,8 @@
 """阅读检测弹窗：自适应两阶段出题 + 本地后验 + AI 讲评。
 
 交互流程（Phase 3）：
+0. 首次检测（还没有缓存题目）先启动后台出题，同时弹出「阅读自评」：
+   未选择轻松 / 刚好 / 吃力就不能开始；自评和出题并行，互不阻塞；
 1. 打开时先查缓存：同一篇文章每一阶段只出一次题；
 2. 没有缓存 → 第一轮 3 道当前等级题；
 3. 用户答完第一轮 → 按正确率生成 2 道边界题 + 2 道英译中题；
@@ -13,6 +15,8 @@
 """
 
 from __future__ import annotations
+
+import logging
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence, QShortcut
@@ -45,8 +49,11 @@ from ..services.reading_quiz_service import (
     ReadingQuizService,
 )
 from .pages.common import Card, divider, set_status
+from .self_assessment_dialog import SelfAssessmentDialog
 from .widgets import busy_progress_bar
 from .workers import TaskWorker, retire_worker
+
+logger = logging.getLogger(__name__)
 
 MODE_LOADING = "loading"
 MODE_QUIZ = "quiz"
@@ -109,6 +116,11 @@ class ReadingQuizDialog(QDialog):
         self._production_edits: list[QPlainTextEdit] = []
         self._stage_one_answers: tuple[int, ...] = ()
         self._practice_hint = False
+        # 首次检测（当场出题）时强制自评阅读感受；AI 出题与自评并行进行。
+        self._needs_self_report = False
+        self._initial_self_report = ""
+        # 用户在自评弹窗点「暂不检测」：调用方据此提示“本次检测未开始”。
+        self.self_report_cancelled = False
 
         self.result_quiz: ReadingQuiz | None = None
 
@@ -240,6 +252,9 @@ class ReadingQuizDialog(QDialog):
                 self._stage_one_answers = tuple(cached.answers[: cached.choice_total])
                 self._show_quiz(cached)
             return
+        # 首次检测：出题请求先在后台跑起来，弹窗打开时再强制收集阅读自评。
+        # 两者并行，等用户选择不会拖慢 AI 出题。
+        self._needs_self_report = True
         self._start_generation()
 
     def _detect_practice_hint(self, quiz: ReadingQuiz) -> bool:
@@ -291,6 +306,8 @@ class ReadingQuizDialog(QDialog):
     # ---------------------------------------------------------------- 答题
     def _show_quiz(self, quiz: ReadingQuiz) -> None:
         self._quiz = quiz
+        # 首次自评可能先于出题完成；题目一到就把它写进题目行，重开不丢。
+        self._save_self_report()
         self._clear_layout(self._quiz_layout)
         self._groups = []
         self._choice_notes = []
@@ -367,7 +384,10 @@ class ReadingQuizDialog(QDialog):
             self._self_report_combo.addItem("轻松", "easy")
             self._self_report_combo.addItem("刚好", "ok")
             self._self_report_combo.addItem("吃力", "hard")
-            self._self_report_combo.setCurrentIndex(1)
+            # 首次检测开场已经强制选过一次，这里按那个值回显；中途重开则用落库值。
+            initial_report = self._initial_self_report or quiz.self_report or "ok"
+            index = self._self_report_combo.findData(initial_report)
+            self._self_report_combo.setCurrentIndex(index if index >= 0 else 1)
             self._self_report_combo.setToolTip(
                 "用于安排下一篇真实文章，不参与等级调整"
                 if is_real
@@ -631,9 +651,11 @@ class ReadingQuizDialog(QDialog):
             return
 
         article = self._article
-        self_report = (
-            self._self_report_combo.currentData() if self._self_report_combo is not None else "ok"
-        ) or "ok"
+        if self._self_report_combo is not None:
+            self_report = self._self_report_combo.currentData()
+        else:
+            self_report = self._initial_self_report
+        self_report = self_report or "ok"
         service = self._service
 
         self._busy_phase = "grading"
@@ -1068,6 +1090,53 @@ class ReadingQuizDialog(QDialog):
         self._worker = None
         self._busy_phase = ""
         self._set_busy(False)
+
+    # ---------------------------------------------------------------- 首次自评
+    def exec(self) -> int:
+        """首次检测先强制自评。
+
+        AI 出题在 `__init__` 里就已经进了 TaskWorker，这里弹窗只等用户选一下，
+        出题线程继续跑；用户选完时题目往往已经准备好，不会白等一轮 AI。
+        """
+        if not self._prepare_self_report():
+            return QDialog.DialogCode.Rejected
+        return super().exec()
+
+    def _prepare_self_report(self) -> bool:
+        """返回 False 表示用户放弃自评，本次检测不打开。"""
+        if not self._needs_self_report:
+            return True
+        self._needs_self_report = False  # 只问一次；重试出题不再弹
+        choice = self._ask_self_report()
+        if not choice:
+            # 用户放弃：放弃已在后台发出的出题请求，不打开检测。
+            self.self_report_cancelled = True
+            retire_worker(self._worker)
+            self._worker = None
+            self._busy_phase = ""
+            return False
+        self._initial_self_report = choice
+        self._save_self_report()
+        return True
+
+    def _ask_self_report(self) -> str:
+        dialog = SelfAssessmentDialog(self.parentWidget() or self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return ""
+        return dialog.self_report()
+
+    def _save_self_report(self) -> None:
+        """把首次自评先写进题目行：中途关窗后重开仍能回显。"""
+        quiz = self._quiz
+        if quiz is None or quiz.id is None or not self._initial_self_report:
+            return
+        saver = getattr(self._service, "save_self_report", None)
+        if not callable(saver):
+            return
+        try:
+            saver(quiz.id, self._initial_self_report)
+        except Exception:  # noqa: BLE001 - 自评落库失败不阻断检测
+            logger.warning("保存阅读自评失败", exc_info=True)
 
     @staticmethod
     def _clear_layout(layout) -> None:
