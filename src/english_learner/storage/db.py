@@ -2,7 +2,7 @@
 
 Java 对照：
 - Database ≈ DataSource + 一次性的 SchemaInitializer；
-- `repositories.py` ≈ 一组 MyBatis Mapper（手写 SQL，不开 ORM）。
+- `repositories/` ≈ 一组 MyBatis Mapper（手写 SQL，不开 ORM）。
 
 线程模型（重要）：
 - 应用里 AI 调用跑在 TaskWorker 子线程，子线程可能写文章 / 生词，
