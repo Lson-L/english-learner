@@ -32,6 +32,7 @@ from ...models.entities import CEFR_LEVELS
 from ...services.stats_overview import (
     ActivityDay,
     CumulativePoint,
+    DueDay,
     QuizSeries,
     WordStatusSplit,
     nice_max,
@@ -761,6 +762,225 @@ class WordStatusBar(_ChartBase):
             legend_x += max(96.0, QFontMetrics(self._font(10)).horizontalAdvance(text) + 26)
 
 
+class DueForecastChart(_ChartBase):
+    """未来 N 天复习负载：每天一根柱，柱高 = 到期未掌握词数。"""
+
+    MARGIN_LEFT = 34
+    MARGIN_RIGHT = 10
+    MARGIN_TOP = 22
+    MARGIN_BOTTOM = 24
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._days: tuple[DueDay, ...] = ()
+        self._hover: int | None = None
+        self.setMinimumHeight(150)
+
+    def set_days(self, days: tuple[DueDay, ...]) -> None:
+        self._days = tuple(days)
+        self._hover = None
+        self.update()
+
+    def _plot_rect(self) -> QRectF:
+        return QRectF(
+            self.MARGIN_LEFT,
+            self.MARGIN_TOP,
+            max(10.0, self.width() - self.MARGIN_LEFT - self.MARGIN_RIGHT),
+            max(10.0, self.height() - self.MARGIN_TOP - self.MARGIN_BOTTOM),
+        )
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001 - Qt 事件签名
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if not self._days or max((day.count for day in self._days), default=0) <= 0:
+            self._paint_empty(
+                painter,
+                self._t("未来 7 天没有到期复习", "No reviews due in the next 7 days"),
+            )
+            return
+
+        plot = self._plot_rect()
+        peak = max(day.count for day in self._days)
+        y_max = nice_max(peak)
+        font = self._font(9)
+        painter.setFont(font)
+
+        for step in range(3):
+            ratio = step / 2
+            y = plot.bottom() - plot.height() * ratio
+            painter.setPen(QPen(QColor(self._palette.grid), 1))
+            painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
+            painter.setPen(QColor(self._palette.axis))
+            painter.drawText(
+                QRectF(0, y - 7, self.MARGIN_LEFT - 6, 14),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                _fmt(round(y_max * ratio)),
+            )
+
+        slot = plot.width() / max(1, len(self._days))
+        bar_width = max(8.0, slot * 0.56)
+        color = QColor(self._palette.seq[1])
+        for index, day in enumerate(self._days):
+            x = plot.left() + slot * index + (slot - bar_width) / 2
+            height = plot.height() * day.count / y_max
+            rect = QRectF(x, plot.bottom() - height, bar_width, max(2.0, height))
+            painter.setPen(Qt.PenStyle.NoPen)
+            fill = QColor(color)
+            if index == self._hover:
+                fill = fill.lighter(120)
+            painter.setBrush(fill)
+            painter.drawRoundedRect(rect, 3, 3)
+            painter.setPen(QColor(self._palette.axis))
+            painter.drawText(
+                QRectF(plot.left() + slot * index, plot.bottom() + 5, slot, 14),
+                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                day.day[5:],
+            )
+
+        if self._hover is not None and 0 <= self._hover < len(self._days):
+            day = self._days[self._hover]
+            painter.setPen(QColor(self._palette.text))
+            painter.setFont(self._font(10, bold=True))
+            painter.drawText(
+                QRectF(plot.left(), 1, plot.width(), 18),
+                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+                f"{day.day} · {_fmt(day.count)}",
+            )
+
+    def _index_at(self, position: QPointF) -> int | None:
+        plot = self._plot_rect()
+        if not plot.contains(position) or not self._days:
+            return None
+        slot = plot.width() / len(self._days)
+        index = int((position.x() - plot.left()) // slot)
+        return index if 0 <= index < len(self._days) else None
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: ANN001 - Qt 事件签名
+        index = self._index_at(event.position())
+        if index != self._hover:
+            self._hover = index
+            self.update()
+        if index is None:
+            QToolTip.hideText()
+            return
+        day = self._days[index]
+        if self._low_profile:
+            text = f"{day.day} · due {day.count}"
+        else:
+            text = f"{day.day} · 到期 {day.count} 个词"
+        QToolTip.showText(event.globalPosition().toPoint(), text, self)
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001 - Qt 事件签名
+        self._hover = None
+        self.update()
+        super().leaveEvent(event)
+
+
+class HBarChart(_ChartBase):
+    """横向条形图：错因次数 / 技能正确率等排行。
+
+    `rows` 是 (标签, 数值) 有序序列，调用方负责排序（通常从大到小）。
+    条形长度按最大值为 100% 归一，数值文本直接画在条形右侧。
+    """
+
+    ROW_HEIGHT = 26
+    LABEL_WIDTH = 96
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._rows: tuple[tuple[str, int], ...] = ()
+        self._empty_zh = "还没有数据"
+        self._empty_en = "No data yet"
+        self._unit = ""
+        self._hover: int | None = None
+        self.setMinimumHeight(80)
+
+    def set_rows(
+        self,
+        rows: tuple[tuple[str, int], ...],
+        *,
+        empty_zh: str = "还没有数据",
+        empty_en: str = "No data yet",
+        unit: str = "",
+    ) -> None:
+        self._rows = tuple(rows)
+        self._empty_zh = empty_zh
+        self._empty_en = empty_en
+        self._unit = unit
+        self._hover = None
+        self.setMinimumHeight(max(80, len(self._rows) * self.ROW_HEIGHT + 12))
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001 - Qt 事件签名
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if not self._rows:
+            self._paint_empty(painter, self._t(self._empty_zh, self._empty_en))
+            return
+
+        peak = max(value for _label, value in self._rows)
+        if peak <= 0:
+            self._paint_empty(painter, self._t(self._empty_zh, self._empty_en))
+            return
+
+        bar_left = self.LABEL_WIDTH
+        value_width = 46
+        bar_right = max(bar_left + 10, self.width() - value_width)
+        font = self._font(10)
+        painter.setFont(font)
+        for index, (label, value) in enumerate(self._rows):
+            y = 6 + index * self.ROW_HEIGHT
+            text_color = self._palette.accent if index == self._hover else self._palette.text
+            painter.setPen(QColor(text_color))
+            painter.drawText(
+                QRectF(0, y, self.LABEL_WIDTH - 8, self.ROW_HEIGHT - 8),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                label,
+            )
+            width = max(2.0, (bar_right - bar_left) * value / peak)
+            rect = QRectF(bar_left, y + 4, width, self.ROW_HEIGHT - 16)
+            bar_color = QColor(self._palette.series[0])
+            if index == self._hover:
+                bar_color = bar_color.lighter(120)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(bar_color)
+            painter.drawRoundedRect(rect, 3, 3)
+            painter.setPen(QColor(self._palette.muted))
+            painter.drawText(
+                QRectF(bar_right + 6, y, value_width - 6, self.ROW_HEIGHT - 8),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                f"{_fmt(value)}{self._unit}",
+            )
+
+    def _index_at(self, position: QPointF) -> int | None:
+        if position.x() < self.LABEL_WIDTH or not self._rows:
+            return None
+        index = int((position.y() - 6) // self.ROW_HEIGHT)
+        return index if 0 <= index < len(self._rows) else None
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: ANN001 - Qt 事件签名
+        index = self._index_at(event.position())
+        if index != self._hover:
+            self._hover = index
+            self.update()
+        if index is None:
+            QToolTip.hideText()
+            return
+        label, value = self._rows[index]
+        QToolTip.showText(
+            event.globalPosition().toPoint(),
+            f"{label} · {_fmt(value)}{self._unit}",
+            self,
+        )
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001 - Qt 事件签名
+        self._hover = None
+        self.update()
+        super().leaveEvent(event)
+
+
 class ScoreTrendChart(_ChartBase):
     """阅读检测得分趋势：按结果等级分线，0~100% 固定纵轴。"""
 
@@ -987,6 +1207,8 @@ __all__ = [
     "ChartPalette",
     "CumulativeChart",
     "DailyActivityChart",
+    "DueForecastChart",
+    "HBarChart",
     "HeatLegend",
     "HeatmapCalendar",
     "ScoreTrendChart",

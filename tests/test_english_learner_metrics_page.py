@@ -1,4 +1,4 @@
-"""M5.5 设置页学习效果卡片（offscreen，本地数据库，无网络）。"""
+"""M5.5 / M8 学习效果卡片（统计页，offscreen，本地数据库，无网络）。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from english_learner.gui.pages.settings import SettingsPage  # noqa: E402
+from english_learner.gui.pages.stats import StatsPage  # noqa: E402
 from english_learner.models.entities import (  # noqa: E402
     Article,
     QuizQuestion,
@@ -40,13 +40,12 @@ def make_config() -> AIConfig:
     )
 
 
-def make_page(tmp_path: Path) -> tuple[SettingsPage, AppContext, Database]:
+def make_page(tmp_path: Path) -> tuple[StatsPage, AppContext, Database]:
     store = ConfigStore(tmp_path / "config.json")
     store.save(make_config())
     db = Database(tmp_path / "data.db")
     context = AppContext(make_config(), store, db)
-    page = SettingsPage(make_config(), store, context)
-    return page, context, db
+    return StatsPage(context), context, db
 
 
 def seed_review(db: Database) -> None:
@@ -106,40 +105,60 @@ def seed_quiz(db: Database) -> None:
     )
 
 
-def test_metrics_card_without_database(tmp_path: Path) -> None:
+def test_effect_card_empty_database(tmp_path: Path) -> None:
+    get_app()
+    page, _context, db = make_page(tmp_path)
+
+    page.refresh()
+
+    assert page._effect_tiles["first_pass"].value == "—"
+    assert page._effect_tiles["plan"].value == "—"
+    assert page._effect_tiles["article_retry"].value == "—"
+    assert "还没有完成的阅读检测" in page._trend_label.text()
+    db.close()
+
+
+def test_effect_card_renders_reviews_and_quiz_trend(tmp_path: Path) -> None:
+    get_app()
+    page, _context, db = make_page(tmp_path)
+    seed_review(db)
+    seed_quiz(db)
+
+    page.refresh()
+
+    assert page._effect_tiles["first_pass"].value == "1/1 · 100%"
+    assert page._effect_tiles["relearn"].value == "0/1 · 0%"
+    assert page._effect_tiles["plan"].value == "—"
+    trend_text = page._trend_label.text()
+    assert "B1 · 1 次 · 最近一次 100%" in trend_text
+    assert "样本不足" in trend_text
+    db.close()
+
+
+def test_effect_card_switches_to_english_in_low_profile(tmp_path: Path) -> None:
+    get_app()
+    page, _context, db = make_page(tmp_path)
+    seed_review(db)
+    seed_quiz(db)
+    page.refresh()
+
+    page.set_low_profile(True)
+
+    assert "Score trend" in page._trend_label.text()
+    assert "not enough samples" in page._trend_label.text()
+    db.close()
+
+
+def test_settings_page_no_longer_owns_effect_or_usage_cards(tmp_path: Path) -> None:
+    """M8：学习效果与 AI 用量已迁到统计页，设置页只保留运行日志。"""
+    from english_learner.gui.pages.settings import SettingsPage
+
     get_app()
     store = ConfigStore(tmp_path / "config.json")
     store.save(make_config())
 
     page = SettingsPage(make_config(), store)
 
-    assert page._metric_labels["first_pass"].text() == "—"
-    assert "未连接数据库" in page._trend_label.text()
-
-
-def test_metrics_card_empty_database(tmp_path: Path) -> None:
-    get_app()
-    page, _context, db = make_page(tmp_path)
-
-    assert page._metric_labels["first_pass"].text() == "—"
-    assert page._metric_labels["plan"].text() == "—"
-    assert page._metric_labels["article_retry"].text() == "—"
-    assert "还没有完成的阅读检测" in page._trend_label.text()
-    db.close()
-
-
-def test_metrics_card_renders_reviews_and_quiz_trend(tmp_path: Path) -> None:
-    get_app()
-    page, _context, db = make_page(tmp_path)
-    seed_review(db)
-    seed_quiz(db)
-
-    page._refresh_metrics()
-
-    assert page._metric_labels["first_pass"].text() == "1/1 · 100%"
-    assert page._metric_labels["relearn"].text() == "0/1 · 0%"
-    assert page._metric_labels["plan"].text() == "—"
-    trend_text = page._trend_label.text()
-    assert "B1 · 1 次 · 最近一次 100%" in trend_text
-    assert "样本不足" in trend_text
-    db.close()
+    assert not hasattr(page, "_metric_labels")
+    assert not hasattr(page, "_usage_button")
+    assert page._logs_button.isEnabled() is True

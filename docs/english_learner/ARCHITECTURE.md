@@ -49,7 +49,8 @@ src/english_learner/
 │   ├── back_translation.py     回译：切句 / 抽句 / 译文与批改解析（M5.4，纯函数）
 │   ├── back_translation_service.py 回译出题缓存 + 批量批改（M5.4，两次 AI 调用）
 │   ├── metrics_service.py      学习效果度量：通过率 / 回炉率 / 计划完成 / 重试 / 趋势（M5.5，纯本地）
-│   ├── stats_overview.py       统计页聚合：热力图 / 累计曲线 / 每日活动 / 词档 / 检测趋势 / 成就（纯本地）
+│   ├── quiz_insights.py        检测错因 / 技能 / 难度 / 不知道比例（M8，复用 quiz_calibration）
+│   ├── stats_overview.py       统计页聚合：热力图 / 累计曲线 / 每日活动 / 词档 / 检测趋势 / 复习负载 / 真实文章 / 成就（纯本地）
 │   ├── export_service.py       JSON / CSV 数据导出（十二张表，含 AI 调用记录与回译）
 │   ├── backup_service.py       启动时每日备份 data.db（SQLite backup API，保留 7 份）
 │   ├── database_transfer.py    整库导出 / 导入（校验 + 暂存 + 启动时替换，导入前备份）
@@ -75,16 +76,16 @@ src/english_learner/
     ├── widgets/
     │   ├── article_view.py     只读 QTextEdit：双击取词、高亮、17px/1.8 行距
     │   ├── word_panel.py       悬浮释义卡（可滚动/关闭）+ 加入生词本按钮
-    │   ├── charts.py           自绘图表：热力图 / 累计曲线 / 堆叠柱 / 分段条 / 折线（跟随主题）
-    │   └── achievements.py     成就墙：徽章网格 + 进度条 + 解锁态样式
+    │   ├── charts.py           自绘图表：热力图 / 累计曲线 / 堆叠柱 / 分段条 / 折线 / 横条 / 复习负载（跟随主题）
+    │   └── achievements.py     成就墙：徽章网格 + 进度条 + 解锁态与解锁日期
     └── pages/
-        ├── common.py           Card / PageHeader / StatCard(可刷新) / set_status
+        ├── common.py           Card / PageHeader / StatCard / MetricTile / set_status
         ├── today.py            今日页：连续天数/到期复习/累计生词/文章状态/测评入口
         ├── reader.py           阅读页：正文全宽 + 悬浮释义卡、换一篇（弹窗内含调整难度）、阅读完成
         ├── vocabulary.py       生词本页：筛选/搜索/排序/编辑/批量删除/脏检查/求助记录回显
         ├── review.py           复习页：自动编排卡片、每日目标、分批检查点、随时结束（M3.18/M3.19）
-        ├── stats.py            统计页：累计数字 + 热力图 + 累计曲线 + 近 30 天 + 词汇分布 + 检测趋势 + 成就
-        └── settings.py         配置、学习效果、调用记录摘要与入口、字体、数据位置、JSON/CSV 导出
+        ├── stats.py            统计页：学习效果 + AI 用量 + 热力图 + 累计曲线 + 近 30 天 + 检测趋势 + 错因 + 词汇/负载 + 真实文章 + 成就
+        └── settings.py         配置、运行日志、字体、数据位置、JSON/CSV 导出（学习效果与用量已移到统计页）
 
 tests/（共 678 个用例，全部 mock AI、无网络）
 ├── test_english_learner_config.py        配置读写/校验/脱敏
@@ -114,9 +115,10 @@ tests/（共 678 个用例，全部 mock AI、无网络）
 ├── test_english_learner_back_translation.py 回译切句/抽句/译文与批改解析/缓存/落库/级联
 ├── test_english_learner_back_translation_dialog.py 回译弹窗：缓存/校验/批改展示/失败重试
 ├── test_english_learner_metrics.py       学习效果口径：首次通过/回炉/计划完成/重试/趋势
-├── test_english_learner_metrics_page.py  设置页学习效果卡片（offscreen）
-├── test_english_learner_stats_overview.py 统计口径：热力级别/累计基线/词档/检测趋势/成就
-├── test_english_learner_stats_page.py    统计页渲染 / 指标切换 / 主题切换 / 空态（offscreen）
+├── test_english_learner_metrics_page.py  统计页学习效果卡片（offscreen）
+├── test_english_learner_quiz_insights.py 错因/技能/难度/不知道比例/练习与窗口排除（M8）
+├── test_english_learner_stats_overview.py 统计口径：热力级别/累计窗口/词档/负载/真实文章/成就解锁日
+├── test_english_learner_stats_page.py    统计页渲染 / 新卡片 / 折叠 / 窗口切换 / 主题（offscreen）
 ├── test_english_learner_vocabulary_page.py 生词本筛选/搜索/排序/编辑/批量删除/脏检查/求助记录回显
 ├── test_english_learner_secret_store.py   DPAPI 往返/明文兼容/损坏密文
 ├── test_english_learner_export.py        JSON 快照/CSV 分表/空库/原子写入
@@ -1087,6 +1089,36 @@ tests/（共 678 个用例，全部 mock AI、无网络）
   `test_english_learner_stats_page.py` 覆盖页面渲染、指标切换、主题切换、
   空态绘制与统计失败兜底；主题测试额外校验两套调色板的图表 key 与热力
   阶梯单调性。全量 678 passed。
+
+### 6.40 统计看板深化（2026-11-27，M8）
+
+- **布局**：按“重要数据靠上”重排为「指标卡 → 学习效果 / AI 用量 → 热力图 →
+  累计 / 近 30 天 → 检测 / 错因 → 词汇 / 复习负载 → 真实文章 → 成就」；
+  成就固定最后。数据不足 3 个活跃日时收起 4 张趋势卡，空库只留引导与成就。
+- **学习效果与 AI 用量迁移**：设置页不再计算这两块，统计页分别调
+  `AppContext.metrics_service().build()` 与 `AICallRepo.summary()`；两块各自
+  try/except，单块失败只显示 “—”，不影响整页。`AIUsageDialog` 原样复用。
+- **新增口径**：复习负载按 `words.due_date` 分桶（未来 7 天），`due_today`
+  含逾期、`overdue_words` 单独统计；停滞词 = 学习中且到期超过 7 天；
+  严格阅读剂量 = 已打开且完成过检测的文章词数；真实文章按
+  `real_text_history.status / outcome` 计数（`abandon` 不是 `abandoned`）。
+- **错因**：`services/quiz_insights.py` 取近 30 天完成且非练习的检测，
+  复用 `quiz_calibration` 的 `summarizing_error_types / skill_stats /
+  difficulty_stats`；“不知道”按 `UNKNOWN_ANSWER` 统计，标签表放在服务层
+  （`ERROR_TYPE_LABELS* / SKILL_LABELS*`），界面不重复维护。
+- **累计窗口**：`build(cumulative_days=...)`，`0` 表示全部历史；全部模式从
+  最早一条 `daily_stats` 开始，窗口前的活动仍折成基线，因此第一点仍是真实
+  累计值。页面用 `QComboBox` 切换（不是 QPushButton，需自行处理低调主题英文）。
+- **性能**：`ArticleRepo.list_reading_volume()` 只投影 id / 词数 / read_at /
+  source，不再 `SELECT *` 把正文读进内存；`QuizRepo.list_formal_completed_light()`
+  只取等级 / 完成时间 / 得分 / 题目数，不再反序列化答案与讲评大 JSON；
+  `_longest_streak` 每次 build 只算一次。
+- **成就解锁日**：累计类用 `daily_stats` 对应字段求和首次达标日，连续类用
+  连续区间起始日 + target - 1，quizzes 用完成日期累计；`words` 的 current
+  用当前生词本数量、解锁日只能用历史新增反推，口径差异已在代码注释说明。
+- **测试**：新增 `test_english_learner_quiz_insights.py`；统计聚合与页面测试
+  补负载 / 词档 / 严格剂量 / 累计窗口 / 成就解锁日 / 真实文章 / 折叠 / 主题；
+  设置页学习效果与用量入口测试改为统计页目标。
 
 ## M7 真实文章库（schema v9，2026-11-25）
 

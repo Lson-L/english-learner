@@ -34,6 +34,7 @@ from ..models.entities import (
     Profile,
     QuizProduction,
     QuizQuestion,
+    QuizSummary,
     ReadingQuiz,
     RealText,
     RealTextHistory,
@@ -165,6 +166,25 @@ class ArticleRepo(_BaseRepo):
         """全部文章（导出用），按日期倒序。"""
         rows = self._db.query_all("SELECT * FROM articles ORDER BY article_date DESC, id DESC")
         return [Article.from_row(row) for row in rows]
+
+    def list_reading_volume(self) -> list[tuple[int, int, str | None, str]]:
+        """统计页阅读剂量专用：只取 id / 词数 / 阅读时间 / 来源。
+
+        之前的实现用 `list_all()`，会把每篇文章的正文一起读进内存再逐条累加；
+        文章攒多之后每次切到统计页都要加载全部正文。这里只投影四列。
+        """
+        rows = self._db.query_all(
+            "SELECT id, word_count, read_at, source FROM articles ORDER BY article_date"
+        )
+        return [
+            (
+                int(row["id"]),
+                int(row["word_count"] or 0),
+                str(row["read_at"] or "") or None,
+                str(row["source"] or ""),
+            )
+            for row in rows
+        ]
 
 
 class RealTextRepo(_BaseRepo):
@@ -819,6 +839,43 @@ class WordRepo(_BaseRepo):
         )
         return {str(row["cefr_band"]): int(row["n"]) for row in rows}
 
+    def count_overdue(self, on_date: str | None = None) -> int:
+        """已过期未复习的词数（不含今天到期；用于区分“逾期”和“今日待复习”）。"""
+        day = on_date or today_str()
+        row = self._db.query_one(
+            "SELECT COUNT(*) AS n FROM words WHERE due_date IS NOT NULL AND due_date < ? "
+            "AND status <> 'mastered' AND in_vocabulary = 1",
+            (day,),
+        )
+        return int(row["n"]) if row is not None else 0
+
+    def count_stalled(self, on_date: str | None = None, *, days: int = 7) -> int:
+        """停滞词：学习中且到期日早于 `days` 天前仍未复习。
+
+        只用于统计页提示，不参与调度；`days` 小于 1 时按 1 处理。
+        """
+        day = on_date or today_str()
+        try:
+            cutoff = (date.fromisoformat(day) - timedelta(days=max(1, int(days)))).isoformat()
+        except ValueError:
+            cutoff = day
+        row = self._db.query_one(
+            "SELECT COUNT(*) AS n FROM words WHERE in_vocabulary = 1 AND status = 'learning' "
+            "AND due_date IS NOT NULL AND due_date < ?",
+            (cutoff,),
+        )
+        return int(row["n"]) if row is not None else 0
+
+    def due_counts(self, start_day: str, end_day: str) -> dict[str, int]:
+        """按到期日统计未掌握词数，供“未来 7 天复习负载”使用。"""
+        rows = self._db.query_all(
+            "SELECT due_date, COUNT(*) AS n FROM words "
+            "WHERE in_vocabulary = 1 AND status <> 'mastered' AND due_date IS NOT NULL "
+            "AND due_date BETWEEN ? AND ? GROUP BY due_date",
+            (start_day, end_day),
+        )
+        return {str(row["due_date"]): int(row["n"]) for row in rows}
+
 
 class ReviewRepo(_BaseRepo):
     """复习历史（review_logs）：只追加；界面“撤销上一张”是唯一删除入口。"""
@@ -1415,6 +1472,48 @@ class QuizRepo(_BaseRepo):
             params.append(int(exclude_id))
         row = self._db.query_one(sql, params)
         return int(row["n"]) if row is not None else 0
+
+    def completed_article_ids(self) -> set[int]:
+        """完成过检测的文章 id 集合（含练习模式）。
+
+        统计页用它算“完成检测的阅读词数”这一严格口径；不读题目 JSON。
+        """
+        rows = self._db.query_all(
+            "SELECT DISTINCT article_id FROM reading_quizzes WHERE completed_at IS NOT NULL"
+        )
+        return {int(row["article_id"]) for row in rows if row["article_id"] is not None}
+
+    def list_formal_completed_light(self) -> list[QuizSummary]:
+        """统计页趋势专用：只取等级 / 完成时间 / 得分 / 题目数。
+
+        不再反序列化 `answers_json / explanations_json / productions_json`
+        等大字段；题目数用 `questions_json` 的长度还原，与 `ReadingQuiz.total`
+        同一口径（选择题 + 主动产出题）。
+        """
+        rows = self._db.query_all(
+            "SELECT article_date, level, result_level, completed_at, score, questions_json "
+            "FROM reading_quizzes WHERE completed_at IS NOT NULL AND practice_mode = 0 "
+            "ORDER BY completed_at, id"
+        )
+        summaries: list[QuizSummary] = []
+        for row in rows:
+            try:
+                total = len(json.loads(row["questions_json"] or "[]"))
+            except (TypeError, ValueError):
+                total = 0
+            if total <= 0:
+                continue
+            summaries.append(
+                QuizSummary(
+                    article_date=str(row["article_date"] or ""),
+                    level=str(row["level"] or ""),
+                    result_level=str(row["result_level"] or ""),
+                    completed_at=str(row["completed_at"] or ""),
+                    score=int(row["score"] or 0),
+                    total=total,
+                )
+            )
+        return summaries
 
     def list_all(self) -> list[ReadingQuiz]:
         """全部阅读检测（导出用），按日期倒序。"""

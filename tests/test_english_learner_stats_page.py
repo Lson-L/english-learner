@@ -7,11 +7,12 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QScrollArea  # noqa: E402
 
 from english_learner.gui.pages.stats import StatsPage  # noqa: E402
 from english_learner.gui.theme import LOW_PROFILE_PALETTE  # noqa: E402
 from english_learner.models.entities import (  # noqa: E402
+    AICall,
     Article,
     QuizQuestion,
     ReadingQuiz,
@@ -83,7 +84,7 @@ def seed(db: Database) -> None:
     assert quiz.id is not None
     db.quizzes.save_result(
         quiz.id,
-        answers=(),
+        answers=(0, 0, 1, 0),
         explanations=(),
         score=3,
         previous_level="B1",
@@ -179,6 +180,8 @@ def test_charts_can_paint_without_data(tmp_path: Path) -> None:
         "_daily_chart",
         "_word_bar",
         "_score_chart",
+        "_due_chart",
+        "_error_chart",
     ):
         widget = getattr(page, name)
         widget.setFixedSize(600, 200)
@@ -226,4 +229,110 @@ def test_service_failure_keeps_page_usable(tmp_path: Path) -> None:
     assert page._streak_card._value_label.text() == "—"
     assert "统计计算失败" in page._empty_hint.text()
     assert page._empty_hint.isHidden() is False
+    db.close()
+
+
+# ------------------------------------------------------------ M8 布局与新卡片
+def test_new_cards_and_achievements_last(tmp_path: Path) -> None:
+    get_app()
+    page, db = make_page(tmp_path)
+    seed(db)
+    page.refresh()
+
+    assert page._effect_tiles["first_pass"].value == "—"
+    assert page._usage_tiles["today_calls"].value == "0"
+    assert "今天到期" in page._due_summary.text()
+    assert page._band_summary.text() == ""
+    assert page._real_text_card.isHidden() is True
+
+    body = page.findChild(QScrollArea).widget()
+    layout = body.layout()
+    # 成就是最后一个内容卡片。
+    assert layout.indexOf(page._achievement_card) > layout.indexOf(page._real_text_card)
+    assert layout.indexOf(page._achievement_card) > layout.indexOf(page._heatmap_card)
+    db.close()
+
+
+def test_effect_and_usage_tiles_fill_after_activity(tmp_path: Path) -> None:
+    get_app()
+    page, db = make_page(tmp_path)
+    seed(db)
+    db.ai_calls.insert(
+        AICall(
+            called_at=now_iso(),
+            task="查词",
+            model="test-model",
+            total_tokens=120,
+            latency_ms=400,
+        )
+    )
+    page.refresh()
+
+    assert page._usage_tiles["today_calls"].value == "1"
+    assert page._usage_tiles["today_tokens"].value == "120"
+    assert page._usage_tiles["latency"].value == "400 ms"
+    db.close()
+
+
+def test_trend_cards_hidden_until_three_active_days(tmp_path: Path) -> None:
+    get_app()
+    page, db = make_page(tmp_path)
+    seed(db)
+    page.refresh()
+
+    # 只有今天一条记录：趋势卡收起，提示继续积累。
+    assert page._cumulative_card.isHidden() is True
+    assert page._tips_hint.isHidden() is False
+
+    for day in ("2026-11-26", "2026-11-25"):
+        db.stats.bump(day, article_read=1)
+    page.refresh()
+
+    assert page._cumulative_card.isHidden() is False
+    assert page._tips_hint.isHidden() is True
+    db.close()
+
+
+def test_low_profile_translates_new_cards_and_window_options(tmp_path: Path) -> None:
+    get_app()
+    page, db = make_page(tmp_path)
+    seed(db)
+    page.refresh()
+    page.set_low_profile(True)
+
+    assert page._effect_tiles["first_pass"]._caption_label.text() == "First-pass"
+    assert page._window_combo.itemText(0) == "30 days"
+    assert page._window_combo.itemText(3) == "All"
+    assert page._due_chart._palette.surface == LOW_PROFILE_PALETTE["BG_CARD"]
+    assert page._error_chart._palette.surface == LOW_PROFILE_PALETTE["BG_CARD"]
+    assert page._real_text_card.isHidden() is True
+    db.close()
+
+
+def test_cumulative_window_switch_rebuilds_curve(tmp_path: Path) -> None:
+    get_app()
+    page, db = make_page(tmp_path)
+    seed(db)
+    page.refresh()
+    assert len(page._cumulative_chart._points) == 90
+
+    page._window_combo.setCurrentIndex(0)  # 近 30 天
+    assert len(page._cumulative_chart._points) == 30
+
+    page._window_combo.setCurrentIndex(3)  # 全部
+    assert page._cumulative_chart._points
+    assert page._cumulative_chart._points[0].day <= today_str()
+    db.close()
+
+
+def test_insight_summary_shows_difficulty_and_reading_strict_hint(tmp_path: Path) -> None:
+    get_app()
+    page, db = make_page(tmp_path)
+    seed(db)
+    page.refresh()
+
+    assert "难度 B1 75%" in page._insight_summary.text()
+    hint = page._reading_card._hint_label.text()
+    assert "完成检测" in hint
+    assert "已读真实 0 / AI 0 篇" in hint
     db.close()

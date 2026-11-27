@@ -80,9 +80,9 @@ class StatCard(Card):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        caption_label = QLabel(caption)
-        caption_label.setObjectName("muted")
-        self.body.addWidget(caption_label)
+        self._caption_label = QLabel(caption)
+        self._caption_label.setObjectName("muted")
+        self.body.addWidget(self._caption_label)
 
         self._value_label = QLabel(value)
         self._value_label.setObjectName("bigNumber")
@@ -98,6 +98,48 @@ class StatCard(Card):
 
     def set_hint(self, hint: str) -> None:
         self._hint_label.setText(hint)
+
+    def set_caption(self, caption: str) -> None:
+        self._caption_label.setText(caption)
+
+    def set_tip(self, text: str) -> None:
+        """把提示同时挂到卡片与标签上：子控件会遮挡父控件的 tooltip。"""
+        self.setToolTip(text)
+        self._value_label.setToolTip(text)
+        self._hint_label.setToolTip(text)
+
+
+class MetricTile(QWidget):
+    """学习效果 / AI 用量的小指标：说明 + 数字。
+
+    统计页和设置页共用；数字使用 `usageValue` 样式（比首页大数字小一档），
+    说明使用 `muted`。两套主题都由全局 QSS 接管，这里不写死颜色。
+    """
+
+    def __init__(self, caption: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMinimumHeight(52)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        self._caption_label = QLabel(caption)
+        self._caption_label.setObjectName("muted")
+        layout.addWidget(self._caption_label)
+
+        self._value_label = QLabel("—")
+        self._value_label.setObjectName("usageValue")
+        layout.addWidget(self._value_label)
+
+    def set_value(self, value: str) -> None:
+        self._value_label.setText(value)
+
+    def set_caption(self, caption: str) -> None:
+        self._caption_label.setText(caption)
+
+    @property
+    def value(self) -> str:
+        return self._value_label.text()
 
 
 def set_status(label: QLabel, text: str, kind: str = "hint") -> None:

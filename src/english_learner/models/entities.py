@@ -363,6 +363,29 @@ class RealText:
 
 
 @dataclass(frozen=True)
+class QuizSummary:
+    """统计页用的检测摘要（M8）。
+
+    只包含趋势图需要的列，避免把 `answers_json / explanations_json /
+    productions_json` 这些大字段整体反序列化。`total` 由题目 JSON 的长度
+    还原：`reading_quizzes` 没有单独存题数，题目数就是 `total` 的口径。
+    """
+
+    article_date: str
+    level: str
+    result_level: str
+    completed_at: str
+    score: int
+    total: int
+
+    @property
+    def percent(self) -> int:
+        if self.total <= 0:
+            return 0
+        return round(self.score * 100 / self.total)
+
+
+@dataclass(frozen=True)
 class RealTextHistory:
     """真实文章供给历史（`real_text_history` 表）。
 

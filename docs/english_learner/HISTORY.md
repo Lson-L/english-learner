@@ -1701,3 +1701,48 @@ outcome）、`test_english_learner_real_text_practice.py`（上架原子性 / �
 `verification/VERIFICATION_M7.0.md`。
 
 **待办**：A2 / C1 内容补到每档 2 篇；M7.6 内容包导入、M7.7 在线源与手动 URL 可选。
+
+## M8 统计看板深化（2026-11-27）
+
+**目标**：统计页从“做了多少”升级为“学得怎么样、接下来做什么”，把学习效果与
+AI 用量从设置页收拢到统计页，并按重要程度重排布局（成就固定最后）。
+
+**改动**：
+
+- `services/stats_overview.py`：`StatsOverview` 新增 `today_active /
+  due_forecast / due_today / overdue_words / word_bands / stalled_words /
+  real_text`；`ReadingVolume` 增加 `completed_words / completed_articles /
+  real_articles / generated_articles`；累计曲线支持 `cumulative_days`
+  （0 = 全部历史）；成就增加 `unlocked_on`；`_longest_streak` 只算一次。
+- `services/quiz_insights.py`（新增）：近 30 天完成且非练习的检测 → 错因 /
+  技能 / 难度正确率 / 不知道比例，复用 `quiz_calibration` 纯函数。
+- `storage/repositories.py`：`WordRepo.due_counts / count_overdue /
+  count_stalled`；`ArticleRepo.list_reading_volume()`（只投影 4 列，不再读正文）；
+  `QuizRepo.completed_article_ids()` 与 `list_formal_completed_light()`
+  （不再反序列化答案 / 讲评 / 产出题大 JSON）。
+- `models/entities.py`：新增 `QuizSummary` 轻量检测摘要。
+- `services/app_context.py`：`stats_overview(cumulative_days=...)` 注入
+  `real_text_repo`；新增 `quiz_insights()`。
+- `gui/widgets/charts.py`：新增 `DueForecastChart`（未来 7 天负载）与
+  `HBarChart`（错因横条），颜色全部取自主题调色板。
+- `gui/widgets/achievements.py`：解锁徽章显示“已解锁 · MM-DD”，tooltip 带日期。
+- `gui/pages/common.py`：新增公共 `MetricTile`；`StatCard` 支持 `set_caption`。
+- `gui/pages/stats.py`：布局重排为「指标卡 → 学习效果 / AI 用量 → 热力图 →
+  累计 / 近 30 天 → 检测 / 错因 → 词汇 / 复习负载 → 真实文章 → 成就」；
+  新增学习效果、AI 用量、复习负载、错因、真实文章卡；累计曲线窗口切换；
+  少数据时收起趋势卡；顶部指标卡最小宽度；低调主题下标题 / 说明 / 指标名
+  全部切英文，窗口下拉与图表调色板同步。
+- `gui/pages/settings.py`：删除学习效果卡与 AI 用量摘要，只保留运行日志入口。
+
+**测试**：新增 `test_english_learner_quiz_insights.py`；`stats_overview` 补
+复习负载 / 逾期 / 词档 / 停滞词 / 严格阅读剂量 / 累计窗口 / 成就解锁日 /
+真实文章统计；`stats_page` 补新卡片 / 成就最后 / 折叠 / 窗口切换 / 低调主题；
+`metrics_page` 与 `usage_dialogs` 的设置页用例改为统计页目标。
+全量 **786 passed**；`ruff check` / `ruff format --check` 通过。
+
+**验收**：外部独立静态审查 2 轮。第 1 轮发现 P2 累计增量口径（首个点已含窗口
+第一天，全部窗口下少算最早一天）、P3 未作答稀释“不知道”比例、P3 部分统计字段
+未接界面，均已修复并补回归测试；第 2 轮确认无 P0 / P1 / P2。报告见
+`verification/VERIFICATION_M8.md`。
+
+**待办**：热力图点击跳转当天文章（需要 MainWindow 路由与 ReaderPage 打开指定日期）。

@@ -43,6 +43,7 @@ from .level_feedback_service import LevelFeedbackService
 from .level_progress import DifficultyHint, LevelProgress, build_level_progress
 from .level_progress import difficulty_hint as build_difficulty_hint
 from .metrics_service import MetricsService
+from .quiz_insights import QuizInsights, QuizInsightsService
 from .readability import ReadabilityThresholds
 from .reading_quiz_service import ReadingQuizService
 from .real_text_library import load_corpus, seed_real_texts, validate_corpus
@@ -322,14 +323,19 @@ class AppContext:
             self.writing_attempt_repo,
         )
 
-    def stats_overview(self) -> StatsOverview:
+    def stats_overview(self, *, cumulative_days: int = 90) -> StatsOverview:
         """统计页快照：热力图 / 累计曲线 / 阅读剂量全部本地计算，0 次 AI 调用。"""
         return StatsOverviewService(
             self.stats_repo,
             self.word_repo,
             self.quiz_repo,
             self.article_repo,
-        ).build()
+            self.real_text_repo,
+        ).build(cumulative_days=cumulative_days)
+
+    def quiz_insights(self, *, window_days: int = 30) -> QuizInsights:
+        """统计页错因 / 薄弱点：近 N 天完成的正式检测，纯本地计算。"""
+        return QuizInsightsService(self.quiz_repo).build(window_days=window_days)
 
     def real_text_supply_service(self) -> RealTextSupplyService:
         """M7.1 自动供给决策：只读本地数据，0 次 AI / 0 次网络。"""

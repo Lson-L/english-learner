@@ -165,6 +165,13 @@ uv run ruff format src/english_learner tests
   **不要把 `gui.main_window` / `gui.onboarding` / `gui.workers` 挪回 app.py
   顶层**，否则 `import english_learner.app` 重新变成 1.5s，遮罩来不及显示；
   `splash.py` 本身也不能 import `gui.main_window`。
+- **统计看板深化（2026-11-27，M8）**：学习效果（M5.5 指标）与 AI 用量从设置页
+  迁入统计页；新增复习负载（未来 7 天 + 逾期）、错因与薄弱点
+  （`services/quiz_insights.py`）、真实文章供给闭环、词档分布与停滞词、
+  累计曲线 30 / 90 / 365 / 全部窗口、成就解锁日期。布局按“重要数据靠上”
+  重排，成就固定最后；数据不足 3 个活跃日时收起趋势卡。阅读剂量与检测趋势
+  改用轻量投影查询，不再加载文章正文与检测大 JSON。详细口径见
+  `docs/english_learner/M8_STATS.md`。
 - **当前重点为 M7 真实文章自动供给（2026-11-25 排期）**：本地分级真实文章库
   入 SQLite、按最近阅读/检测状态自动选题、预置题目 + 本地判分、反馈驱动下一篇；
   离线优先，M7.7 可选在线源（内置稳定 URL + 手动 URL / 粘贴）作为补充，抓取失败

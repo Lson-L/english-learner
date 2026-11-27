@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -46,8 +45,6 @@ from ...services.database_transfer import (
 )
 from ...services.export_service import ExportResult
 from ...services.log_files import log_directory
-from ...services.metrics_service import MetricsSnapshot, PlanCompletion, RateMetric, RetryMetric
-from ..ai_usage_dialog import AIUsageDialog
 from ..app_restart import restart_application
 from ..fonts import ENGLISH_FONT_CHOICES, get_english_font
 from ..log_viewer_dialog import LogViewerDialog
@@ -100,12 +97,12 @@ class SettingsPage(QWidget):
         layout.addWidget(
             PageHeader(
                 "设置",
-                "AI 服务配置、学习效果、调用记录与运行日志、阅读外观、复习节奏、数据导出与备份。",
+                "AI 服务配置、运行日志、阅读外观、复习节奏、数据导出与备份。"
+                "学习效果与调用用量已移到统计页。",
             )
         )
         layout.addWidget(self._build_ai_card())
-        layout.addWidget(self._build_metrics_card())
-        layout.addWidget(self._build_ai_usage_card())
+        layout.addWidget(self._build_log_card())
         layout.addWidget(self._build_appearance_card())
         layout.addWidget(self._build_reading_card())
         layout.addWidget(self._build_review_card())
@@ -166,145 +163,15 @@ class SettingsPage(QWidget):
         self.apply_config(self._config)
         return card
 
-    def _build_metrics_card(self) -> Card:
-        """M5.5 学习效果看板：只读本地数据，不产生 AI 调用。"""
+    def _build_log_card(self) -> Card:
+        """运行日志入口；AI 调用用量已移到统计页。"""
         card = Card()
-        title = QLabel("学习效果（近 30 天）")
+        title = QLabel("运行日志")
         title.setObjectName("cardTitle")
         card.body.addWidget(title)
-
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(20)
-        grid.setVerticalSpacing(8)
-        metrics = (
-            ("first_pass", "生词首次通过"),
-            ("relearn", "词回炉率"),
-            ("plan", "计划完成率"),
-            ("article_retry", "文章生成重试"),
-            ("quiz_retry", "阅读检测重试"),
-        )
-        self._metric_labels: dict[str, QLabel] = {}
-        for column, (key, caption) in enumerate(metrics):
-            grid.addWidget(self._build_metric(key, caption), 0, column)
-        for column in range(len(metrics)):
-            grid.setColumnStretch(column, 1)
-        card.body.addLayout(grid)
-
-        self._trend_label = QLabel("")
-        self._trend_label.setObjectName("muted")
-        self._trend_label.setWordWrap(True)
-        card.body.addWidget(self._trend_label)
-
-        note = QLabel(
-            "全部指标由本地记录计算，不消耗 token：首次通过率看每个词的第一次复习评分；"
-            "回炉率 = 复习过的词里出现过“忘记 / 模糊”的比例；计划完成率只跟踪上周复盘"
-            "给出、且本周能找到对应学习行为的重点；重试率 = 重试请求占该任务全部请求的比例；"
-            "趋势按文章等级对比最近 3 次与更早 3 次的检测得分。"
-        )
-        note.setObjectName("muted")
-        note.setWordWrap(True)
-        card.body.addWidget(note)
-
-        self._refresh_metrics()
-        return card
-
-    def _build_metric(self, key: str, caption: str) -> QWidget:
-        box = QWidget()
-        box.setMinimumHeight(52)
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-
-        caption_label = QLabel(caption)
-        caption_label.setObjectName("muted")
-        layout.addWidget(caption_label)
-
-        value_label = QLabel("—")
-        value_label.setObjectName("usageValue")
-        layout.addWidget(value_label)
-        self._metric_labels[key] = value_label
-        return box
-
-    def _refresh_metrics(self) -> None:
-        if self._context is None:
-            for label in self._metric_labels.values():
-                label.setText("—")
-            self._trend_label.setText("（未连接数据库，无法计算学习效果）")
-            return
-        try:
-            snapshot = self._context.metrics_service().build()
-        except Exception:  # noqa: BLE001 - 只读统计失败不应影响设置页
-            logger.warning("计算学习效果指标失败", exc_info=True)
-            for label in self._metric_labels.values():
-                label.setText("—")
-            self._trend_label.setText("指标计算失败，可在下次进入设置页时重试。")
-            return
-
-        self._metric_labels["first_pass"].setText(self._rate_text(snapshot.first_pass))
-        self._metric_labels["relearn"].setText(self._rate_text(snapshot.relearn))
-        self._metric_labels["plan"].setText(self._plan_text(snapshot.plan))
-        self._metric_labels["article_retry"].setText(self._retry_text(snapshot.article_retry))
-        self._metric_labels["quiz_retry"].setText(self._retry_text(snapshot.quiz_retry))
-        self._trend_label.setText(self._trend_text(snapshot))
-
-    @staticmethod
-    def _rate_text(metric: RateMetric) -> str:
-        rate = metric.rate
-        if rate is None:
-            return "—"
-        return f"{metric.hit}/{metric.total} · {rate:.0%}"
-
-    @staticmethod
-    def _retry_text(metric: RetryMetric) -> str:
-        rate = metric.rate
-        if rate is None:
-            return "—"
-        return f"{metric.retries}/{metric.attempts} 次 · {rate:.0%}"
-
-    @staticmethod
-    def _plan_text(plan: PlanCompletion | None) -> str:
-        if plan is None or plan.planned == 0:
-            return "—"
-        rate = plan.rate or 0.0
-        return f"{plan.completed}/{plan.planned} · {rate:.0%}"
-
-    @staticmethod
-    def _trend_text(snapshot: MetricsSnapshot) -> str:
-        if not snapshot.quiz_trends:
-            return "同等级得分趋势：近 30 天还没有完成的阅读检测。"
-        arrows = {"up": "↑", "down": "↓", "flat": "→"}
-        lines = ["同等级得分趋势（同一文章等级，最近 3 次对比更早 3 次）："]
-        for trend in snapshot.quiz_trends:
-            base = f"{trend.level} · {len(trend.points)} 次 · 最近一次 {trend.latest_percent}%"
-            delta = trend.delta
-            if delta is None or trend.recent_avg is None:
-                lines.append(base + " · 样本不足，暂不判断趋势")
-                continue
-            arrow = arrows.get(trend.direction, "→")
-            lines.append(
-                f"{base} · 近 3 次均值 {trend.recent_avg:.0f}%"
-                f"（较之前 {delta:+.0f} 个百分点 {arrow}）"
-            )
-        return "\n".join(lines)
-
-    def _build_ai_usage_card(self) -> Card:
-        card = Card()
-        title = QLabel("AI 使用与日志")
-        title.setObjectName("cardTitle")
-        card.body.addWidget(title)
-
-        self._usage_summary = QLabel("")
-        self._usage_summary.setObjectName("muted")
-        self._usage_summary.setWordWrap(True)
-        card.body.addWidget(self._usage_summary)
 
         row = QHBoxLayout()
         row.setSpacing(10)
-        self._usage_button = QPushButton("查看调用记录")
-        self._usage_button.setObjectName("secondaryButton")
-        self._usage_button.clicked.connect(self._open_usage)
-        row.addWidget(self._usage_button)
-
         self._logs_button = QPushButton("查看运行日志")
         self._logs_button.setObjectName("secondaryButton")
         self._logs_button.clicked.connect(self._open_logs)
@@ -313,16 +180,12 @@ class SettingsPage(QWidget):
         card.body.addLayout(row)
 
         note = QLabel(
-            "调用记录只保存任务、模型、token 用量、耗时与错误，不保存提示词和模型回复；"
-            f"日志文件位于 {log_directory()}，按 1 MB 轮转、最多保留 4 个。"
+            f"日志文件位于 {log_directory()}，按 1 MB 轮转、最多保留 4 个；"
+            "AI 调用用量与明细已移到统计页。"
         )
         note.setObjectName("muted")
         note.setWordWrap(True)
         card.body.addWidget(note)
-
-        if self._context is None:
-            self._usage_button.setEnabled(False)
-        self._refresh_usage_summary()
         return card
 
     def _build_appearance_card(self) -> Card:
@@ -746,30 +609,6 @@ class SettingsPage(QWidget):
         return label
 
     # -------------------------------------------------------------- actions
-    def on_activated(self) -> None:
-        """切回设置页时刷新用量摘要与学习效果（复习、检测后会变化）。"""
-        self._refresh_usage_summary()
-        self._refresh_metrics()
-
-    def _refresh_usage_summary(self) -> None:
-        if self._context is None:
-            self._usage_summary.setText("（未连接数据库，无法查看调用记录）")
-            return
-        repo = self._context.ai_call_repo
-        today = repo.summary(since=today_str())
-        total = repo.summary()
-        self._usage_summary.setText(
-            f"今日 {today.calls:,} 次调用（失败 {today.failed_calls:,}）· "
-            f"{today.total_tokens:,} tokens；"
-            f"累计 {total.calls:,} 次 · {total.total_tokens:,} tokens。"
-        )
-
-    def _open_usage(self) -> None:
-        if self._context is None:
-            return
-        AIUsageDialog(self._context.ai_call_repo, parent=self).exec()
-        self._refresh_usage_summary()
-
     def _open_logs(self) -> None:
         LogViewerDialog(parent=self).exec()
 
@@ -829,8 +668,6 @@ class SettingsPage(QWidget):
         self._test_button.setText("测试连接")
         self._test_progress.setVisible(False)
         self._worker = None
-        # 连接测试本身也会产生一条调用记录，摘要要跟着变。
-        self._refresh_usage_summary()
 
     # -------------------------------------------------------------- 数据导出
     def _export_json(self) -> None:

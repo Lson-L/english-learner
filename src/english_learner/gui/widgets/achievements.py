@@ -82,7 +82,12 @@ class AchievementBadge(QFrame):
         self._desc.setText(achievement.description)
         self._progress.setValue(round(achievement.progress * 1000))
         if unlocked:
-            state = "Unlocked" if self._low_profile else "已解锁"
+            # 历史数据能推导出首次达标日期时顺带展示，比单纯“已解锁”更有回看价值。
+            date_text = achievement.unlocked_on[5:] if achievement.unlocked_on else ""
+            if self._low_profile:
+                state = f"Unlocked {date_text}".strip()
+            else:
+                state = f"已解锁 · {date_text}".strip(" ·")
         else:
             state = f"{achievement.current:,}/{achievement.target:,}"
         self._state.setText(state)
@@ -95,6 +100,8 @@ class AchievementBadge(QFrame):
             tip = f"{achievement.description} · {achievement.current}/{achievement.target}"
         else:
             tip = f"{achievement.description} · 当前 {achievement.current}/{achievement.target}"
+        if unlocked and achievement.unlocked_on:
+            tip += f" · {achievement.unlocked_on}"
         self.setToolTip(tip)
 
 

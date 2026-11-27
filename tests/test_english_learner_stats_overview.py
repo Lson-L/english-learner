@@ -28,6 +28,7 @@ def make_service(db: Database, today: date) -> StatsOverviewService:
         db.stats,
         db.words,
         db.quizzes,
+        db.articles,
         today=lambda: today.isoformat(),
     )
 
@@ -329,3 +330,243 @@ def test_reading_volume_counts_opened_articles_only(tmp_path) -> None:
     assert volume.words_30d == 500
     assert volume.est_books == round(600 / 90000, 1)
     assert overview.has_data is True
+
+
+# ------------------------------------------------------------ M8 新增口径
+def test_due_forecast_and_overdue(tmp_path) -> None:
+    today = date(2026, 11, 27)
+    db = Database(tmp_path / "data.db")
+    try:
+        for lemma, due, status in (
+            ("due-today-a", "2026-11-27", "learning"),
+            ("due-today-b", "2026-11-27", "new"),
+            ("due-tomorrow", "2026-11-28", "learning"),
+            ("overdue", "2026-11-20", "learning"),
+            ("mastered", "2026-11-27", "mastered"),
+        ):
+            db.words.upsert(
+                Word(
+                    lemma=lemma,
+                    status=status,
+                    in_vocabulary=True,
+                    due_date=due,
+                    created_at=now_iso(),
+                    updated_at=now_iso(),
+                )
+            )
+        overview = make_service(db, today).build(on=today)
+    finally:
+        db.close()
+
+    assert [day.count for day in overview.due_forecast] == [2, 1, 0, 0, 0, 0, 0]
+    assert overview.due_forecast[0].day == "2026-11-27"
+    # 今日到期口径含逾期；逾期单独统计且不含已掌握。
+    assert overview.due_today == 3
+    assert overview.overdue_words == 1
+
+
+def test_word_bands_and_stalled_words(tmp_path) -> None:
+    today = date(2026, 11, 27)
+    db = Database(tmp_path / "data.db")
+    try:
+        for lemma, band, status, due in (
+            ("a2-word", "A2", "learning", "2026-11-01"),
+            ("b1-word-a", "B1", "learning", "2026-12-10"),
+            ("b1-word-b", "B1", "new", None),
+            ("no-band", "", "new", None),
+        ):
+            db.words.upsert(
+                Word(
+                    lemma=lemma,
+                    cefr_band=band,
+                    status=status,
+                    in_vocabulary=True,
+                    due_date=due,
+                    created_at=now_iso(),
+                    updated_at=now_iso(),
+                )
+            )
+        overview = make_service(db, today).build(on=today)
+    finally:
+        db.close()
+
+    assert dict(overview.word_bands.bands) == {"A2": 1, "B1": 2}
+    assert overview.word_bands.unlabeled == 1
+    # 只有 a2-word 是 learning 且到期日早于 7 天前。
+    assert overview.stalled_words == 1
+
+
+def test_today_active_and_reading_volume_strict_measure(tmp_path) -> None:
+    today = date(2026, 11, 27)
+    db = Database(tmp_path / "data.db")
+    try:
+        db.stats.bump(today.isoformat(), article_read=1, words_added=1, reviews_done=1)
+        article = db.articles.insert(
+            Article(
+                article_date=today.isoformat(),
+                title="read-and-quizzed",
+                content="content",
+                level="B1",
+                word_count=500,
+                read_at=f"{today.isoformat()}T09:00:00",
+                source="real",
+                created_at=now_iso(),
+            )
+        )
+        assert article.id is not None
+        other = db.articles.insert(
+            Article(
+                article_date="2026-11-26",
+                title="read-only",
+                content="content",
+                level="B1",
+                word_count=300,
+                read_at="2026-11-26T09:00:00",
+                source="generated",
+                created_at=now_iso(),
+            )
+        )
+        assert other.id is not None
+        questions = tuple(
+            QuizQuestion(prompt=f"q{index}", options=("a", "b"), answer_index=0)
+            for index in range(2)
+        )
+        quiz = db.quizzes.insert(
+            ReadingQuiz(
+                article_id=article.id,
+                article_date=today.isoformat(),
+                level="B1",
+                questions=questions,
+                created_at=now_iso(),
+            )
+        )
+        assert quiz.id is not None
+        db.quizzes.save_result(
+            quiz.id,
+            answers=(),
+            explanations=(),
+            score=2,
+            previous_level="B1",
+            result_level="B1",
+            feedback="",
+            completed_at=f"{today.isoformat()}T10:00:00",
+        )
+        overview = make_service(db, today).build(on=today)
+    finally:
+        db.close()
+
+    assert overview.today_active is True
+    volume = overview.reading_volume
+    assert volume.total_words == 800
+    assert volume.completed_words == 500
+    assert volume.completed_articles == 1
+    assert volume.real_articles == 1
+    assert volume.generated_articles == 1
+
+
+def test_cumulative_window_can_be_changed(tmp_path) -> None:
+    today = date(2026, 11, 27)
+    db = Database(tmp_path / "data.db")
+    try:
+        db.stats.bump("2026-06-01", article_read=1, words_added=1, reviews_done=1)
+        db.stats.bump(today.isoformat(), article_read=1, words_added=1, reviews_done=1)
+        service = make_service(db, today)
+        thirty = service.build(on=today, cumulative_days=30)
+        full = service.build(on=today, cumulative_days=0)
+    finally:
+        db.close()
+
+    assert len(thirty.cumulative) == 30
+    assert thirty.cumulative_days == 30
+    # 30 天窗口：6 月的活动折成基线，窗口内增量 = 末点 - 基线。
+    assert thirty.cumulative_baseline.words == 1
+    assert thirty.cumulative[-1].words == 2
+    assert thirty.cumulative[-1].words - thirty.cumulative_baseline.words == 1
+    # 全部窗口从最早一条记录开始，基线为 0，首点就是最早一天的活动。
+    assert full.cumulative[0].day == "2026-06-01"
+    assert full.cumulative[0].words == 1
+    assert full.cumulative_baseline.words == 0
+    assert full.cumulative[-1].words - full.cumulative_baseline.words == 2
+    assert full.cumulative_days == 0
+
+
+def test_achievement_unlocked_on_first_reach_day(tmp_path) -> None:
+    today = date(2026, 11, 27)
+    db = Database(tmp_path / "data.db")
+    try:
+        db.stats.bump("2026-11-25", article_read=1, words_added=1, reviews_done=1)
+        db.stats.bump("2026-11-26", article_read=1, words_added=1, reviews_done=1)
+        db.stats.bump("2026-11-27", article_read=1, words_added=1, reviews_done=1)
+        overview = make_service(db, today).build(on=today)
+    finally:
+        db.close()
+
+    by_key = {item.key: item for item in overview.achievements}
+    assert by_key["first_read"].unlocked is True
+    assert by_key["first_read"].unlocked_on == "2026-11-25"
+    assert by_key["streak_7"].unlocked is False
+    assert by_key["streak_7"].unlocked_on == ""
+
+
+def test_real_text_history_stats(tmp_path) -> None:
+    from english_learner.models.entities import RealText
+
+    today = date(2026, 11, 27)
+    db = Database(tmp_path / "data.db")
+    try:
+        text = db.real_texts.upsert(
+            RealText(
+                id="china-daily-b1",
+                title="Sample",
+                content="content",
+                level="B1",
+                word_count=300,
+                created_at=now_iso(),
+            )
+        )
+        served = db.real_texts.mark_served(text, served_on=today.isoformat(), article_id=None)
+        assert served.id is not None
+        db.real_texts.record_completion(
+            text.id,
+            score=0.8,
+            self_report="ok",
+            outcome="success",
+            completed_at=f"{today.isoformat()}T10:00:00",
+        )
+        db.real_texts.mark_served(text, served_on="2026-11-26", article_id=None)
+        db.real_texts.mark_overridden(text.id)
+        overview = StatsOverviewService(
+            db.stats,
+            db.words,
+            db.quizzes,
+            db.articles,
+            db.real_texts,
+            today=lambda: today.isoformat(),
+        ).build(on=today)
+    finally:
+        db.close()
+
+    stats = overview.real_text
+    assert stats.has_data is True
+    assert stats.total == 2
+    assert stats.completed == 1
+    assert stats.overridden == 1
+    assert dict(stats.outcomes)["success"] == 1
+    assert stats.completion_rate == 0.5
+
+
+def test_cumulative_delta_includes_first_window_day(tmp_path) -> None:
+    """窗口第一天的活动属于窗口内增量，不能被基线扣掉。"""
+    today = date(2026, 11, 27)
+    first_day = today - timedelta(days=CUMULATIVE_DAYS - 1)
+    db = Database(tmp_path / "data.db")
+    try:
+        db.stats.bump(first_day.isoformat(), article_read=2, words_added=4, reviews_done=6)
+        overview = make_service(db, today).build(on=today)
+    finally:
+        db.close()
+
+    assert overview.cumulative_baseline.words == 0
+    assert overview.cumulative[0].day == first_day.isoformat()
+    assert overview.cumulative[-1].words == 4
+    assert overview.cumulative[-1].words - overview.cumulative_baseline.words == 4
