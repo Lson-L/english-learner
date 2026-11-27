@@ -724,8 +724,8 @@ def test_stage_two_prompt_asks_for_chinese_translation(db: Database) -> None:
     assert "翻译成中文" in prompt
     assert "不要要求学习者写英文" in prompt
     assert "reference_answer 必须给中文参考翻译" in prompt
-    # 题面只给英文原句，不再让模型拼英文出题指令。
-    assert '"prompt": "\\"Small habits add up over time.\\""' in prompt
+    # 题面只给英文原句占位符，不再锚定某篇文章的具体句子。
+    assert '"prompt": "\\"<英文原句>\\""' in prompt
 
 
 def test_grading_prompt_uses_comprehension_rubric_for_translation(

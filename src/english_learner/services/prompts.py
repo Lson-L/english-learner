@@ -41,7 +41,8 @@ if TYPE_CHECKING:  # 避免与 assessment_service 循环导入
 # M6.2：阅读检测选择题支持「不知道 + 补充说明」，讲评与盲评 prompt 带上原因。
 # M6.5：文章生成支持档内位置（low / mid / high），空值时不改变 prompt。
 # m6-5a：查词 prompt 只在词形与原形不同时才说明原形，避免释义重复“原形就是 X”。
-PROMPT_VERSION = "m6-5a"
+# m6-6a：阅读检测出题加入题型池随机抽样、随机设问角度与最近题干避让。
+PROMPT_VERSION = "m6-6a"
 
 # ------------------------------------------------------------ 学习者记忆
 # 记忆按任务过滤：不同 AI 任务只该看到与自己相关的那几行。
@@ -495,6 +496,165 @@ QUIZ_STAGE_TWO_CHOICE_COUNT = 2
 QUIZ_PRODUCTION_COUNT = 2
 
 
+@dataclass(frozen=True)
+class QuizQuestionType:
+    """一种出题题型：key 只用于内部去重，skill 落库时映射回现有 4 类。
+
+    为什么要有题型池：只靠“覆盖主旨/细节/推断/词义”这种笼统要求，模型每次
+    都会收敛到同一两种问法；把题型做成显式清单并随机抽取，才能让题干本身
+    产生差异。`skill` 仍然只取 main_idea / detail / inference / vocabulary，
+    避免污染技能统计、错因标签与 level_evidence。
+    """
+
+    key: str
+    label: str
+    instruction: str
+    skill: str
+    bucket: str
+
+
+QUIZ_QUESTION_TYPES: tuple[QuizQuestionType, ...] = (
+    # ---- 全局理解 ----
+    QuizQuestionType(
+        "main_idea",
+        "主旨",
+        "问全文主旨或作者想表达的核心观点",
+        "main_idea",
+        "global",
+    ),
+    QuizQuestionType(
+        "best_title",
+        "最佳标题",
+        "问四个标题里哪一个最适合这篇文章",
+        "main_idea",
+        "global",
+    ),
+    QuizQuestionType(
+        "paragraph_role",
+        "段落作用",
+        "问作者提到某一段或某一句话的目的是什么",
+        "main_idea",
+        "global",
+    ),
+    # ---- 局部细节 ----
+    QuizQuestionType(
+        "detail_locate",
+        "细节定位",
+        "用 According to the passage 问文中一个具体信息",
+        "detail",
+        "local",
+    ),
+    QuizQuestionType(
+        "paraphrase",
+        "改写对应",
+        "问四个选项里哪一句与原文某句意思最接近",
+        "detail",
+        "local",
+    ),
+    QuizQuestionType(
+        "sequence",
+        "顺序",
+        "问事件、步骤或时间的先后顺序",
+        "detail",
+        "local",
+    ),
+    QuizQuestionType(
+        "number_fact",
+        "数字事实",
+        "围绕文中的数字、比例或时间点核对事实",
+        "detail",
+        "local",
+    ),
+    # ---- 推断与语言 ----
+    QuizQuestionType(
+        "inference",
+        "推断",
+        "问从文中可以推断出什么（imply / suggest）",
+        "inference",
+        "inference",
+    ),
+    QuizQuestionType(
+        "attitude",
+        "作者态度",
+        "问作者对某件事的态度、语气或立场",
+        "inference",
+        "inference",
+    ),
+    QuizQuestionType(
+        "reference",
+        "指代",
+        "问文中某个 it / they / this / such 指代什么",
+        "inference",
+        "inference",
+    ),
+    QuizQuestionType(
+        "cause_effect",
+        "因果对比",
+        "问文中某个现象的原因、结果或两件事的对比关系",
+        "inference",
+        "inference",
+    ),
+    QuizQuestionType(
+        "vocab_context",
+        "语境词义",
+        "问某个词或短语在文中的具体含义",
+        "vocabulary",
+        "inference",
+    ),
+)
+
+# 第一轮按这三个桶各抽一个，保证全局 / 细节 / 推断三类都覆盖。
+QUIZ_STAGE_ONE_BUCKETS: tuple[str, ...] = ("global", "local", "inference")
+
+# 第二轮边界题只从更难的问法里抽。
+QUIZ_BOUNDARY_TYPE_KEYS: tuple[str, ...] = (
+    "inference",
+    "attitude",
+    "reference",
+    "cause_effect",
+    "paraphrase",
+    "paragraph_role",
+    "vocab_context",
+)
+
+# 每次出题随机选一个“从哪里切入”的侧重点，让题干措辞本身产生差异。
+# 角度管“考文章哪一块”，题型管“怎么问”，两者正交。
+QUIZ_ANGLE_HINTS: tuple[str, ...] = (
+    "围绕文中的一处转折或对比",
+    "围绕一个容易被忽略的限定词、程度词或否定表达",
+    "围绕作者举例的目的",
+    "围绕一个具体人物、机构或地点的做法",
+    "围绕开头与结尾的呼应",
+    "围绕文中澄清的一个常见误解",
+    "围绕一个数字、时间点或因果关系",
+    "围绕一个指代或省略造成的信息缺口",
+)
+
+
+def _quiz_type_lines(question_types: Sequence[QuizQuestionType]) -> str:
+    """把题型计划渲染成 prompt 里的编号条目（从第 1 题开始）。"""
+    return "".join(
+        f"   - 第 {offset + 1} 题【{item.label}】：{item.instruction}，skill={item.skill}；\n"
+        for offset, item in enumerate(question_types)
+    )
+
+
+def _number_rules(rules: Sequence[str]) -> str:
+    """给 prompt 规则逐条编号；多行规则只给第一行加序号。"""
+    lines = [f"{index}. {rule.rstrip()}" for index, rule in enumerate(rules, start=1)]
+    return "\n".join(lines) + "\n"
+
+
+def _avoid_stem_rule(avoid_stems: Sequence[str]) -> str:
+    """渲染“最近用过的题干”避让规则；没有历史题干时返回空串。"""
+    # 100 / 8 与服务侧 AVOID_STEM_CHARS / AVOID_STEM_LIMIT 保持一致。
+    stems = [stem.strip()[:100] for stem in avoid_stems if stem and stem.strip()][:8]
+    if not stems:
+        return ""
+    body = "\n".join(f"   - {stem}" for stem in stems)
+    return f"以下题干最近已经用过，不要再用相同或近似的问法，换一个考点或问法：\n{body}"
+
+
 def _quiz_difficulty_plan(level: str) -> tuple[str, str, str, str]:
     """返回（低一档、当前、高一档、高两档），用于混合难度出题。"""
     current = level.strip().upper()
@@ -586,11 +746,17 @@ def build_quiz_stage_one_messages(
     *,
     weak_skills: Sequence[str] = (),
     repair_note: str = "",
+    question_types: Sequence[QuizQuestionType] = (),
+    angle: str = "",
+    avoid_stems: Sequence[str] = (),
 ) -> list[dict[str, str]]:
     """第一轮：3 道当前等级选择题，不提前暴露高难度题。
 
     `weak_skills` 来自最近几次检测的技能正确率，用来让新题优先覆盖薄弱项；
-    `repair_note` 是上一次校验失败的原因，重试时喂回模型。
+    `repair_note` 是上一次校验失败的原因，重试时喂回模型；
+    `question_types` 是本轮随机抽到的题型计划，`angle` 是随机的设问侧重，
+    `avoid_stems` 是最近用过的题干。三者一起让题干产生实质变化，避免每次
+    都问同一套问题。传空时退化为旧版 prompt。
     """
     content = article.content.strip()
     if len(content) > 4000:
@@ -599,13 +765,7 @@ def build_quiz_stage_one_messages(
     if current not in CEFR_LEVELS:
         current = "B1"
 
-    focus_rule = ""
     skills = [skill.strip() for skill in weak_skills if skill and skill.strip()]
-    if skills:
-        focus_rule = (
-            f"9. 优先覆盖这些薄弱技能：{'、'.join(skills[:3])}；"
-            "如果与文章内容冲突，以文章本身为准。\n"
-        )
     repair_rule = ""
     if repair_note.strip():
         repair_rule = (
@@ -613,33 +773,62 @@ def build_quiz_stage_one_messages(
             "请针对这个问题修正后重新输出完整 JSON。\n"
         )
 
+    if question_types:
+        type_rule = (
+            "本轮必须按下面指定的题型和顺序各出 1 题，不要自行更换题型：\n"
+            f"{_quiz_type_lines(question_types)}"
+        )
+    else:
+        type_rule = "题型尽量覆盖主旨、细节、推断、语境词义，每题给出 skill；"
+
+    rules: list[str] = [
+        f"恰好 {question_count} 道单项选择题，每题 4 个选项；",
+        f"全部题目难度 = {current}（当前等级，检查基本理解）；",
+        type_rule,
+    ]
+    if angle.strip():
+        rules.append(
+            f"本次设问侧重：{angle.strip()}。每道题都从这个侧重点里选考点，但题型不得改变；"
+        )
+    rules.extend(
+        [
+            "如果文章没有某个题型需要的素材，就在同一题型内改问文章确实覆盖的内容，"
+            "不要编造事实，也不要换成别的题型；",
+            "题目和选项用英文；答案必须能从文中找到依据；",
+            "干扰项要合理，不要一眼排除；",
+            "answer_index 用 0~3 的整数（0=A，1=B，2=C，3=D）；",
+            "explanation 用中文写正确答案依据，40~120 字；",
+            "不要出短答题，不要出高难度题；",
+        ]
+    )
+    if skills:
+        rules.append(
+            f"如果与上面的指定题型不冲突，优先在题干里考这些薄弱点："
+            f"{'、'.join(skills[:3])}；题型优先，不要为了覆盖薄弱点改变题型。"
+        )
+    avoid_rule = _avoid_stem_rule(avoid_stems)
+    if avoid_rule:
+        rules.append(avoid_rule)
+
     user = (
         f"请根据下面这篇 CEFR {article.level} 的英语短文出 {question_count} 道选择题。\n\n"
         f"【标题】{article.title}\n"
         f"【主题】{article.topic or '未标注'}\n"
         f"【正文】\n{content}\n\n"
         "题目要求（严格遵守）：\n"
-        f"1. 恰好 {question_count} 道单项选择题，每题 4 个选项；\n"
-        f"2. 全部题目难度 = {current}（当前等级，检查基本理解）；\n"
-        "3. 题型尽量覆盖主旨、细节、推断、语境词义，每题给出 skill；\n"
-        "4. 题目和选项用英文；答案必须能从文中找到依据；\n"
-        "5. 干扰项要合理，不要一眼排除；\n"
-        "6. answer_index 用 0~3 的整数（0=A，1=B，2=C，3=D）；\n"
-        "7. explanation 用中文写正确答案依据，40~120 字；\n"
-        "8. 不要出短答题，不要出高难度题；\n"
-        f"{focus_rule}"
+        f"{_number_rules(rules)}"
         f"{repair_rule}"
-        "\n只输出 JSON：\n"
+        "\n只输出 JSON，字段值按上面要求填写，不要把下面的占位符原样输出：\n"
         "{\n"
         '  "questions": [\n'
         "    {\n"
         '      "kind": "choice",\n'
-        '      "prompt": "...",\n'
-        '      "options": ["...", "...", "...", "..."],\n'
-        '      "answer_index": 1,\n'
-        '      "skill": "detail",\n'
+        '      "prompt": "<英文题干>",\n'
+        '      "options": ["<选项 A>", "<选项 B>", "<选项 C>", "<选项 D>"],\n'
+        '      "answer_index": 0,\n'
+        '      "skill": "<该题型对应的 skill>",\n'
         f'      "difficulty": "{current}",\n'
-        '      "explanation": "..."\n'
+        '      "explanation": "<中文依据，40~120 字>"\n'
         "    }\n"
         "  ]\n"
         "}"
@@ -664,13 +853,18 @@ def build_quiz_stage_two_messages(
     choice_count: int = QUIZ_STAGE_TWO_CHOICE_COUNT,
     weak_skills: Sequence[str] = (),
     repair_note: str = "",
+    question_types: Sequence[QuizQuestionType] = (),
+    angle: str = "",
+    avoid_stems: Sequence[str] = (),
 ) -> list[dict[str, str]]:
     """第二轮：2 道边界难度选择题 + 2 道英译中题。
 
     产出题统一改成「从原文选句子 → 翻译成中文」，只检验阅读理解，
     不再要求学习者用英文写作。`target_level` 由第一轮正确率决定：
     答得好往上一档探测，答得差别往下确认。`weak_skills` 让选择题优先
-    覆盖薄弱技能；`repair_note` 用于重试时带回失败原因。
+    覆盖薄弱技能；`repair_note` 用于重试时带回失败原因；
+    `question_types` / `angle` / `avoid_stems` 与第一轮相同，保证边界题
+    也不会退回到同一套问法。
     """
     content = article.content.strip()
     if len(content) > 4000:
@@ -682,19 +876,62 @@ def build_quiz_stage_two_messages(
     if target not in CEFR_LEVELS:
         target = current
 
-    focus_rule = ""
     skills = [skill.strip() for skill in weak_skills if skill and skill.strip()]
-    if skills:
-        focus_rule = (
-            f"6. 优先覆盖这些薄弱技能：{'、'.join(skills[:3])}；"
-            "如果与文章内容冲突，以文章本身为准。\n"
-        )
     repair_rule = ""
     if repair_note.strip():
         repair_rule = (
             f"上一次出题未通过校验：{repair_note.strip()[:300]}。"
             "请针对这个问题修正后重新输出完整 JSON。\n"
         )
+
+    translation_rule = (
+        "再加 2 道英译中题，都用 kind=short、skill=translation：\n"
+        "   - 每道题从文章中选 1 句完整的英文句子，要求学习者翻译成中文；\n"
+        "   - 第 1 道选包含关键信息或主旨的句子；第 2 道选包含指代、转折、因果等逻辑关系的句子；\n"
+        "   - 每句控制在 12~35 个英文单词，不要选整段，也不要把句子拆得太碎；\n"
+        "   - 题面只写要翻译的英文原句本身，用英文双引号包住，"
+        '例如 "<英文原句>"；\n'
+        '     不要在题面里加 "Translate the following sentence into Chinese" 之类英文指令，'
+        "界面已有中文说明；\n"
+        "   - reference_answer 必须给中文参考翻译，不要给英文；\n"
+        "   - 不要要求学习者写英文，不要出成选择题；\n"
+        f"   - 两道题难度分别标为 {current} 和 {target}（至少落在 {current}~{target} 之间）；"
+    )
+
+    if question_types:
+        type_rule = (
+            "选择题必须按下面指定的题型和顺序各出 1 题，不要自行更换题型：\n"
+            f"{_quiz_type_lines(question_types)}"
+        )
+    else:
+        type_rule = "选择题要覆盖不同技能，干扰项合理；"
+
+    rules: list[str] = [
+        f"恰好 {choice_count} 道单项选择题，难度统一为 {target}，每题 4 个选项；",
+        translation_rule,
+        type_rule,
+    ]
+    if angle.strip():
+        rules.append(
+            f"本次设问侧重：{angle.strip()}。选择题都从这个侧重点里选考点，但题型不得改变；"
+        )
+    rules.extend(
+        [
+            "如果文章没有某个题型需要的素材，就在同一题型内改问文章确实覆盖的内容，"
+            "不要编造事实，也不要换成别的题型；",
+            "选择题干扰项要合理，不要一眼排除；",
+            "answer_index 用 0~3 的整数；explanation 用中文写依据/评分要点；",
+            "两道英译中题都要给 reference_answer；不要出成选择题；",
+        ]
+    )
+    if skills:
+        rules.append(
+            f"如果与上面的指定题型不冲突，优先在题干里考这些薄弱点："
+            f"{'、'.join(skills[:3])}；题型优先，不要为了覆盖薄弱点改变题型。"
+        )
+    avoid_rule = _avoid_stem_rule(avoid_stems)
+    if avoid_rule:
+        rules.append(avoid_rule)
 
     user = (
         f"学习者刚刚完成了 {QUIZ_STAGE_ONE_COUNT} 道 {current} 难度的基础题。"
@@ -703,50 +940,35 @@ def build_quiz_stage_two_messages(
         f"【主题】{article.topic or '未标注'}\n"
         f"【正文】\n{content}\n\n"
         "题目要求（严格遵守）：\n"
-        f"1. 恰好 {choice_count} 道单项选择题，难度统一为 {target}，每题 4 个选项；\n"
-        "2. 再加 2 道英译中题，都用 kind=short、skill=translation：\n"
-        "   - 每道题从文章中选 1 句完整的英文句子，要求学习者翻译成中文；\n"
-        "   - 第 1 道选包含关键信息或主旨的句子；第 2 道选包含指代、转折、因果等逻辑关系的句子；\n"
-        "   - 每句控制在 12~35 个英文单词，不要选整段，也不要把句子拆得太碎；\n"
-        "   - 题面只写要翻译的英文原句本身，用英文双引号包住，"
-        '例如 "Small habits add up over time."；\n'
-        '     不要在题面里加 "Translate the following sentence into Chinese" 之类英文指令，'
-        "界面已有中文说明；\n"
-        "   - reference_answer 必须给中文参考翻译，不要给英文；\n"
-        "   - 不要要求学习者写英文，不要出成选择题；\n"
-        f"   - 两道题难度分别标为 {current} 和 {target}（至少落在 {current}~{target} 之间）；\n"
-        "3. 选择题要覆盖不同技能，干扰项合理；\n"
-        "4. answer_index 用 0~3 的整数；explanation 用中文写依据/评分要点；\n"
-        "5. 两道英译中题都要给 reference_answer；不要出成选择题；\n"
-        f"{focus_rule}"
+        f"{_number_rules(rules)}"
         f"{repair_rule}"
-        "\n只输出 JSON：\n"
+        "\n只输出 JSON，字段值按上面要求填写，不要把下面的占位符原样输出：\n"
         "{\n"
         '  "questions": [\n'
         "    {\n"
         '      "kind": "choice",\n'
-        '      "prompt": "...",\n'
-        '      "options": ["...", "...", "...", "..."],\n'
-        '      "answer_index": 2,\n'
-        '      "skill": "inference",\n'
+        '      "prompt": "<英文题干>",\n'
+        '      "options": ["<选项 A>", "<选项 B>", "<选项 C>", "<选项 D>"],\n'
+        '      "answer_index": 0,\n'
+        '      "skill": "<该题型对应的 skill>",\n'
         f'      "difficulty": "{target}",\n'
-        '      "explanation": "..."\n'
+        '      "explanation": "<中文依据/评分要点>"\n'
         "    },\n"
         "    {\n"
         '      "kind": "short",\n'
-        '      "prompt": "\\"Small habits add up over time.\\"",\n'
+        '      "prompt": "\\"<英文原句>\\"",\n'
         '      "skill": "translation",\n'
         f'      "difficulty": "{current}",\n'
-        '      "reference_answer": "小习惯会随着时间的推移不断累积。",\n'
-        '      "explanation": "评分要点：add up 译为“累积”，over time 译为“随着时间推移”。"\n'
+        '      "reference_answer": "<中文参考译文>",\n'
+        '      "explanation": "评分要点：<关键词或句子结构的理解要点>"\n'
         "    },\n"
         "    {\n"
         '      "kind": "short",\n'
-        '      "prompt": "\\"They change our lives in ways we rarely notice.\\"",\n'
+        '      "prompt": "\\"<英文原句>\\"",\n'
         '      "skill": "translation",\n'
         f'      "difficulty": "{target}",\n'
-        '      "reference_answer": "它们以我们很少察觉的方式改变着我们的生活。",\n'
-        '      "explanation": "评分要点：in ways 表示方式；rarely 是“很少、几乎不”。"\n'
+        '      "reference_answer": "<中文参考译文>",\n'
+        '      "explanation": "评分要点：<关键词或句子结构的理解要点>"\n'
         "    }\n"
         "  ]\n"
         "}"

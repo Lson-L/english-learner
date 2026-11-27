@@ -1321,6 +1321,25 @@ class QuizRepo(_BaseRepo):
         )
         return [(ReadingQuiz.from_row(row), str(row["article_title"] or "")) for row in rows]
 
+    def list_recent_with_questions(
+        self,
+        limit: int = 4,
+        *,
+        exclude_article_id: int | None = None,
+    ) -> list[ReadingQuiz]:
+        """最近出过的题（不论是否完成），用于出题时避让重复问法。
+
+        只读查询，不改缓存语义：已出题的文章仍然直接命中缓存，不会重新出题。
+        """
+        sql = "SELECT * FROM reading_quizzes"
+        params: list[object] = []
+        if exclude_article_id is not None:
+            sql += " WHERE article_id != ?"
+            params.append(int(exclude_article_id))
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(int(limit))
+        return [ReadingQuiz.from_row(row) for row in self._db.query_all(sql, tuple(params))]
+
     def list_recent_formal_completed(self, limit: int = 8) -> list[ReadingQuiz]:
         """最近完成的**正式**检测（排除练习模式），按完成时间倒序。
 

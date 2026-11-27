@@ -37,6 +37,7 @@ import re
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from typing import TypeVar
 
 from ..models.entities import (
     CEFR_LEVELS,
@@ -77,10 +78,15 @@ from .level_estimator import (
 )
 from .prompts import (
     PROMPT_VERSION,
+    QUIZ_ANGLE_HINTS,
+    QUIZ_BOUNDARY_TYPE_KEYS,
     QUIZ_PRODUCTION_COUNT,
+    QUIZ_QUESTION_TYPES,
+    QUIZ_STAGE_ONE_BUCKETS,
     QUIZ_STAGE_ONE_COUNT,
     QUIZ_STAGE_TWO_CHOICE_COUNT,
     QuizHistoryEntry,
+    QuizQuestionType,
     build_blind_level_messages,
     build_question_review_messages,
     build_quiz_grading_messages,
@@ -129,6 +135,13 @@ MAX_CHOICE_NOTE_CHARS = 200
 WEAK_SKILL_MIN_SAMPLES = 2
 WEAK_SKILL_MAX_ACCURACY = 0.6
 WEAK_SKILL_LIMIT = 3
+
+# 最近几套题的题干避让：只取最近 4 套、最多 8 条，避免 prompt 被稀释。
+AVOID_STEM_QUIZ_LIMIT = 4
+AVOID_STEM_LIMIT = 8
+AVOID_STEM_CHARS = 100
+
+_T = TypeVar("_T")
 
 # 产出题专用技能：选择题无法覆盖，不喂给选择题的“优先覆盖薄弱技能”规则。
 _PRODUCTION_SKILLS = {
@@ -819,6 +832,11 @@ class ReadingQuizService:
     def generate_stage_one(self, article: Article, level: str) -> tuple[QuizQuestion, ...]:
         """生成第一轮 3 道当前等级题；校验/审核失败时带原因重试一次。"""
         weak_skills = self._weak_skills()
+        # 题型 / 角度只抽一次：重试时保持同一份出题计划，让 repair_note 针对
+        # 同一组题型修正，而不是换一套题重新赌运气。
+        question_types = self._pick_stage_one_types()
+        angle = self._pick_angle()
+        avoid_stems = self._avoid_stems(article.id)
         last_reason = ""
         for attempt in range(2):
             messages = build_quiz_stage_one_messages(
@@ -827,13 +845,20 @@ class ReadingQuizService:
                 STAGE_ONE_CHOICE_COUNT,
                 weak_skills=weak_skills,
                 repair_note=last_reason if attempt else "",
+                question_types=question_types,
+                angle=angle,
+                avoid_stems=avoid_stems,
             )
             logger.info(
-                "阅读检测第一轮 prompt=%s level=%s attempt=%s weak=%s article=%s",
+                "阅读检测第一轮 prompt=%s level=%s attempt=%s weak=%s "
+                "types=%s angle=%s avoid=%s article=%s",
                 PROMPT_VERSION,
                 level,
                 attempt + 1,
                 weak_skills,
+                [item.key for item in question_types],
+                angle,
+                len(avoid_stems),
                 article.title,
             )
             text = self._client.complete_json(
@@ -868,9 +893,26 @@ class ReadingQuizService:
         article: Article,
         level: str,
         target_level: str,
+        *,
+        previous: Sequence[QuizQuestion] = (),
     ) -> tuple[QuizQuestion, ...]:
-        """生成第二轮 2 道边界题 + 2 道英译中题；校验/审核失败时带原因重试一次。"""
+        """生成第二轮 2 道边界题 + 2 道英译中题；校验/审核失败时带原因重试一次。
+
+        `previous` 是第一轮刚出的题：把题干并入避让列表，避免第二轮把同一道
+        题换个说法再问一遍。
+        """
         weak_skills = self._weak_skills()
+        question_types = self._pick_boundary_types(STAGE_TWO_CHOICE_COUNT)
+        angle = self._pick_angle()
+        # 第一轮题干优先：同一篇文章里重复问法的观感最差。
+        previous_stems = tuple(
+            (question.prompt or "").strip()[:AVOID_STEM_CHARS]
+            for question in previous
+            if (question.prompt or "").strip()
+        )
+        avoid_stems = tuple(dict.fromkeys(previous_stems + self._avoid_stems(article.id)))[
+            :AVOID_STEM_LIMIT
+        ]
         last_reason = ""
         for attempt in range(2):
             messages = build_quiz_stage_two_messages(
@@ -879,14 +921,21 @@ class ReadingQuizService:
                 target_level,
                 weak_skills=weak_skills,
                 repair_note=last_reason if attempt else "",
+                question_types=question_types,
+                angle=angle,
+                avoid_stems=avoid_stems,
             )
             logger.info(
-                "阅读检测第二轮 prompt=%s level=%s target=%s attempt=%s weak=%s article=%s",
+                "阅读检测第二轮 prompt=%s level=%s target=%s attempt=%s weak=%s "
+                "types=%s angle=%s avoid=%s article=%s",
                 PROMPT_VERSION,
                 level,
                 target_level,
                 attempt + 1,
                 weak_skills,
+                [item.key for item in question_types],
+                angle,
+                len(avoid_stems),
                 article.title,
             )
             text = self._client.complete_json(
@@ -921,6 +970,61 @@ class ReadingQuizService:
             retryable=True,
             kind="format",
         )
+
+    def _choice(self, items: Sequence[_T]) -> _T:
+        """抽样统一走注入的 rng（测试可复现）；未注入时退回模块级 random。"""
+        if self._rng is not None:
+            return self._rng.choice(items)
+        return random.choice(items)
+
+    def _pick_stage_one_types(self) -> tuple[QuizQuestionType, ...]:
+        """第一轮：每个桶各抽一个，保证全局 / 细节 / 推断都覆盖且跨天变化。"""
+        chosen: list[QuizQuestionType] = []
+        for bucket in QUIZ_STAGE_ONE_BUCKETS:
+            candidates = [item for item in QUIZ_QUESTION_TYPES if item.bucket == bucket]
+            if candidates:
+                chosen.append(self._choice(candidates))
+        return tuple(chosen)
+
+    def _pick_boundary_types(self, count: int) -> tuple[QuizQuestionType, ...]:
+        """第二轮：从边界题型里抽两个不同类型，尽量分属不同桶。
+
+        第一轮的题型 key 没有落库，做不到“题型完全不重复”；第一轮题干会
+        通过 `avoid_stems` 进入 prompt，避免同一道题再问一遍。
+        """
+        pool = [item for item in QUIZ_QUESTION_TYPES if item.key in QUIZ_BOUNDARY_TYPE_KEYS]
+        chosen: list[QuizQuestionType] = []
+        buckets: set[str] = set()
+        while len(chosen) < count:
+            candidates = [
+                item for item in pool if item not in chosen and item.bucket not in buckets
+            ]
+            if not candidates:
+                candidates = [item for item in pool if item not in chosen]
+            if not candidates:
+                break
+            item = self._choice(candidates)
+            chosen.append(item)
+            buckets.add(item.bucket)
+        return tuple(chosen)
+
+    def _pick_angle(self) -> str:
+        """随机选一个设问侧重，让题干措辞本身产生差异。"""
+        return self._choice(QUIZ_ANGLE_HINTS)
+
+    def _avoid_stems(self, article_id: int | None) -> tuple[str, ...]:
+        """最近几套题的英文题干，喂回出题 prompt 防止反复用同样的问法。"""
+        stems: list[str] = []
+        for quiz in self._quizzes.list_recent_with_questions(
+            AVOID_STEM_QUIZ_LIMIT,
+            exclude_article_id=article_id,
+        ):
+            for question in quiz.choice_questions:
+                stem = (question.prompt or "").strip()[:AVOID_STEM_CHARS]
+                # 先截断再去重：两条长题干可能前 100 字符相同，用原串比较会漏掉。
+                if stem and stem not in stems:
+                    stems.append(stem)
+        return tuple(stems[:AVOID_STEM_LIMIT])
 
     def _shuffle_batch(
         self,
@@ -1031,7 +1135,12 @@ class ReadingQuizService:
 
         # 先保存第一轮答案，再请求第二轮：出题失败/关窗后重进仍能回显已选项。
         self._quizzes.save_stage_answers(quiz.id, normalized, notes)
-        questions = self.generate_stage_two(article, quiz.level, target)
+        questions = self.generate_stage_two(
+            article,
+            quiz.level,
+            target,
+            previous=quiz.choice_questions,
+        )
         stored = self._quizzes.append_questions(quiz.id, questions, stage=2)
         logger.info("第二轮已追加：quiz=%s 总题数=%s", quiz.id, len(stored.questions))
         return stored
