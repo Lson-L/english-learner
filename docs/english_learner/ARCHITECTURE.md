@@ -18,9 +18,11 @@ src/english_learner/
 │   └── entities.py             Profile / Article / Word / Highlight / DailyStats /
 │                               ReadingQuiz / WritingAttempt / AICall 等 frozen dataclass
 ├── storage/
-│   ├── db.py                   SQLite 连接、PRAGMA、建表迁移（schema v8）、事务、仓库入口
-│   └── repositories.py         Profile / Article / Word / Review / Stats / Quiz / Evidence /
-│                               WeeklyReview / AICall / WritingAttempt 仓库（纯 SQL）
+│   ├── db.py                   SQLite 连接、PRAGMA、建表迁移（schema v9）、事务、仓库入口
+│   └── repositories/           每表一个仓库模块（纯 SQL），__init__ 统一 re-export：
+│       ├── base.py             共享数据库连接
+│       ├── profile.py / articles.py / words.py / review.py / quizzes.py
+│       └── real_texts.py / levels.py / writing.py / stats.py
 ├── services/
 │   ├── ai_client.py            OpenAI 兼容客户端；test_connection / complete / complete_json
 │   │                           支持 AICallRecorder 注入（token/耗时/错误落 ai_calls）
@@ -35,7 +37,8 @@ src/english_learner/
 │   ├── article_service.py      文章生成、JSON 校验、重试一次、当天缓存、换一篇
 │   ├── dictionary_service.py   lemma 规范化、句子提取、查词缓存、加入生词本、后台补全
 │   ├── level_feedback_service.py 阅读反馈调级：AI 重新定级 + 软约束重写今日文章
-│   ├── reading_quiz_service.py 阅读检测：自适应两阶段、盲评、产出题、本地后验与调级
+│   ├── reading_quiz_service.py 兼容门面：re-export quiz 包（保持既有 import 路径）
+│   ├── quiz/                   阅读检测分层：constants / models / parsing / scoring / service
 │   ├── level_estimator.py      纯函数后验估计器（逻辑斯蒂 + 先验 + 历史衰减）
 │   ├── quiz_calibration.py     难度/技能正确率与逐题对错统计
 │   ├── weekly_review_service.py 每周复盘：汇总数据 + AI 建议 + 用户确认
