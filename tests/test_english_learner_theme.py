@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -68,6 +69,28 @@ def test_low_profile_stylesheet_is_dark_and_mono() -> None:
     assert '"Consolas"' in css
     # 低调主题强制等宽，用户选的无衬线/衬线字体不再出现在字体链里。
     assert '"Literata"' not in css and '"Lexend"' not in css
+
+
+def test_spin_box_is_themed_and_arrows_resolve() -> None:
+    """QSpinBox 必须进输入控件样式，否则深色主题会退回系统白底。
+
+    回归背景：QSpinBox 没写进输入控件分组，低调主题下设置页「每日复习目标」
+    是系统白底 + 浅灰字，几乎看不清；原生箭头也是深色，同样不可见。
+    箭头改用内置 SVG，路径写死在 QSS 里，文件缺失时箭头会静默消失。
+    """
+    css = build_stylesheet("lexend", low_profile=True)
+    assert "QSpinBox {" in css
+    # 四个输入控件共享同一组底色/边框声明。
+    rule_start = css.index("QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {")
+    rule = css[rule_start : css.index("}", rule_start)]
+    assert LOW_PROFILE_PALETTE["BG_INPUT"] in rule
+    assert LOW_PROFILE_PALETTE["BORDER_INPUT"] in rule
+    # 两个箭头图标都要有，且指向的 SVG 真实存在。
+    urls = re.findall(r"url\(([^)]+)\)", css)
+    assert len(urls) == 2
+    for url in urls:
+        assert Path(url).is_file(), url
+        assert url.endswith(".svg")
 
 
 def _tooltip_rule(css: str) -> str:

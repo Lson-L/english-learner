@@ -10,7 +10,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .fonts import DEFAULT_ENGLISH_FONT, font_stack
+
+# QSS 里的 url() 只能用正斜杠，且必须在应用启动时就存在，所以用包内绝对路径。
+_ICON_DIR = Path(__file__).resolve().parent.parent / "assets" / "icons"
+_SPIN_UP_ICON = (_ICON_DIR / "spin_up.svg").as_posix()
+_SPIN_DOWN_ICON = (_ICON_DIR / "spin_down.svg").as_posix()
 
 # QSS 里满是大括号，用不了 f-string；先用占位符写，最后统一替换。
 # 全应用只有这一处决定英文外观：所有控件都继承 `*` 的字体链，新页面自动生效。
@@ -236,7 +243,7 @@ QFrame#achievementBadge[unlocked="false"] QProgressBar#badgeProgress::chunk {
 }
 
 /* ---------- 输入控件 ---------- */
-QLineEdit, QComboBox, QDoubleSpinBox {
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
     background: __BG_INPUT__;
     border: 1px solid __BORDER_INPUT__;
     border-radius: 8px;
@@ -244,16 +251,55 @@ QLineEdit, QComboBox, QDoubleSpinBox {
     min-height: 20px;
     selection-background-color: __SELECTION__;
 }
-QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus {
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
     border-color: __ACCENT_STRONG__;
 }
-QLineEdit:disabled, QComboBox:disabled, QDoubleSpinBox:disabled {
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {
     background: __BG_DISABLED__;
     color: __TEXT_DISABLED__;
 }
 QComboBox::drop-down {
     border: none;
     width: 22px;
+}
+/* QSpinBox 的上下按钮与箭头必须显式画：只写背景/边框时，箭头仍由系统样式
+   绘制（Windows 下是深色三角），深色主题里几乎看不见。箭头用内置 SVG：
+   QSS 的透明边框拼三角形在 Qt 里会被画成实心方块，只能走图片。
+   两个箭头文件用中性灰 #8B949E，在浅色白底与深色 __BG_SUBTLE__ 上都够清楚，
+   所以两套主题共用一份，不做成对调色。 */
+QSpinBox {
+    padding-right: 24px;
+}
+QSpinBox::up-button, QSpinBox::down-button {
+    subcontrol-origin: border;
+    width: 18px;
+    background: __BG_SUBTLE__;
+    border-left: 1px solid __BORDER_INPUT__;
+}
+QSpinBox::up-button {
+    subcontrol-position: top right;
+    border-top-right-radius: 7px;
+}
+QSpinBox::down-button {
+    subcontrol-position: bottom right;
+    border-bottom-right-radius: 7px;
+    border-top: 1px solid __BORDER_INPUT__;
+}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {
+    background: __HOVER_BG__;
+}
+QSpinBox::up-button:pressed, QSpinBox::down-button:pressed {
+    background: __BG_DISABLED__;
+}
+QSpinBox::up-arrow {
+    image: url(__SPIN_UP_ICON__);
+    width: 9px;
+    height: 6px;
+}
+QSpinBox::down-arrow {
+    image: url(__SPIN_DOWN_ICON__);
+    width: 9px;
+    height: 6px;
 }
 QComboBox QAbstractItemView {
     background: __BG_INPUT__;
@@ -845,7 +891,12 @@ def build_stylesheet(english_font: str | None = None, *, low_profile: bool = Fal
     """
     font = font_stack(english_font, mono=low_profile)
     palette = LOW_PROFILE_PALETTE if low_profile else LIGHT_PALETTE
-    qss = _fill_placeholders(_STYLESHEET_TEMPLATE.replace("__ENGLISH_FONT__", font), palette)
+    qss = (
+        _STYLESHEET_TEMPLATE.replace("__ENGLISH_FONT__", font)
+        .replace("__SPIN_UP_ICON__", _SPIN_UP_ICON)
+        .replace("__SPIN_DOWN_ICON__", _SPIN_DOWN_ICON)
+    )
+    qss = _fill_placeholders(qss, palette)
     if low_profile:
         qss += _fill_placeholders(_LOW_PROFILE_ONLY_STYLES, palette)
     return qss
