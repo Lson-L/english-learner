@@ -1,0 +1,170 @@
+{
+  "version": 2,
+  "texts": [
+    {
+      "id": "original-urban-beekeepers",
+      "title": "The Quiet Work of Urban Beekeepers",
+      "level": "B1",
+      "level_source": "manual",
+      "source": "Daily English original",
+      "source_url": "",
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "published": "2026-11-27",
+      "topics": [
+        "cities",
+        "nature"
+      ],
+      "excerpt": false,
+      "attribution": "Original text written for Daily English, dedicated to the public domain under CC0 1.0.",
+      "paragraphs": [
+        "On a warm morning, Maya climbs to the roof of an old office building. She wears a white suit and carries a small box of tools. Six wooden boxes stand in a row on the roof. Each box is home to thousands of honeybees. Maya is an urban beekeeper. She takes care of the bees and collects their honey. The bees fly out over the streets and return with pollen and nectar.",
+        "Cities may seem like strange places for bees. But rooftops, parks, and garden balconies can offer many flowers. Bees travel from plant to plant and help them make seeds and fruit. This work is called pollination. Without pollinators, many fruits and vegetables would be hard to grow. In return, the plants give the bees food.",
+        "Urban beekeeping is not always easy. Bees need water, shade, and safe places to build their homes. Their stings can also be dangerous to people who are allergic to them. So beekeepers must choose their places with care. They often work early in the morning, when the streets are quiet and the bees are calm. On very hot days, they also make sure the bees have enough water.",
+        "Maya says the best part of her job is teaching children about bees. “Many people are afraid of them,” she says. “But when they watch the bees for a few minutes, they begin to see how busy and useful they are.” For Maya, the roof is not just a place of work. It is a small green world above the noisy city."
+      ],
+      "questions": [
+        {
+          "kind": "choice",
+          "prompt": "What is Maya's job?",
+          "options": [
+            "She is an urban beekeeper.",
+            "She is an office manager.",
+            "She sells flowers in the city.",
+            "She repairs old buildings."
+          ],
+          "answer_index": 0,
+          "explanation": "文章开头直接说明 Maya 是城市养蜂人（urban beekeeper），在楼顶照看蜂箱。",
+          "skill": "detail",
+          "difficulty": "B1"
+        },
+        {
+          "kind": "choice",
+          "prompt": "Why are bees important to plants?",
+          "options": [
+            "They help plants make seeds and fruit.",
+            "They keep plants cool in summer.",
+            "They clean the leaves of plants.",
+            "They protect plants from birds."
+          ],
+          "answer_index": 0,
+          "explanation": "第二段说明蜜蜂在植物之间飞行，帮助植物结籽结果，这个过程叫授粉。",
+          "skill": "detail",
+          "difficulty": "B1"
+        },
+        {
+          "kind": "choice",
+          "prompt": "What danger of urban beekeeping does the text mention?",
+          "options": [
+            "Some people are allergic to bee stings.",
+            "Bees often get lost in the city.",
+            "The honey can become unsafe.",
+            "The boxes are too heavy for the roof."
+          ],
+          "answer_index": 0,
+          "explanation": "第三段提到蜂蜇对过敏的人有危险，所以养蜂人要谨慎选择地点。",
+          "skill": "detail",
+          "difficulty": "B1"
+        },
+        {
+          "kind": "choice",
+          "prompt": "What does Maya enjoy most about her work?",
+          "options": [
+            "Teaching children about bees.",
+            "Selling honey at high prices.",
+            "Working late at night.",
+            "Building new offices."
+          ],
+          "answer_index": 0,
+          "explanation": "最后一段 Maya 说工作中最好的部分是教孩子们认识蜜蜂。",
+          "skill": "main_idea",
+          "difficulty": "B1"
+        }
+      ],
+      "word_count": 257
+    },
+    {
+      "id": "original-cooling-city-streets",
+      "title": "How Cities Are Cooling Their Streets",
+      "level": "B2",
+      "level_source": "manual",
+      "source": "Daily English original",
+      "source_url": "",
+      "license": "CC0",
+      "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "published": "2026-11-27",
+      "topics": [
+        "cities",
+        "climate"
+      ],
+      "excerpt": false,
+      "attribution": "Original text written for Daily English, dedicated to the public domain under CC0 1.0.",
+      "paragraphs": [
+        "During a heat wave, a city street can be several degrees hotter than a park nearby. Concrete and asphalt absorb heat from the sun during the day and release it slowly at night. Tall buildings can block the wind, and cars add more heat to the air. Scientists call this the urban heat island effect. The effect is strongest at night, when the stored heat keeps the city warm. Some neighborhoods can be more than five degrees warmer than others on the same day. As summers become hotter, many cities are looking for ways to cool their streets.",
+        "One simple solution is to plant more trees. Trees provide shade and release water vapor through their leaves, which lowers the temperature around them. A mature tree can cool the air as effectively as several small air conditioners. Trees also give birds and insects a place to live. Some cities now require new buildings to include green roofs, where plants grow on top of the building. Green roofs reduce heat and also help manage rainwater.",
+        "Other cities are testing special materials. Traditional dark roofs and roads absorb a lot of sunlight. Light-colored or reflective surfaces bounce more sunlight back into the sky, so the ground stays cooler. Some paints can even reflect most of the sun's energy. In some cities, workers have painted schoolyards and parking lots white to test the idea. However, these materials work best when they are used across a whole neighborhood, not just on one building.",
+        "Water can also help. Fountains, small pools, and wet streets cool the air as water evaporates. In some hot cities, planners are bringing back streams that were covered by roads many years ago. The moving water also gives children a safe place to play in summer. The shade and moisture also help plants and insects survive the long, dry summer. These projects are expensive, but they can make streets more comfortable and create pleasant places for people to meet.",
+        "Cooling a city is not only a technical problem. Heat affects people unequally. Neighborhoods with fewer trees and more concrete are often poorer and have older residents. Older people and people who work outside are among the most at risk. City planners therefore need to ask who benefits most from new trees and cooler streets. The goal is not just a lower temperature, but a safer and fairer city in a warming world."
+      ],
+      "questions": [
+        {
+          "kind": "choice",
+          "prompt": "What causes the urban heat island effect?",
+          "options": [
+            "Buildings and roads store heat and block the wind.",
+            "Parks and rivers make the air warmer.",
+            "Rainwater stays on the streets too long.",
+            "People use too many electric fans."
+          ],
+          "answer_index": 0,
+          "explanation": "第一段指出混凝土和沥青吸热、建筑挡风、汽车散热，共同造成城市热岛效应。",
+          "skill": "detail",
+          "difficulty": "B2"
+        },
+        {
+          "kind": "choice",
+          "prompt": "How do trees help cool a city?",
+          "options": [
+            "They provide shade and release water vapor.",
+            "They block sunlight from reaching the sky.",
+            "They turn heat into rainwater.",
+            "They stop cars from entering the city."
+          ],
+          "answer_index": 0,
+          "explanation": "第二段说明树荫和叶片释放的水汽能降低周围温度。",
+          "skill": "detail",
+          "difficulty": "B2"
+        },
+        {
+          "kind": "choice",
+          "prompt": "What does the text say about reflective materials?",
+          "options": [
+            "They work best when used across a whole neighborhood.",
+            "They are cheaper than planting trees.",
+            "They make the streets too bright at night.",
+            "They only work on schoolyards."
+          ],
+          "answer_index": 0,
+          "explanation": "第三段说反光材料只有整片街区一起使用效果才好，单栋建筑作用有限。",
+          "skill": "inference",
+          "difficulty": "B2"
+        },
+        {
+          "kind": "choice",
+          "prompt": "Why does the text say cooling a city is not only a technical problem?",
+          "options": [
+            "Heat affects poorer neighborhoods and older people more.",
+            "Scientists cannot agree on the best material.",
+            "Trees are too expensive for most cities.",
+            "Water projects always fail."
+          ],
+          "answer_index": 0,
+          "explanation": "最后一段强调高温对不同人群影响不均，规划时要考虑公平，而不只是降温。",
+          "skill": "main_idea",
+          "difficulty": "B2"
+        }
+      ],
+      "word_count": 400
+    }
+  ]
+}
