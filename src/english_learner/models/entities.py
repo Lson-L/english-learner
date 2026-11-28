@@ -491,6 +491,21 @@ class ContentSource:
 
 
 # ------------------------------------------------------------------- 生词
+# 旧版多义项曾用圈码 ①②③ 编号；圈码会走字体回退，大小和基线不稳定，
+# 读取时统一换成普通的 1. 2. 3.，新写入的数据不再产生圈码。
+_LEGACY_SENSE_MARKS = "①②③④⑤"
+
+
+def plain_sense_text(text: str) -> str:
+    """把释义里的圈码编号换成普通数字编号（兼容已缓存的旧释义）。"""
+    value = text or ""
+    if not any(mark in value for mark in _LEGACY_SENSE_MARKS):
+        return value
+    for index, mark in enumerate(_LEGACY_SENSE_MARKS, start=1):
+        value = value.replace(f"{mark} ", f"{index}. ").replace(mark, f"{index}. ")
+    return value
+
+
 @dataclass(frozen=True)
 class Word:
     """生词本条目，同时充当查词缓存（lemma 唯一，大小写不敏感）。"""
@@ -510,6 +525,9 @@ class Word:
     in_vocabulary: bool = False
     # AI 查词时顺带标注的 CEFR 词档（A2/B1/B2/C1）；旧词条可能为空。
     cefr_band: str = ""
+    # 释义结构版本：0 = 旧版只给语境义；>=2 = 多义项释义。
+    # 查词命中旧版缓存（且只是缓存词条）时会自动重查一次。
+    definition_version: int = 0
     status: str = "new"
     ease: float = 2.5
     interval_days: int = 0
@@ -527,8 +545,8 @@ class Word:
             display_form=str(row["display_form"] or ""),
             phonetic=str(row["phonetic"] or ""),
             pos=str(row["pos"] or ""),
-            meaning_cn=str(row["meaning_cn"] or ""),
-            meaning_en=str(row["meaning_en"] or ""),
+            meaning_cn=plain_sense_text(str(row["meaning_cn"] or "")),
+            meaning_en=plain_sense_text(str(row["meaning_en"] or "")),
             example_en=str(row["example_en"] or ""),
             example_cn=str(row["example_cn"] or ""),
             mnemonic=str(row["mnemonic"] or ""),
@@ -536,6 +554,7 @@ class Word:
             article_id=row["article_id"],
             in_vocabulary=bool(row["in_vocabulary"]),
             cefr_band=str(row["cefr_band"] or ""),
+            definition_version=int(row["definition_version"] or 0),
             status=str(row["status"] or "new"),
             ease=float(row["ease"]),
             interval_days=int(row["interval_days"]),
@@ -561,6 +580,7 @@ class Word:
             "article_id": self.article_id,
             "in_vocabulary": 1 if self.in_vocabulary else 0,
             "cefr_band": self.cefr_band,
+            "definition_version": int(self.definition_version),
             "status": self.status,
             "ease": float(self.ease),
             "interval_days": int(self.interval_days),

@@ -21,12 +21,14 @@ class WordRepo(_BaseRepo):
         INSERT INTO words (
             lemma, display_form, phonetic, pos, meaning_cn, meaning_en,
             example_en, example_cn, mnemonic, context_sentence, article_id,
-            in_vocabulary, cefr_band, status, ease, interval_days, repetitions, due_date,
+            in_vocabulary, cefr_band, definition_version, status, ease,
+            interval_days, repetitions, due_date,
             created_at, updated_at
         ) VALUES (
             :lemma, :display_form, :phonetic, :pos, :meaning_cn, :meaning_en,
             :example_en, :example_cn, :mnemonic, :context_sentence, :article_id,
-            :in_vocabulary, :cefr_band, :status, :ease, :interval_days, :repetitions, :due_date,
+            :in_vocabulary, :cefr_band, :definition_version, :status, :ease,
+            :interval_days, :repetitions, :due_date,
             :created_at, :updated_at
         )
         ON CONFLICT(lemma) DO UPDATE SET
@@ -60,6 +62,8 @@ class WordRepo(_BaseRepo):
                 WHEN excluded.cefr_band <> '' THEN excluded.cefr_band
                 ELSE words.cefr_band
             END,
+            -- 释义结构版本只升不降：旧请求不应把多义项词条标回旧版。
+            definition_version = MAX(words.definition_version, excluded.definition_version),
             updated_at       = excluded.updated_at
     """
 
@@ -69,12 +73,14 @@ class WordRepo(_BaseRepo):
         INSERT INTO words (
             lemma, display_form, phonetic, pos, meaning_cn, meaning_en,
             example_en, example_cn, mnemonic, context_sentence, article_id,
-            in_vocabulary, cefr_band, status, ease, interval_days, repetitions, due_date,
+            in_vocabulary, cefr_band, definition_version, status, ease,
+            interval_days, repetitions, due_date,
             created_at, updated_at
         ) VALUES (
             :lemma, :display_form, :phonetic, :pos, :meaning_cn, :meaning_en,
             :example_en, :example_cn, :mnemonic, :context_sentence, :article_id,
-            :in_vocabulary, :cefr_band, :status, :ease, :interval_days, :repetitions, :due_date,
+            :in_vocabulary, :cefr_band, :definition_version, :status, :ease,
+            :interval_days, :repetitions, :due_date,
             :created_at, :updated_at
         )
         ON CONFLICT(lemma) DO NOTHING
@@ -306,6 +312,7 @@ class WordRepo(_BaseRepo):
                     ELSE mnemonic
                 END,
                 cefr_band = CASE WHEN :cefr_band <> '' THEN :cefr_band ELSE cefr_band END,
+                definition_version = MAX(definition_version, :definition_version),
                 context_sentence = CASE
                     WHEN :context_sentence <> '' THEN :context_sentence
                     ELSE context_sentence
@@ -324,6 +331,7 @@ class WordRepo(_BaseRepo):
                 "example_cn": (word.example_cn or "").strip(),
                 "mnemonic": (word.mnemonic or "").strip(),
                 "cefr_band": (word.cefr_band or "").strip(),
+                "definition_version": int(word.definition_version),
                 "context_sentence": (word.context_sentence or "").strip(),
                 "article_id": word.article_id,
                 "updated_at": now_iso(),

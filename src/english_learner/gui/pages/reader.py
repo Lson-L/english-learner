@@ -608,6 +608,7 @@ class ReaderPage(QWidget):
             sentence,
             cached=result.cached,
             context_mismatch=result.context_mismatch,
+            definition_stale=result.definition_stale,
         )
         self._show_word_card()
 

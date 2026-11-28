@@ -60,6 +60,7 @@ from ...services.srs import (
     RATING_VAGUE,
     VERDICT_SKIPPED,
 )
+from ..meaning_text import display_meaning_text
 from .common import PageHeader, set_status
 
 logger = logging.getLogger(__name__)
@@ -695,9 +696,9 @@ class ReviewPage(QWidget):
         )
         self._context_label.setVisible(bool(word.context_sentence))
 
-        self._meaning_cn_label.setText(word.meaning_cn)
+        self._meaning_cn_label.setText(display_meaning_text(word.meaning_cn))
         self._meaning_cn_label.setVisible(bool(word.meaning_cn))
-        self._meaning_en_label.setText(word.meaning_en)
+        self._meaning_en_label.setText(display_meaning_text(word.meaning_en))
         self._meaning_en_label.setVisible(bool(word.meaning_en))
         self._mnemonic_label.setText(f"记忆方法：{word.mnemonic}" if word.mnemonic else "")
         self._mnemonic_label.setVisible(bool(word.mnemonic))

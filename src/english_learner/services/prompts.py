@@ -42,7 +42,9 @@ if TYPE_CHECKING:  # 避免与 assessment_service 循环导入
 # M6.5：文章生成支持档内位置（low / mid / high），空值时不改变 prompt。
 # m6-5a：查词 prompt 只在词形与原形不同时才说明原形，避免释义重复“原形就是 X”。
 # m6-6a：阅读检测出题加入题型池随机抽样、随机设问角度与最近题干避让。
-PROMPT_VERSION = "m6-6a"
+# m9-1a：查词改为返回义项数组（本句义 + 其它常见义项），预取也附带 1~3 个常见义项。
+# m9-1b：义项编号从圈码 ①② 改为普通 1. 2.，避免字体回退导致大小/基线不一致。
+PROMPT_VERSION = "m9-1b"
 
 # ------------------------------------------------------------ 学习者记忆
 # 记忆按任务过滤：不同 AI 任务只该看到与自己相关的那几行。
@@ -278,8 +280,9 @@ def build_article_messages(
     glossary_rule = (
         "5. glossary 从正文里挑 8~15 个对 CEFR "
         f"{level} 学习者可能陌生的词（不要专有名词），word 用正文中的形态，"
-        "并给出它在这篇文章语境下的中文释义；只给词、词性、音标和释义，"
-        "不要例句和记忆方法；\n"
+        "meaning_cn 用 1. 2. 列出本句义与 1~2 个常见义项（只有一个常见义项时只写一条），"
+        "每个义项不超过 12 字、总长不超过 40 字；"
+        "只给词、词性、音标和释义，不要例句和记忆方法；\n"
     )
 
     feedback_rule = ""
@@ -416,7 +419,8 @@ def build_article_messages(
         '  "target_words": ["resilient", "consistent"],\n'
         '  "glossary": [\n'
         '    {"word": "resilient", "lemma": "resilient", "pos": "adj.", '
-        '"phonetic": "/rɪˈzɪliənt/", "meaning_cn": "有韧性的"}\n'
+        '"phonetic": "/rɪˈzɪliənt/", '
+        '"meaning_cn": "1. adj. 有韧性的 2. adj. 能迅速恢复的"}\n'
         "  ]\n"
         "}"
     )
@@ -1450,8 +1454,9 @@ def build_weekly_review_messages(
 
 # ---------------------------------------------------------------- 划词释义
 DICTIONARY_SYSTEM = (
-    "你是一名英汉词典编纂者，擅长结合上下文给出语境义，并擅长用联想、词根词缀、"
-    "谐音和画面感帮助中文母语者记单词。你只输出 JSON 对象，不输出解释或代码围栏。"
+    "你是一名英汉词典编纂者，擅长结合上下文给出语境义，并列出单词的其它常见义项；"
+    "你也擅长用联想、词根词缀、谐音和画面感帮助中文母语者记单词。"
+    "你只输出 JSON 对象，不输出解释或代码围栏。"
 )
 
 
@@ -1478,32 +1483,45 @@ def build_dictionary_messages(
         f"所在句子：{sentence or '（无上下文）'}\n"
         f"学习者等级：{level}\n"
         f"{memory_block}\n"
-        "请给出该词在这个句子中的语境义，并给出一个方便记忆的方法，面向中文母语者。\n"
+        "请给出该词在这个句子中的语境义，同时列出它的其它常见义项（总共 2~4 个），"
+        "并给出一个方便记忆的方法，面向中文母语者。\n"
         "JSON 结构：\n"
         "{\n"
-        '  "lemma": "go",\n'
-        '  "display_form": "went",\n'
-        '  "phonetic": "/ɡoʊ/",\n'
+        '  "lemma": "lie",\n'
+        '  "display_form": "lie",\n'
+        '  "phonetic": "/laɪ/",\n'
         '  "pos": "v.",\n'
-        '  "meaning_cn": "去；走（go 的过去式）",\n'
-        '  "meaning_en": "to move or travel to a place (past tense of go)",\n'
-        '  "example_en": "She went home after work.",\n'
-        '  "example_cn": "她下班后回家了。",\n'
+        '  "meanings": [\n'
+        '    {"pos": "v.", "meaning_cn": "躺；平卧", '
+        '"meaning_en": "to be in a flat position", "in_context": true},\n'
+        '    {"pos": "v.", "meaning_cn": "说谎", '
+        '"meaning_en": "to say something untrue", "in_context": false},\n'
+        '    {"pos": "n.", "meaning_cn": "谎言", '
+        '"meaning_en": "a false statement", "in_context": false}\n'
+        "  ],\n"
+        '  "example_en": "The cat lay on the warm floor.",\n'
+        '  "example_cn": "猫躺在温暖的地板上。",\n'
         '  "cefr_band": "A2",\n'
-        '  "mnemonic": "go-went-gone：想象一个人出门（go）又走远了（went）"\n'
+        '  "mnemonic": "lie / lay / lain：想象自己“躺”下后，谎话也跟着躺了一地"\n'
         "}\n"
         "要求：\n"
         "1. lemma 必须是词典原形（went→go、studies→study、better→good），"
         "display_form 保留原文中的形态；\n"
-        "2. phonetic 用国际音标并带斜杠，按原形标注；meaning_cn 简洁，只写本句语境下的中文义项；\n"
-        "3. 词形说明只在 display_form 与 lemma 不同时写：在 meaning_cn 的义项后用括号补一句"
-        "（如 went 写成“去；走（go 的过去式）”）；两者相同（仅大小写不同也算相同）时"
-        "meaning_cn 里不要出现“原形”字样"
+        "2. meanings 是义项数组：本句使用的义项（in_context=true）必须有且只有一个，"
+        "并放在第一位；其余为本句之外最常见的义项，按常用程度排序；"
+        "不同词性分别列出；不要收录生僻、过时或专业义项；"
+        "如果该词只有本句这一个常见义项，数组只放一条；\n"
+        "3. 每个义项的 meaning_cn 不超过 15 字，meaning_en 用一句话解释；"
+        "顶层 pos 用本句义项的词性缩写（v./n./adj./adv. 等）；\n"
+        "4. phonetic 用国际音标并带斜杠，按原形标注；\n"
+        "5. 词形说明只在 display_form 与 lemma 不同时写：在第一个（本句）义项的 "
+        "meaning_cn 后用括号补一句（如 went 写成“去；走（go 的过去式）”）；"
+        "两者相同（仅大小写不同也算相同）时 meaning_cn 里不要出现“原形”字样"
         "（“原形就是 X”“本句中的 X 就是词典原形”这类说明都不要写）；\n"
-        "4. example_en 必须是一个完整英文例句，example_cn 是它的中文翻译；\n"
-        "5. cefr_band 是该词在常见词表里的 CEFR 词档，只能是 A2/B1/B2/C1"
+        "6. example_en 必须使用本句义项造一个完整英文例句，example_cn 是它的中文翻译；\n"
+        "7. cefr_band 是该词在常见词表里的 CEFR 词档，只能是 A2/B1/B2/C1"
         "（比 A2 更基础的词也归到 A2）；\n"
-        "6. mnemonic 用中文写 40~80 字，可结合词根词缀、联想、谐音、画面感或一个短场景，"
+        "8. mnemonic 用中文写 40~80 字，可结合词根词缀、联想、谐音、画面感或一个短场景，"
         "让这个词变得好记；不要空泛地说“多读几遍”。"
     )
     return [
@@ -1553,7 +1571,8 @@ def build_prefetch_messages(entries: list[tuple[str, str]], level: str) -> list[
     """批量预查释义（阅读页后台预取用）。
 
     `entries` 是 (单词, 所在句子) 列表。刻意只要核心字段、不要例句和记忆方法：
-    输出短、往返快，这些释义只作为查词缓存写入 `words` 表，用户双击时直接命中；
+    输出短、往返快，这些释义只作为查词缓存写入 `words` 表，用户双击时直接命中。
+    `meaning_cn` 仍要求 1~3 个常见义项，避免预取缓存把多义词缩成单条本句义；
     如果语境义不符，界面上的“按本句重查”仍可发起完整查词。
     """
     lines: list[str] = []
@@ -1565,16 +1584,19 @@ def build_prefetch_messages(entries: list[tuple[str, str]], level: str) -> list[
 
     user = (
         f"学习者 CEFR 等级：{level}。下面是一篇文章里的单词及其所在句子。\n"
-        "请为每个单词给出它在该句中的语境义，用于本地查词缓存。\n"
+        "请为每个单词给出它在该句中的语境义，并附带 1~3 个常见义项，用于本地查词缓存。\n"
         "要求：\n"
         "1. word 原样返回输入里的写法；lemma 给词典原形（went→go、studies→study）；\n"
         "2. phonetic 用国际音标并带斜杠，按原形标注；pos 用 v./n./adj. 等缩写；\n"
-        "3. meaning_cn 不超过 20 字，meaning_en 一句话；\n"
-        "4. 输出条目数量与输入完全一致，顺序不变；不要例句、不要记忆方法；\n"
-        "5. 只输出 JSON，不要解释、不要代码围栏。\n\n"
+        "3. meaning_cn 用 1. 2. 3. 列出义项：本句义放第一个，其余为常见义项；"
+        "每个义项不超过 12 字，总长不超过 45 字；只有一个常见义项时只写一条；\n"
+        "4. meaning_en 用分号列出对应义项的一句话解释，顺序与 meaning_cn 一致；\n"
+        "5. 不要收录生僻、过时或专业义项；不同词性分别列出；\n"
+        "6. 输出条目数量与输入完全一致，顺序不变；不要例句、不要记忆方法；\n"
+        "7. 只输出 JSON，不要解释、不要代码围栏。\n\n"
         "JSON 结构：\n"
         '{"entries": [{"word": "...", "lemma": "...", "phonetic": "/.../", '
-        '"pos": "...", "meaning_cn": "...", "meaning_en": "..."}]}\n\n'
+        '"pos": "...", "meaning_cn": "1. ... 2. ...", "meaning_en": "...; ..."}]}\n\n'
         f"单词列表：\n" + "\n".join(lines)
     )
     return [

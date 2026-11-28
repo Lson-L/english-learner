@@ -129,6 +129,13 @@ uv run ruff format src/english_learner tests
   `services/level_progress.py`，今日页显示「B1 → B2 · 把握 38%」+ 进度条 +
   置信度 / pending + 最多 3 条证据（最近检测、生词比例趋势、词档认识率）；
   检测结果页补难度分布与高两档题答对数。不新增 AI 调用、不改等级与 SRS。
+- **查词多义项（2026-11-28）**：查词 prompt 返回 `meanings` 数组（本句义 +
+  1~3 个常见义项），`DictionaryService.format_meanings()` 拼成 `1. ... 2. ...`
+  写入 `meaning_cn`（不用圈码 ①②，避免字体回退导致大小/基线不一致；
+  `Word.from_row()` 会把旧缓存圈码归一），旧 `meaning_cn/meaning_en` 仍作为回退。`words` 新增
+  `definition_version`（schema v10）：命中旧版缓存时，仅缓存词条自动重查，
+  已入生词本的词保留手改释义并由释义卡提供“按本句重查”；重查失败回退旧释义。
+  预取与文章 glossary 的 prompt 也要求 `1. 2.` 多义项。
 - **多套 AI 配置（2026-11-28）**：`config.json` 新增 `ai_profiles`（id / name /
   base_url / api_key / model / temperature 数组）+ `active_ai_id`，`ai` 段始终
   镜像当前配置；旧单配置由 `ConfigStore.load_profiles()` 派生为一条 id 为

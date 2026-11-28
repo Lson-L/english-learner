@@ -8,7 +8,7 @@
   执行以 [M7_REAL_TEXT.md](M7_REAL_TEXT.md) 为准；统计看板深化见
   [M8_STATS.md](M8_STATS.md)；M6.6 / M6.7 顺延，M5.6 暂缓，
   M4 剩余安装器 / 自动更新排最后
-- 当前基线：**786 passed**（`uv run pytest`）；SQLite schema **v9**
+- 当前基线：**810 passed**（`uv run pytest`）；SQLite schema **v10**
 - 产品方向：[PRODUCT.md](PRODUCT.md)
 
 > **文档怎么读（重要，避免污染上下文）**
@@ -72,6 +72,10 @@
 
 配置支持多套 AI：设置页可新增 / 编辑 / 删除 / 随时切换（`config.json` 的
 `ai_profiles` + `active_ai_id`，`ai` 段镜像当前配置，旧单配置自动迁移）。
+
+查词支持多义项：AI 返回本句义 + 其它常见义项（`1. lie 躺；平卧（本句义）
+2. 说谎 3. 谎言`），预取与文章 glossary 同步；旧版单义项缓存按需自动重查
+（schema v10 的 `words.definition_version`），已加入生词本的词保留手改释义。
 
 当前能力（M3.19 后）：配置 AI → 测评 → 每日文章 → 双击查词 / 悬浮释义卡 →
 加入生词本 → 阅读检测（两轮自适应 + 盲评 + 本地后验 + 英译中产出题）→ 每周复盘；
