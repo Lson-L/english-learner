@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 from ...models.entities import ReviewLog, Word
 from ...services.app_context import AppContext
 from ...services.srs import RATING_LABELS
+from ..meaning_text import display_meaning_text, flatten_meaning_text
 from ..widgets import busy_progress_bar
 from ..workers import TaskWorker, retire_worker
 from .common import PageHeader, set_status
@@ -63,11 +64,59 @@ _SORT_OPTIONS: tuple[tuple[str, str], ...] = (
 
 _COLUMNS = ("单词", "释义", "状态", "下次复习")
 
+# 暂时隐藏英文释义编辑：数据仍保留，并继续参与 AI prompt / 复习；
+# 需要恢复时把这里改成 True 即可。
+SHOW_ENGLISH_MEANING = False
+
 # 复习求助记录：详情面板只展示最近 5 条。
 _HELP_LOG_LIMIT = 5
 _HELP_LOG_EMPTY_HINT = (
     "还没有求助记录。复习时点「忘记 / 模糊」并请 AI 帮记后，你写的原因和 AI 的建议会显示在这里。"
 )
+
+
+class _MeaningEdit(QPlainTextEdit):
+    """释义编辑框：高度随内容伸缩。
+
+    默认保持 64px；义项变多时向上长，但最高 192px（约 3 倍），
+    再长就在框内滚动，避免把右侧详情面板撑得过高。
+    """
+
+    MIN_HEIGHT = 64
+    MAX_HEIGHT = 192
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setFixedHeight(self.MIN_HEIGHT)
+        self.textChanged.connect(self._fit_height)
+
+    def _fit_height(self) -> None:
+        # 用“不含滚动条”的完整内容宽度计算：如果按当前 viewport 宽度算，
+        # 滚动条出现→宽度变窄→折行更多→高度再变大，会和 resizeEvent 来回抖动。
+        frame = self.frameWidth()
+        width = max(self.width() - 2 * frame, 1)
+        doc = self.document()
+        doc.setTextWidth(width)
+        # QPlainTextEdit 的 documentSize().height() 不是像素高度（实测 2 行只返回 2.0），
+        # 必须按文本块的 blockBoundingRect 逐块累加。
+        layout = doc.documentLayout()
+        content = 0.0
+        block = doc.firstBlock()
+        while block.isValid():
+            content += layout.blockBoundingRect(block).height()
+            block = block.next()
+        # 文档边距 + 边框 + 2px 余量：避免 64 / 65 这种临界值反复出现滚动条。
+        chrome = 2 * doc.documentMargin() + 2 * frame + 2
+        target = int(content + chrome + 0.999)
+        target = max(self.MIN_HEIGHT, min(self.MAX_HEIGHT, target))
+        if target != self.height():
+            self.setFixedHeight(target)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 约定
+        super().resizeEvent(event)
+        self._fit_height()
 
 
 class VocabularyPage(QWidget):
@@ -220,16 +269,18 @@ class VocabularyPage(QWidget):
         body.addLayout(phonetic_row)
 
         body.addWidget(self._field_label("中文释义"))
-        self._meaning_cn_edit = QPlainTextEdit()
+        self._meaning_cn_edit = _MeaningEdit()
         self._meaning_cn_edit.setObjectName("meaningEdit")
-        self._meaning_cn_edit.setFixedHeight(64)
         body.addWidget(self._meaning_cn_edit)
 
-        body.addWidget(self._field_label("英文释义"))
-        self._meaning_en_edit = QPlainTextEdit()
+        self._meaning_en_label = self._field_label("英文释义")
+        body.addWidget(self._meaning_en_label)
+        self._meaning_en_edit = _MeaningEdit()
         self._meaning_en_edit.setObjectName("meaningEdit")
-        self._meaning_en_edit.setFixedHeight(64)
         body.addWidget(self._meaning_en_edit)
+        # 英文释义暂时不展示；控件保留，避免隐藏后丢掉已有数据与脏检查逻辑。
+        self._meaning_en_label.setVisible(SHOW_ENGLISH_MEANING)
+        self._meaning_en_edit.setVisible(SHOW_ENGLISH_MEANING)
 
         self._srs_label = QLabel("")
         self._srs_label.setObjectName("muted")
@@ -516,9 +567,11 @@ class VocabularyPage(QWidget):
         self._pos_label.setText(word.pos)
         self._pos_label.setVisible(bool(word.pos))
 
-        self._meaning_cn_edit.setPlainText(word.meaning_cn)
+        # 存储是单行（`1. ... 2. ...`），输入框里按义项换行展示；保存时再压回单行。
+        meaning_cn_display = display_meaning_text(word.meaning_cn)
+        self._meaning_cn_edit.setPlainText(meaning_cn_display)
         self._meaning_en_edit.setPlainText(word.meaning_en)
-        self._baseline = (word.meaning_cn.strip(), word.meaning_en.strip())
+        self._baseline = (meaning_cn_display.strip(), word.meaning_en.strip())
 
         status_text = STATUS_LABELS.get(word.status, word.status)
         parts = [f"状态：{status_text}", f"易度 {word.ease:.2f}", f"间隔 {word.interval_days} 天"]
@@ -643,13 +696,14 @@ class VocabularyPage(QWidget):
         if word is None or word.id is None:
             return False
         meaning_cn, meaning_en = self._current_edits()
-        if not meaning_cn and not meaning_en:
-            set_status(self._status, "中文释义和英文释义至少填一个。", "error")
+        if not meaning_cn:
+            set_status(self._status, "中文释义不能为空。", "error")
             return False
 
         updated = self._context.word_repo.update_meaning(
             word.id,
-            meaning_cn=meaning_cn,
+            # 输入框里为了可读性按义项换行，写库仍保持单行。
+            meaning_cn=flatten_meaning_text(meaning_cn),
             meaning_en=meaning_en,
         )
         if updated is None:

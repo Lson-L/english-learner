@@ -11,7 +11,7 @@ Java 对照：
 - 自动提交模式（isolation_level=None），需要原子性时用 `transaction()` 显式包一层。
 
 迁移：
-- 版本号存在 `PRAGMA user_version` 里，当前 SCHEMA_VERSION = 9；
+- 版本号存在 `PRAGMA user_version` 里，当前 SCHEMA_VERSION = 10；
 - 建表语句全部是 `CREATE ... IF NOT EXISTS`，重复初始化不会报错；
 - v1 → v2：words 增加 mnemonic，review_logs 增加 note/advice，新增 word_forms
   词形缓存表；用 `ALTER TABLE ... ADD COLUMN` 原地升级，旧数据不丢；
@@ -67,7 +67,7 @@ from .repositories import (
     WritingAttemptRepo,
 )
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS profile (
@@ -123,6 +123,8 @@ CREATE TABLE IF NOT EXISTS words (
     in_vocabulary   INTEGER NOT NULL DEFAULT 0,
     -- AI 查词时顺带标注的 CEFR 词档；旧词条为空
     cefr_band       TEXT    NOT NULL DEFAULT '',
+    -- 释义结构版本：0 = 旧版单语境义；2 = 多义项释义
+    definition_version INTEGER NOT NULL DEFAULT 0,
     status          TEXT    NOT NULL DEFAULT 'new',
     ease            REAL    NOT NULL DEFAULT 2.5,
     interval_days   INTEGER NOT NULL DEFAULT 0,
@@ -468,6 +470,10 @@ class Database:
             self._add_column(conn, "articles", "source_url", "TEXT NOT NULL DEFAULT ''")
             self._add_column(conn, "articles", "source_ref", "TEXT NOT NULL DEFAULT ''")
             self._add_column(conn, "review_logs", "mode", "TEXT NOT NULL DEFAULT ''")
+
+        if version < 10:
+            # 查词支持多义项：旧词条保留原释义，version=0 让查词时按需重查。
+            self._add_column(conn, "words", "definition_version", "INTEGER NOT NULL DEFAULT 0")
 
         # articles.metrics_json 属于 v8 的 M5.3 增量，但 M5.1 已经把 v8 发布出去了
         # （当时还没有这一列），所以不能放进 `version < 8` 分支，否则已经是 v8 的

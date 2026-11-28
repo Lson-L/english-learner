@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...models.entities import Word
+from ..meaning_text import display_meaning_text
 
 
 def _label(object_name: str, *, wrap: bool = True) -> QLabel:
@@ -120,7 +121,9 @@ class WordPanel(QFrame):
 
         self._refresh_button = QPushButton("按本句重查")
         self._refresh_button.setObjectName("secondaryButton")
-        self._refresh_button.setToolTip("缓存释义来自另一句，点击按当前句子重新查询")
+        self._refresh_button.setToolTip(
+            "缓存释义可能来自另一句或旧版单义项，点击按当前句子重新查询"
+        )
         self._refresh_button.clicked.connect(self.refresh_requested.emit)
         self._refresh_button.setVisible(False)
         root.addWidget(self._refresh_button)
@@ -177,12 +180,13 @@ class WordPanel(QFrame):
         *,
         cached: bool = False,
         context_mismatch: bool = False,
+        definition_stale: bool = False,
     ) -> None:
         self._apply_word(word, sentence)
 
         self._add_button.setVisible(True)
         self._add_button.setEnabled(True)
-        self._refresh_button.setVisible(bool(context_mismatch))
+        self._refresh_button.setVisible(bool(context_mismatch or definition_stale))
         if word.in_vocabulary:
             self._add_button.setText("加入本篇高亮")
             self._status.setText("这个词已在生词本中，加入后会在本篇高亮。")
@@ -192,6 +196,10 @@ class WordPanel(QFrame):
         if context_mismatch:
             self._status.setText(
                 "这条释义来自之前查过的句子，当前语境可能不同；如含义不符，点「按本句重查」。"
+            )
+        elif definition_stale:
+            self._status.setText(
+                "这条释义来自旧版查词，可能只有本句义；点「按本句重查」可补全其它常见义项。"
             )
 
     def update_definition(self, word: Word, sentence: str = "") -> None:
@@ -219,9 +227,9 @@ class WordPanel(QFrame):
         self._phonetic.setVisible(bool(word.phonetic))
         self._pos.setText(word.pos)
         self._pos.setVisible(bool(word.pos))
-        self._meaning_cn.setText(word.meaning_cn)
+        self._meaning_cn.setText(display_meaning_text(word.meaning_cn))
         self._meaning_cn.setVisible(bool(word.meaning_cn))
-        self._meaning_en.setText(word.meaning_en)
+        self._meaning_en.setText(display_meaning_text(word.meaning_en))
         self._meaning_en.setVisible(bool(word.meaning_en))
         self._example_en.setText(word.example_en)
         self._example_en.setVisible(bool(word.example_en))

@@ -154,12 +154,29 @@ tests/（共 678 个用例，全部 mock AI、无网络）
   断开所有结果信号，并放进全局 orphan 列表；界面立刻恢复可操作，旧线程继续
   跑到请求返回后由 `wait_for_orphans()` 在退出时统一等待。
 
-### 6.3 配置向导状态机
+### 6.3 配置向导状态机与多套 AI 配置
 
 - 只有 `self._tested_config is not None` 时「下一步」才可点；
-- 任意字段 `textChanged` / `valueChanged` 都会调用 `_invalidate_test()`；
-- 测试成功后才 `ConfigStore.save()`，保存失败停在向导并弹窗；
+- 任意连接字段 `textChanged` / `valueChanged` 都会调用 `_invalidate_test()`；
+  配置名称只是展示元数据，改动不会让测试结果失效；
+- 测试成功后才写盘，保存失败停在向导并弹窗；
 - `reject()` / `closeEvent()` 在测试进行中会被拒绝，避免 QThread 被销毁。
+
+多套配置（2026-11-28）：
+
+- `config.json` 结构：`ai_profiles`（`id / name / base_url / api_key / model /
+  temperature` 的数组）+ `active_ai_id`，`ai` 段始终镜像当前配置，旧代码
+  （`ConfigStore.load()` / `AIConfig`）不需要改；
+- 只有 `ai` 段的旧配置由 `ConfigStore.load_profiles()` 派生为一条 id 为
+  `default` 的配置，用户无感迁移；列表里的坏条目会被跳过，全部坏掉时回退 `ai`；
+- 每个 Key 独立 DPAPI 加密；`save_profiles()` 是整体写盘入口，
+  `add_profile / update_profile / delete_profile / activate_profile` 都走它，
+  至少保留一条，删除当前项时自动切到第一套；
+- 设置页「AI 服务」卡片：下拉框切换 + `新增配置 / 编辑配置 / 删除配置`；
+  新增 / 编辑弹窗仍由 `MainWindow` 打开（`OnboardingDialog(profile=...)`
+  保留 id 表示编辑，为空表示新增），切换 / 删除由设置页直接改本地配置并
+  `AppContext.set_config()`，主窗口通过 `config_changed` 同步自己的副本；
+- `--reconfigure` 编辑当前配置，不再覆盖成一条全新配置。
 
 ### 6.4 openai 3.55 的差异
 
@@ -469,6 +486,35 @@ tests/（共 678 个用例，全部 mock AI、无网络）
 - **排版修复**：生词本右侧详情字段变多后，QSplitter 分配的高度不足会导致
   QLabel/QPlainTextEdit 互相重叠；把 `_detail_body` 放进 `QScrollArea`
   （隐藏/显示滚动区而不是 body）即可，内容少时无滚动条、内容多时可滚动。
+- **释义框高度**：`_MeaningEdit` 默认 64px，随内容自动变高，最高 192px（3 倍），
+  再长在框内滚动；中英文释义共用同一规则，避免多义项在固定高度的框里被截断。
+  高度必须用 `blockBoundingRect` 逐块累加，`documentSize().height()` 返回的不是像素。
+- **多义项换行**：存储保持单行（`1. ... 2. ...`），`gui/meaning_text.py` 的
+  `display_meaning_text()` 在释义卡 / 生词本编辑框 / 复习卡里按义项换行；
+  生词本保存时用 `flatten_meaning_text()` 压回单行，数据库与表格口径不变。
+- **英文释义暂时隐藏**：生词本详情只展示中文释义，`SHOW_ENGLISH_MEANING = False`
+  控制；英文控件仍保留原值并参与 AI prompt / 复习，需要恢复时改回 True 即可。
+
+### 6.18a 查词多义项（schema v10）
+
+- **AI 契约**：`build_dictionary_messages` 返回 `meanings` 数组
+  （`pos / meaning_cn / meaning_en / in_context`），要求本句义 `in_context=true`
+  且固定放第一位，再列 1~3 个其它常见义项；只有一个常见义项时数组只放一条。
+  `DictionaryService.format_meanings()` 把数组拼成 `1. v. ... 2. n. ...` 文本，
+  本句义标“（本句义）”；旧格式 `meaning_cn/meaning_en` 仍作为回退兼容。
+  编号刻意用普通 ASCII 数字而不是圈码 ①②：圈码会触发字体回退，
+  在深色等宽模式下大小和基线不一致；`Word.from_row()` 会把旧缓存里的
+  圈码统一换成 `1. 2.`。
+- **为什么存成字符串**：释义卡、生词本表格、复习卡都直接读 `meaning_cn`，
+  保持单字段不用改所有展示与编辑路径；`definition_version` 只用于判断缓存新旧。
+- **缓存版本**：`words.definition_version`（schema v10，旧词条 0）。
+  查词命中旧版缓存时：仅缓存词条（`in_vocabulary=0`）自动重查一次；
+  已入生词本的词条保留用户可能手改过的释义，卡片显示“按本句重查”由用户决定。
+  重查失败（断网 / 额度）回退旧释义，不把已有内容变成错误页。
+- **预取 / 文章 glossary 同步**：两处 prompt 都要求 `meaning_cn` 用 1. 2. 列
+  1~3 个常见义项，写入缓存时标 `DEFINITION_VERSION`，保证双击直接看到多义项；
+  文章 glossary 取不到多义项时最多多一次查词，不影响正文。
+- **缓存升级**：v9 → v10 只加列，不删除任何词条；用户可在旧词卡上手动刷新。
 
 ### 6.19 M3.8：阅读检测与动态调级
 

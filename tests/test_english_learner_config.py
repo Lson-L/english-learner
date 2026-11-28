@@ -10,9 +10,12 @@ import pytest
 
 from english_learner.services.config_store import (
     DEFAULT_DAILY_REVIEW_LIMIT,
+    LEGACY_PROFILE_ID,
     MAX_DAILY_REVIEW_LIMIT,
     MIN_DAILY_REVIEW_LIMIT,
     AIConfig,
+    AIProfile,
+    AIProfiles,
     ConfigError,
     ConfigStore,
     RealTextConfig,
@@ -312,6 +315,136 @@ def test_save_ui_migrates_flat_config_without_losing_ai(tmp_path: Path) -> None:
     assert "api_key" not in payload
     assert payload["ui"]["english_font"] == "literata"
     assert store.load() is not None and store.load().model == "deepseek-chat"
+
+
+def test_legacy_single_config_is_exposed_as_one_profile(tmp_path: Path) -> None:
+    """旧版只有 `ai` 段：必须派生出一条配置，不能逼用户重新填写。"""
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"version": 1, "ai": make_config().to_dict()}), encoding="utf-8")
+
+    profiles = ConfigStore(path).load_profiles()
+    assert len(profiles.profiles) == 1
+    active = profiles.active()
+    assert active is not None
+    assert active.id == LEGACY_PROFILE_ID
+    assert active.name == "deepseek-chat"
+    assert active.config == make_config()
+
+
+def test_save_creates_and_updates_default_profile(tmp_path: Path) -> None:
+    """`save()` 兼容旧调用：第一次创建配置，之后更新同一条并镜像到 `ai`。"""
+    path = tmp_path / "config.json"
+    store = ConfigStore(path)
+    store.save(make_config(model="model-a"))
+    first = store.load_profiles()
+    assert len(first.profiles) == 1
+
+    store.save(make_config(model="model-b", api_key="sk-other"))
+    profiles = store.load_profiles()
+    assert len(profiles.profiles) == 1
+    assert profiles.active().config.model == "model-b"
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["active_ai_id"] == profiles.active_id
+    assert payload["ai"]["model"] == "model-b"
+    assert len(payload["ai_profiles"]) == 1
+
+
+def test_add_activate_update_delete_profiles(tmp_path: Path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(make_config(model="model-a"))
+    first = store.load_profiles().active()
+    assert first is not None
+
+    added = store.add_profile(make_config(model="model-b"), name="备用")
+    assert len(added.profiles) == 2
+    second = added.active()
+    assert second is not None and second.id != first.id
+    assert second.name == "备用"
+    assert store.load_profiles().active().config.model == "model-b"
+
+    activated = store.activate_profile(first.id)
+    assert activated.active_id == first.id
+    assert store.load().model == "model-a"  # `ai` 段跟着当前配置走
+    assert store.load_profiles().active().config.model == "model-a"
+
+    updated = store.update_profile(second.id, make_config(model="model-c"), name="备用 2")
+    assert updated.find(second.id).name == "备用 2"
+    assert store.load_profiles().find(second.id).config.model == "model-c"
+    # 修改非当前配置不会把当前配置切走。
+    assert store.load_profiles().active_id == first.id
+
+    remaining = store.delete_profile(first.id)
+    assert len(remaining.profiles) == 1
+    assert remaining.active().id == second.id
+    assert store.load_profiles().active().config.model == "model-c"
+
+
+def test_cannot_delete_last_profile(tmp_path: Path) -> None:
+    store = ConfigStore(tmp_path / "config.json")
+    store.save(make_config())
+    active = store.load_profiles().active()
+    assert active is not None
+
+    with pytest.raises(ConfigError):
+        store.delete_profile(active.id)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="DPAPI 只在 Windows 上加密")
+def test_profile_api_keys_are_encrypted(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    store = ConfigStore(path)
+    store.save(make_config(api_key="sk-first-secret"))
+    active = store.load_profiles().active()
+    store.add_profile(make_config(model="other", api_key="sk-second-secret"), name="第二套")
+
+    text = path.read_text(encoding="utf-8")
+    assert "sk-first-secret" not in text
+    assert "sk-second-secret" not in text
+    payload = json.loads(text)
+    assert all(item["api_key"].startswith("dpapi:") for item in payload["ai_profiles"])
+
+    assert store.load_profiles().find(active.id).config.api_key == "sk-first-secret"
+    assert {p.config.api_key for p in store.load_profiles().profiles} == {
+        "sk-first-secret",
+        "sk-second-secret",
+    }
+
+
+def test_broken_profile_entry_is_skipped(tmp_path: Path) -> None:
+    """一条坏配置不能拖垮设置页，其余配置仍然可读。"""
+    path = tmp_path / "config.json"
+    store = ConfigStore(path)
+    store.save(make_config(model="good-model"))
+    good = store.load_profiles().active()
+    assert good is not None
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["ai_profiles"].append({"id": "broken", "name": "坏配置"})
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    profiles = store.load_profiles()
+    assert [item.id for item in profiles.profiles] == [good.id]
+    assert profiles.active().config.model == "good-model"
+
+    # 列表里全是坏条目时回退到 `ai` 段，仍然能给出一套可用配置。
+    payload["ai_profiles"] = [{"id": "broken", "name": "坏配置"}]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    fallback = store.load_profiles()
+    assert len(fallback.profiles) == 1
+    assert fallback.active().config.model == "good-model"
+
+
+def test_profiles_dataclass_operations() -> None:
+    first = AIProfile("a", "A", make_config(model="a"))
+    second = AIProfile("b", "B", make_config(model="b"))
+    profiles = AIProfiles((first,), "a")
+
+    assert profiles.active() == first
+    assert profiles.with_profile(second).active() == first
+    assert profiles.with_profile(second).with_active("b").active() == second
+    assert profiles.without("a").active() is None
+    assert profiles.with_active("missing").active_id == "a"
 
 
 def test_real_text_config_roundtrip_and_defaults(tmp_path: Path) -> None:

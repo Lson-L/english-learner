@@ -185,6 +185,57 @@ def test_selection_shows_detail_and_saves_meaning(db: Database, tmp_path: Path) 
     assert page._table.item(0, 1).text() == "有韧性的；能迅速恢复的"
 
 
+def test_multi_sense_meaning_shows_one_per_line_and_saves_flat(
+    db: Database, tmp_path: Path
+) -> None:
+    """多义项在输入框里一项一行；保存回数据库仍保持单行，英文释义暂时隐藏。"""
+    get_app()
+    db.words.upsert(
+        make_word(
+            "back",
+            meaning_cn="1. n. 背部 2. adv. 回；向后",
+            meaning_en="1. the rear part 2. toward the rear",
+        )
+    )
+
+    page = VocabularyPage(make_context(db, tmp_path))
+    page.on_activated()
+
+    assert page._meaning_cn_edit.toPlainText() == "1. n. 背部\n2. adv. 回；向后"
+    assert page._meaning_en_edit.isHidden() is True
+    assert page._meaning_en_label.isHidden() is True
+    # 隐藏的英文控件仍保留原值，不会因为看不见就被清空。
+    assert page._meaning_en_edit.toPlainText() == "1. the rear part 2. toward the rear"
+
+    page._meaning_cn_edit.setPlainText("1. n. 背部\n2. adv. 回；向后\n3. v. 支持；赞成")
+    assert page._save_meaning() is True
+
+    reloaded = db.words.get_by_lemma("back")
+    assert reloaded is not None
+    assert reloaded.meaning_cn == "1. n. 背部 2. adv. 回；向后 3. v. 支持；赞成"
+    assert reloaded.meaning_en == "1. the rear part 2. toward the rear"
+
+
+def test_meaning_editor_height_grows_with_content_up_to_limit(db: Database, tmp_path: Path) -> None:
+    """释义输入框默认 64px；内容多时变高，但最多 192px（3 倍）。"""
+    get_app()
+    db.words.upsert(make_word("back"))
+
+    page = VocabularyPage(make_context(db, tmp_path))
+    page.on_activated()
+    edit = page._meaning_cn_edit
+
+    assert edit.height() == 64
+
+    edit.setPlainText("\n".join(["一行释义"] * 40))
+    get_app().processEvents()
+    assert edit.height() == 192
+
+    edit.setPlainText("短释义")
+    get_app().processEvents()
+    assert edit.height() == 64
+
+
 def test_empty_meaning_is_rejected(db: Database, tmp_path: Path) -> None:
     get_app()
     stored = db.words.upsert(make_word("alpha"))
@@ -199,7 +250,7 @@ def test_empty_meaning_is_rejected(db: Database, tmp_path: Path) -> None:
     reloaded = db.words.get_by_id(stored.id)
     assert reloaded is not None
     assert reloaded.meaning_cn == "alpha 的中文释义"
-    assert "至少填一个" in page._status.text()
+    assert "中文释义不能为空" in page._status.text()
 
 
 def test_delete_selected_word(db: Database, tmp_path: Path) -> None:

@@ -21,6 +21,7 @@ from ..storage.db import DuplicateError
 from ..storage.repositories import ArticleRepo, RealTextRepo, WordRepo
 from .ai_client import AIError
 from .ai_protocol import TextCompleter
+from .dictionary_service import DEFINITION_VERSION
 from .json_utils import JsonParseError, as_str_list, as_text, parse_json_object
 from .learner_memory import LearnerMemory, load_memory
 from .level_progress import DifficultyHint
@@ -741,6 +742,7 @@ class ArticleService:
                     phonetic=entry.phonetic,
                     pos=entry.pos,
                     meaning_cn=entry.meaning_cn,
+                    definition_version=DEFINITION_VERSION,
                     article_id=article.id,
                     status="new",
                     created_at=timestamp,

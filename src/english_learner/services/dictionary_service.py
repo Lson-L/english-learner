@@ -22,6 +22,7 @@ from ..models.entities import (
     WordDefinition,
     normalize_cefr_level,
     now_iso,
+    plain_sense_text,
     today_str,
 )
 from ..storage.repositories import StatsRepo, WordRepo
@@ -60,6 +61,14 @@ ENRICH_TIMEOUT_SECONDS = 45.0
 
 # 句子边界：英文句末标点 + 换行。分号、逗号不作为边界，避免把句子切得太碎。
 _SENTENCE_DELIMITERS = ".!?\n"
+
+# 查词释义结构版本：0 = 旧版只有单条语境义；2 = 本句义 + 其它常见义项。
+# 命中旧版缓存时（仅限还没加入生词本的缓存词条）自动重查一次，
+# 已入生词本的词条保留用户可能编辑过的释义，只在卡片上提供“按本句重查”。
+DEFINITION_VERSION = 2
+
+# 多义项最多展示 5 条，再多卡片会显得臃肿。
+_MAX_SENSES = 5
 
 
 def normalize_lemma(raw: str) -> str:
@@ -114,10 +123,71 @@ class LookupResult:
     cached: bool
     # 命中缓存、但缓存释义来自另一句：界面可以提示“按本句重查”。
     context_mismatch: bool = False
+    # 命中旧版单义项缓存：界面可以提示“更新释义”。
+    definition_stale: bool = False
 
     @property
     def definition(self) -> WordDefinition:
         return WordDefinition.from_word(self.word)
+
+
+def _as_bool(value: object) -> bool:
+    """模型偶尔把布尔值写成字符串，按 JSON 语义解析。"""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def format_meanings(data: dict[str, object]) -> tuple[str, str]:
+    """把 AI 的 `meanings` 数组格式化成 ①②③ 文本。
+
+    旧格式（只有 `meaning_cn` / `meaning_en` 两个字段）原样返回，保证
+    历史假数据与旧模型输出仍然可用。多义项时本句义固定放第一位，
+    并在中文义项后标注“（本句义）”。
+    """
+    raw = data.get("meanings")
+    senses: list[tuple[str, str, str, bool]] = []
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            meaning_cn = as_text(item.get("meaning_cn"))
+            meaning_en = as_text(item.get("meaning_en"))
+            if not meaning_cn and not meaning_en:
+                continue
+            senses.append(
+                (
+                    as_text(item.get("pos")),
+                    meaning_cn,
+                    meaning_en,
+                    _as_bool(item.get("in_context")),
+                )
+            )
+    if not senses:
+        return plain_sense_text(as_text(data.get("meaning_cn"))), plain_sense_text(
+            as_text(data.get("meaning_en"))
+        )
+
+    # 本句义放最前：不依赖模型是否严格按顺序输出。
+    senses.sort(key=lambda sense: not sense[3])
+    multiple = len(senses) > 1
+    cn_parts: list[str] = []
+    en_parts: list[str] = []
+    for index, (pos, meaning_cn, meaning_en, in_context) in enumerate(senses[:_MAX_SENSES]):
+        mark = f"{index + 1}." if multiple else ""
+        cn_text = f"{pos} {meaning_cn}".strip() if pos else meaning_cn
+        en_text = f"{pos} {meaning_en}".strip() if pos else meaning_en
+        if in_context and multiple:
+            cn_text = f"{cn_text}（本句义）" if cn_text else cn_text
+            en_text = f"{en_text} (in this sentence)" if en_text else en_text
+        if mark:
+            cn_text = f"{mark} {cn_text}" if cn_text else mark
+            en_text = f"{mark} {en_text}" if en_text else mark
+        if cn_text:
+            cn_parts.append(cn_text)
+        if en_text:
+            en_parts.append(en_text)
+    return " ".join(cn_parts), " ".join(en_parts)
 
 
 def needs_definition(word: Word) -> bool:
@@ -165,26 +235,48 @@ class DictionaryService:
         3. 都没命中才调用 AI，由 AI 判断原形并生成记忆方法。
 
         `refresh=True` 跳过缓存，按当前句子重新请求 AI 并更新词条释义。
-        界面在“缓存释义来自另一句”时提供这个入口，避免多义词一直显示旧语境义。
+        界面在“缓存释义来自另一句”或“旧版单义项缓存”时提供这个入口，
+        避免多义词一直显示旧语境义。
         """
         surface = normalize_lemma(raw_word)
         if not surface:
             raise AIError("请选择一个英文单词", "只能查询由字母组成的单词，双击正文即可选中。")
 
         cached: Word | None = None
+        stale_cached: Word | None = None
         if not refresh:
             cached = self._words.get_by_form(surface)
             if cached is None:
                 cached = self._words.get_by_lemma(surface)
             if cached is not None:
-                logger.info("查词命中缓存：%s → %s", surface, cached.lemma)
-                return LookupResult(
-                    word=cached,
-                    cached=True,
-                    context_mismatch=_context_mismatch(cached.context_sentence, sentence),
-                )
+                stale = cached.definition_version < DEFINITION_VERSION
+                # 只刷新“查词缓存”词条；已加入生词本的释义可能被用户手动改过，
+                # 自动覆盖会丢失编辑，改由卡片上的“按本句重查”让用户决定。
+                if stale and not cached.in_vocabulary:
+                    stale_cached = cached
+                    logger.info("查词缓存为旧版单义项，重新查询：%s", cached.lemma)
+                else:
+                    logger.info("查词命中缓存：%s → %s", surface, cached.lemma)
+                    return LookupResult(
+                        word=cached,
+                        cached=True,
+                        context_mismatch=_context_mismatch(cached.context_sentence, sentence),
+                        definition_stale=stale,
+                    )
 
-        word = self._request_definition(raw_word, sentence, level, article_id=article_id)
+        try:
+            word = self._request_definition(raw_word, sentence, level, article_id=article_id)
+        except AIError:
+            if stale_cached is None:
+                raise
+            # 重查失败（断网 / 额度）时退回旧版缓存，至少还有本句义可看。
+            logger.info("旧版缓存重查失败，回退原释义：%s", stale_cached.lemma)
+            return LookupResult(
+                word=stale_cached,
+                cached=True,
+                context_mismatch=_context_mismatch(stale_cached.context_sentence, sentence),
+                definition_stale=True,
+            )
         stored = self._words.upsert(word)
         if stored.id is not None:
             # 记住“文章词形”和原形，下一次查同一词形不再调用 AI。
@@ -271,10 +363,12 @@ class DictionaryService:
                 "模型可能没有按 JSON 格式返回，可以重试或换一个模型。",
             ) from exc
 
-        meaning_cn = as_text(data.get("meaning_cn"))
-        meaning_en = as_text(data.get("meaning_en"))
+        meaning_cn, meaning_en = format_meanings(data)
         if not meaning_cn and not meaning_en:
-            raise AIError("查词结果缺少释义", "AI 没有返回 meaning_cn / meaning_en，请重试。")
+            raise AIError(
+                "查词结果缺少释义",
+                "AI 没有返回 meanings / meaning_cn / meaning_en，请重试。",
+            )
 
         # AI 给的原形可能缺失或带标点；非法时退回当前词形。
         lemma = normalize_lemma(as_text(data.get("lemma"))) or surface
@@ -296,6 +390,7 @@ class DictionaryService:
             example_cn=as_text(data.get("example_cn")),
             mnemonic=as_text(data.get("mnemonic")),
             cefr_band=normalize_cefr_level(data.get("cefr_band")),
+            definition_version=DEFINITION_VERSION,
             context_sentence=sentence.strip()[:500],
             article_id=article_id,
             status="new",
@@ -318,7 +413,8 @@ class DictionaryService:
         设计（M6.1）：
         - 候选词完全由本地词表 + 用户已掌握词筛选，不调用 AI；
         - 一次批量请求查最多 `limit` 个词，返回后写入 `words`（`in_vocabulary=0`），
-          用户双击时直接命中缓存，0 等待；
+          用户双击时直接命中缓存，0 等待；释义带 1~3 个常见义项，
+          避免双击后只看到本句义；
         - 任何失败（网络、解析、落库）都只记日志并返回 0：预取是尽力而为，
           不能影响阅读与正文展示。
 
@@ -379,8 +475,8 @@ class DictionaryService:
             surface = normalize_lemma(as_text(item.get("word")))
             if not surface or surface not in wanted:
                 continue
-            meaning_cn = as_text(item.get("meaning_cn"))
-            meaning_en = as_text(item.get("meaning_en"))
+            meaning_cn = plain_sense_text(as_text(item.get("meaning_cn")))
+            meaning_en = plain_sense_text(as_text(item.get("meaning_en")))
             if not meaning_cn and not meaning_en:
                 continue
             lemma = normalize_lemma(as_text(item.get("lemma"))) or surface
@@ -391,6 +487,7 @@ class DictionaryService:
                 pos=as_text(item.get("pos"))[:20],
                 meaning_cn=meaning_cn,
                 meaning_en=meaning_en,
+                definition_version=DEFINITION_VERSION,
                 context_sentence=(sentences.get(surface) or "")[:500],
                 article_id=article_id,
                 status="new",

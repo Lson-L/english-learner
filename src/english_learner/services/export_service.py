@@ -128,6 +128,7 @@ CSV_COLUMNS: dict[str, tuple[str, ...]] = {
         "article_id",
         "in_vocabulary",
         "cefr_band",
+        "definition_version",
         "status",
         "ease",
         "interval_days",

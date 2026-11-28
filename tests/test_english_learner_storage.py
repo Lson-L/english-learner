@@ -1168,6 +1168,55 @@ def test_article_source_columns_roundtrip(db: Database) -> None:
     assert default.source == "generated"
 
 
+def test_migrate_v9_database_adds_word_definition_version(tmp_path: Path) -> None:
+    """v9 旧库升级到 v10：words 加 definition_version，旧词条保持 0（按需重查）。"""
+    path = tmp_path / "v9.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE words (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lemma TEXT NOT NULL COLLATE NOCASE UNIQUE,
+            display_form TEXT NOT NULL DEFAULT '',
+            phonetic TEXT NOT NULL DEFAULT '',
+            pos TEXT NOT NULL DEFAULT '',
+            meaning_cn TEXT NOT NULL DEFAULT '',
+            meaning_en TEXT NOT NULL DEFAULT '',
+            example_en TEXT NOT NULL DEFAULT '',
+            example_cn TEXT NOT NULL DEFAULT '',
+            mnemonic TEXT NOT NULL DEFAULT '',
+            context_sentence TEXT NOT NULL DEFAULT '',
+            article_id INTEGER,
+            in_vocabulary INTEGER NOT NULL DEFAULT 0,
+            cefr_band TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'new',
+            ease REAL NOT NULL DEFAULT 2.5,
+            interval_days INTEGER NOT NULL DEFAULT 0,
+            repetitions INTEGER NOT NULL DEFAULT 0,
+            due_date TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        INSERT INTO words (lemma, meaning_cn, in_vocabulary, created_at, updated_at)
+            VALUES ('lie', '位于', 0, '2026-11-27T08:00:00', '2026-11-27T08:00:00');
+        PRAGMA user_version = 9;
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    try:
+        columns = {str(row["name"]) for row in db.query_all("PRAGMA table_info(words)")}
+        assert "definition_version" in columns
+        old = db.words.get_by_lemma("lie")
+        assert old is not None
+        assert old.definition_version == 0
+        assert old.meaning_cn == "位于"
+    finally:
+        db.close()
+
+
 def test_migrate_v8_database_adds_real_text_tables_and_source_columns(tmp_path: Path) -> None:
     """v8 旧库升级到 v9：加来源列 / mode，建三张新表，旧文章默认 generated。"""
     path = tmp_path / "v8.db"

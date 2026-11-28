@@ -129,7 +129,9 @@ class MainWindow(QMainWindow):
         self._review_page = ReviewPage(self._context)
         self._stats_page = StatsPage(self._context, low_profile=self._low_profile)
         self._settings_page = SettingsPage(config, store, self._context)
-        self._settings_page.reconfigure_requested.connect(self._open_reconfigure)
+        self._settings_page.profile_create_requested.connect(self._open_new_profile)
+        self._settings_page.profile_edit_requested.connect(self._open_edit_profile)
+        self._settings_page.config_changed.connect(self._on_config_changed)
         self._settings_page.english_font_changed.connect(self._apply_english_font)
         self._settings_page.theme_changed.connect(self._apply_low_profile)
         # 全局 QSS 已在 app.main() 按偏好生成；这里只需同步正文文档字体与高亮配色。
@@ -321,12 +323,38 @@ class MainWindow(QMainWindow):
         self._stats_page.set_low_profile(self._low_profile)
 
     # -------------------------------------------------------------- 配置变更
-    def _open_reconfigure(self) -> None:
-        dialog = OnboardingDialog(self._store, initial=self._config, parent=self)
-        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.saved_config is not None:
-            self._config = dialog.saved_config
-            self._context.set_config(self._config)
-            self._settings_page.apply_config(self._config)
+    def _open_new_profile(self) -> None:
+        """新增一套 AI 配置；向导保存后自动设为当前配置。"""
+        dialog = OnboardingDialog(self._store, parent=self)
+        self._apply_profile_dialog(dialog)
+
+    def _open_edit_profile(self, profile_id: str) -> None:
+        """编辑指定配置；保留 id，只改名称与连接参数。"""
+        profile = self._store.load_profiles().find(profile_id)
+        if profile is None:
+            return
+        dialog = OnboardingDialog(
+            self._store,
+            initial=profile.config,
+            parent=self,
+            profile=profile,
+        )
+        self._apply_profile_dialog(dialog)
+
+    def _apply_profile_dialog(self, dialog: OnboardingDialog) -> None:
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        active = self._store.load_profiles().active()
+        if active is None:
+            return
+        self._config = active.config
+        self._context.set_config(active.config)
+        self._settings_page.reload_profiles()
+
+    def _on_config_changed(self, config: object) -> None:
+        """设置页切换配置后同步主窗口持有的副本。"""
+        if isinstance(config, AIConfig):
+            self._config = config.normalized()
 
     # ---------------------------------------------------------------- 关闭
     def save_window_state(self) -> None:

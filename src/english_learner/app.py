@@ -32,7 +32,7 @@ from .gui.i18n import install as install_button_translator
 from .gui.i18n import set_low_profile
 from .gui.splash import StartupSplash
 from .gui.theme import build_stylesheet
-from .services.config_store import AIConfig, ConfigError, ConfigStore, log_dir
+from .services.config_store import AIConfig, AIProfile, ConfigError, ConfigStore, log_dir
 
 logger = logging.getLogger(__name__)
 
@@ -151,8 +151,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .storage.db import Database
 
         existing: AIConfig | None = None
+        existing_profile: AIProfile | None = None
         try:
             existing = store.load()
+            existing_profile = store.load_profiles().active()
         except ConfigError as exc:
             logger.warning("配置文件读取失败：%s", exc)
             splash.hide()
@@ -168,7 +170,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if config is None:
             # 配置向导是模态对话框，遮罩先收起，避免一直压在它上面。
             splash.hide()
-            dialog = OnboardingDialog(store, initial=existing)
+            # --reconfigure 编辑当前那套配置；首次启动没有 profile，新建一套。
+            dialog = OnboardingDialog(
+                store,
+                initial=existing,
+                profile=existing_profile if args.reconfigure else None,
+            )
             if dialog.exec() != QDialog.DialogCode.Accepted or dialog.saved_config is None:
                 logger.info("用户取消了首次配置，退出")
                 splash.close()

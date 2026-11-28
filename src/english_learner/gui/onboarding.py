@@ -25,16 +25,23 @@ from PySide6.QtWidgets import (
 )
 
 from ..services.ai_client import AIClient, ConnectionResult
-from ..services.config_store import AIConfig, ConfigError, ConfigStore
+from ..services.config_store import AIConfig, AIProfile, AIProfiles, ConfigError, ConfigStore
 from ..services.provider_presets import PRESETS
 from .pages.common import Card, divider, set_status
 from .widgets import busy_progress_bar
 from .workers import TaskWorker, retire_worker
 
-STEP_TITLES = (
+STEP_TITLES_FIRST_RUN = (
     ("欢迎使用 Daily English", "三步完成初始化，之后每天打开就能学。"),
     ("连接你的 AI 服务", "支持任何 OpenAI 兼容接口；连接测试通过后才能继续。"),
     ("配置完成", "配置已保存到本机。下一步会先做一次 5 分钟的水平测评。"),
+)
+
+# 老用户新增 / 编辑配置时复用同一个向导，但不能再提“首次启动 / 下一步测评”。
+STEP_TITLES_MANAGE = (
+    ("AI 配置", "可以保存多套配置并随时切换；这里新增或修改其中一套。"),
+    ("连接你的 AI 服务", "支持任何 OpenAI 兼容接口；连接测试通过后才能保存。"),
+    ("配置完成", "已保存并设为当前配置，可以返回设置页继续使用。"),
 )
 
 
@@ -46,15 +53,22 @@ class OnboardingDialog(QDialog):
         store: ConfigStore,
         initial: AIConfig | None = None,
         parent: QWidget | None = None,
+        *,
+        profile: AIProfile | None = None,
     ) -> None:
         super().__init__(parent)
         self._store = store
         self._initial = initial
+        # 传入 profile 表示“编辑已有配置”（保留 id）；为空表示新增一套。
+        self._profile = profile
+        # 已有配置时是“管理配置”，文案不能再提首次启动与下一步测评。
+        self._first_run = not store.load_profiles().profiles
         self._worker: TaskWorker | None = None
         self._tested_config: AIConfig | None = None
         self._test_result: ConnectionResult | None = None
         self._loading = True
         self.saved_config: AIConfig | None = None
+        self.saved_profiles: AIProfiles | None = None
 
         self.setWindowTitle("配置 AI 服务 · Daily English")
         self.setModal(True)
@@ -62,7 +76,10 @@ class OnboardingDialog(QDialog):
         self.resize(760, 620)
 
         self._build_ui()
-        self._prefill(initial)
+        initial_config = initial
+        if initial_config is None and self._profile is not None:
+            initial_config = self._profile.config
+        self._prefill(initial_config)
         self._loading = False
         self._show_step(0)
 
@@ -117,16 +134,24 @@ class OnboardingDialog(QDialog):
         layout.setSpacing(12)
 
         card = Card()
-        title = QLabel("用 AI 陪你每天读一点英语")
+        title = QLabel("用 AI 陪你每天读一点英语" if self._first_run else "管理你的 AI 配置")
         title.setObjectName("cardTitle")
         card.body.addWidget(title)
 
-        for text in (
-            "第 1 步：填写服务地址、API Key 和模型 id，也可以从常见服务商预设里选。",
-            "第 2 步：点「测试连接」，会真实发一次极短的请求——成功后才能继续。",
-            "第 3 步：完成配置进入应用，先做一次 5 分钟的水平测评，"
-            "之后每天读一篇按你水平生成的文章。",
-        ):
+        if self._first_run:
+            bullets = (
+                "第 1 步：填写服务地址、API Key 和模型 id，也可以从常见服务商预设里选。",
+                "第 2 步：点「测试连接」，会真实发一次极短的请求——成功后才能继续。",
+                "第 3 步：完成配置进入应用，先做一次 5 分钟的水平测评，"
+                "之后每天读一篇按你水平生成的文章。",
+            )
+        else:
+            bullets = (
+                "第 1 步：填写这一套配置的名称、服务地址、API Key 和模型 id。",
+                "第 2 步：点「测试连接」，会真实发一次极短的请求——成功后才能保存。",
+                "保存后会立即切换到这一套；已有配置不会被删除。",
+            )
+        for text in bullets:
             card.body.addWidget(self._bullet(text))
         layout.addWidget(card)
 
@@ -156,6 +181,10 @@ class OnboardingDialog(QDialog):
         form.setHorizontalSpacing(20)
         form.setVerticalSpacing(12)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+        self._name_edit = QLineEdit()
+        self._name_edit.setPlaceholderText("给这个配置起个名字（可选，默认用模型 id）")
+        form.addRow(self._field_label("配置名称"), self._name_edit)
 
         self._preset_combo = QComboBox()
         self._preset_combo.addItem("自定义")
@@ -217,7 +246,11 @@ class OnboardingDialog(QDialog):
         test_row.addWidget(self._test_status, 1)
         test_card.body.addLayout(test_row)
 
-        test_hint = QLabel("测试会真实调用一次模型；成功后才可点击下一步。")
+        test_hint = QLabel(
+            "测试会真实调用一次模型；成功后才可点击继续。"
+            if not self._first_run
+            else "测试会真实调用一次模型；成功后才可点击下一步。"
+        )
         test_hint.setObjectName("muted")
         test_card.body.addWidget(test_hint)
         layout.addWidget(test_card)
@@ -234,7 +267,7 @@ class OnboardingDialog(QDialog):
         layout.setSpacing(12)
 
         card = Card()
-        title = QLabel("连接成功，配置已就绪")
+        title = QLabel("连接成功，配置已就绪" if self._first_run else "连接成功，配置已保存")
         title.setObjectName("cardTitle")
         card.body.addWidget(title)
 
@@ -252,12 +285,15 @@ class OnboardingDialog(QDialog):
         layout.addWidget(card)
 
         next_card = Card()
-        next_title = QLabel("接下来")
+        next_title = QLabel("接下来" if self._first_run else "说明")
         next_title.setObjectName("cardTitle")
         next_card.body.addWidget(next_title)
         next_desc = QLabel(
             "下一步会先做一次 5 分钟的水平测评，确定你的起始等级。"
             "之后每天打开应用，读一篇按你水平生成的文章，标几个生词，第二天复习。"
+            if self._first_run
+            else "返回设置页后，这套配置已经是当前配置；之后可以在下拉框里随时切换，"
+            "或继续新增 / 编辑 / 删除其它配置。"
         )
         next_desc.setObjectName("muted")
         next_desc.setWordWrap(True)
@@ -289,6 +325,8 @@ class OnboardingDialog(QDialog):
         return label
 
     def _prefill(self, config: AIConfig | None) -> None:
+        if self._profile is not None:
+            self._name_edit.setText(self._profile.name)
         if config is None:
             # 默认选中并填好 DeepSeek，用户只需要粘一个 Key。
             self._preset_combo.setCurrentIndex(1)
@@ -330,7 +368,8 @@ class OnboardingDialog(QDialog):
     def _show_step(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
         self._step_badge.setText(f"第 {index + 1} / 3 步")
-        title, subtitle = STEP_TITLES[index]
+        titles = STEP_TITLES_FIRST_RUN if self._first_run else STEP_TITLES_MANAGE
+        title, subtitle = titles[index]
         self._step_title.setText(title)
         self._step_subtitle.setText(subtitle)
         self._back_button.setVisible(index > 0)
@@ -438,6 +477,7 @@ class OnboardingDialog(QDialog):
 
     def _set_busy(self, busy: bool) -> None:
         for widget in (
+            self._name_edit,
             self._preset_combo,
             self._url_edit,
             self._key_edit,
@@ -460,11 +500,20 @@ class OnboardingDialog(QDialog):
     def _save_and_accept(self) -> None:
         if self._tested_config is None:
             return
+        name = self._name_edit.text().strip()
         try:
-            self.saved_config = self._store.save(self._tested_config)
+            if self._profile is not None:
+                profiles = self._store.update_profile(
+                    self._profile.id, self._tested_config, name=name
+                )
+            else:
+                profiles = self._store.add_profile(self._tested_config, name=name)
         except ConfigError as exc:
             QMessageBox.warning(self, "保存失败", str(exc))
             return
+        self.saved_profiles = profiles
+        active = profiles.active()
+        self.saved_config = active.config if active is not None else self._tested_config
         self.accept()
 
     def reject(self) -> None:  # noqa: D401 - Qt 约定
