@@ -154,12 +154,29 @@ tests/（共 678 个用例，全部 mock AI、无网络）
   断开所有结果信号，并放进全局 orphan 列表；界面立刻恢复可操作，旧线程继续
   跑到请求返回后由 `wait_for_orphans()` 在退出时统一等待。
 
-### 6.3 配置向导状态机
+### 6.3 配置向导状态机与多套 AI 配置
 
 - 只有 `self._tested_config is not None` 时「下一步」才可点；
-- 任意字段 `textChanged` / `valueChanged` 都会调用 `_invalidate_test()`；
-- 测试成功后才 `ConfigStore.save()`，保存失败停在向导并弹窗；
+- 任意连接字段 `textChanged` / `valueChanged` 都会调用 `_invalidate_test()`；
+  配置名称只是展示元数据，改动不会让测试结果失效；
+- 测试成功后才写盘，保存失败停在向导并弹窗；
 - `reject()` / `closeEvent()` 在测试进行中会被拒绝，避免 QThread 被销毁。
+
+多套配置（2026-11-28）：
+
+- `config.json` 结构：`ai_profiles`（`id / name / base_url / api_key / model /
+  temperature` 的数组）+ `active_ai_id`，`ai` 段始终镜像当前配置，旧代码
+  （`ConfigStore.load()` / `AIConfig`）不需要改；
+- 只有 `ai` 段的旧配置由 `ConfigStore.load_profiles()` 派生为一条 id 为
+  `default` 的配置，用户无感迁移；列表里的坏条目会被跳过，全部坏掉时回退 `ai`；
+- 每个 Key 独立 DPAPI 加密；`save_profiles()` 是整体写盘入口，
+  `add_profile / update_profile / delete_profile / activate_profile` 都走它，
+  至少保留一条，删除当前项时自动切到第一套；
+- 设置页「AI 服务」卡片：下拉框切换 + `新增配置 / 编辑配置 / 删除配置`；
+  新增 / 编辑弹窗仍由 `MainWindow` 打开（`OnboardingDialog(profile=...)`
+  保留 id 表示编辑，为空表示新增），切换 / 删除由设置页直接改本地配置并
+  `AppContext.set_config()`，主窗口通过 `config_changed` 同步自己的副本；
+- `--reconfigure` 编辑当前配置，不再覆盖成一条全新配置。
 
 ### 6.4 openai 3.55 的差异
 

@@ -1,8 +1,12 @@
 """应用配置的读写：AI 服务地址、API Key、模型 id。
 
+支持保存多套 AI 配置（`ai_profiles` 列表 + `active_ai_id`），设置页可以
+随时切换当前使用的那一套；`ai` 段始终镜像当前配置，兼容旧版读取路径。
+
 Java 对照：
 - 本文件 ≈ 一个基于 JSON 文件实现的 ConfigurationService；
 - AIConfig ≈ @ConfigurationProperties 绑定的配置对象（不可变）；
+- AIProfile ≈ 配置 + 展示名，类似 Profile 里的一组连接参数；
 - ConfigStore ≈ 负责加载/保存配置的 Repository。
 
 存放位置（不放在项目目录里，避免 API Key 被误提交到 Git）：
@@ -22,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import uuid
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -31,7 +36,11 @@ from .secret_store import SecretError, is_encrypted, protect, unprotect
 
 APP_DIR_NAME = "EnglishLearner"
 CONFIG_FILE_NAME = "config.json"
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
+
+# 多 AI 配置的默认名称 / 旧版单配置迁移后的固定 id。
+DEFAULT_PROFILE_NAME = "默认配置"
+LEGACY_PROFILE_ID = "default"
 
 # 每日复习目标：默认 20 个，大约 10~15 分钟；范围防止手滑写成 0 或几千。
 DEFAULT_DAILY_REVIEW_LIMIT = 20
@@ -157,6 +166,107 @@ class AIConfig:
             )
         except (TypeError, ValueError) as exc:
             raise ConfigError(f"配置内容格式不正确：{exc}") from exc
+
+
+def default_profile_name(config: AIConfig) -> str:
+    """给没填名称的配置生成一个可读名字：优先用模型 id。"""
+    model = config.normalized().model.strip()
+    return model or DEFAULT_PROFILE_NAME
+
+
+def new_profile_id() -> str:
+    """生成配置 id；用随机串而不是序号，删除 / 重排后也不会撞车。"""
+    return "p-" + uuid.uuid4().hex[:10]
+
+
+@dataclass(frozen=True)
+class AIProfile:
+    """一套命名后的 AI 连接配置。
+
+    `id` 在配置的生命周期内保持不变（编辑只改 name / config），
+    `active_ai_id` 用它指认当前使用哪一套。
+    """
+
+    id: str
+    name: str
+    config: AIConfig
+
+    def normalized(self) -> AIProfile:
+        config = self.config.normalized()
+        return AIProfile(
+            id=self.id.strip(),
+            name=self.name.strip() or default_profile_name(config),
+            config=config,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化成扁平结构；api_key 的加密由 ConfigStore 负责。"""
+        data = self.config.to_dict()
+        data["id"] = self.id
+        data["name"] = self.name
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AIProfile:
+        if not isinstance(data, dict):
+            raise ConfigError("AI 配置内容格式不正确")
+        profile_id = str(data.get("id") or "").strip()
+        if not profile_id:
+            raise ConfigError("AI 配置缺少 id")
+        config = AIConfig.from_dict(data).normalized()
+        name = str(data.get("name") or "").strip() or default_profile_name(config)
+        return cls(id=profile_id, name=name, config=config)
+
+
+@dataclass(frozen=True)
+class AIProfiles:
+    """一组 AI 配置及其当前选中项。
+
+    空集合表示“用户还没配置过”；业务层必须先判断 `active()` 是否为 None。
+    """
+
+    profiles: tuple[AIProfile, ...] = ()
+    active_id: str = ""
+
+    def active(self) -> AIProfile | None:
+        """当前配置；active_id 失效时回退到第一个，避免界面无配置可用。"""
+        for profile in self.profiles:
+            if profile.id == self.active_id:
+                return profile
+        return self.profiles[0] if self.profiles else None
+
+    def find(self, profile_id: str) -> AIProfile | None:
+        for profile in self.profiles:
+            if profile.id == profile_id:
+                return profile
+        return None
+
+    def with_profile(self, profile: AIProfile) -> AIProfiles:
+        """按 id upsert：存在则替换，不存在则追加。"""
+        items: list[AIProfile] = []
+        replaced = False
+        for existing in self.profiles:
+            if existing.id == profile.id:
+                items.append(profile)
+                replaced = True
+            else:
+                items.append(existing)
+        if not replaced:
+            items.append(profile)
+        active_id = self.active_id or profile.id
+        return AIProfiles(tuple(items), active_id)
+
+    def without(self, profile_id: str) -> AIProfiles:
+        items = tuple(profile for profile in self.profiles if profile.id != profile_id)
+        active_id = self.active_id
+        if active_id == profile_id or not any(item.id == active_id for item in items):
+            active_id = items[0].id if items else ""
+        return AIProfiles(items, active_id)
+
+    def with_active(self, profile_id: str) -> AIProfiles:
+        if not any(profile.id == profile_id for profile in self.profiles):
+            return self
+        return AIProfiles(self.profiles, profile_id)
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -361,23 +471,133 @@ class ConfigStore:
             raise ConfigError("配置文件缺少必要字段：" + "；".join(errors))
         return config
 
-    def save(self, config: AIConfig) -> AIConfig:
-        """保存配置（先写临时文件再替换，避免写到一半损坏）。"""
+    def save(self, config: AIConfig, *, name: str = "") -> AIConfig:
+        """保存配置并设为当前配置（先写临时文件再替换，避免写到一半损坏）。
+
+        兼容旧调用：没有多配置列表时自动创建一条；已有列表时更新当前那一条，
+        这样 `--reconfigure` 与首次配置都不会让列表和 `ai` 段不一致。
+        """
         normalized = config.normalized()
         errors = normalized.validate()
         if errors:
             raise ConfigError("；".join(errors))
 
-        # 保留其它段（ui / readability 等）：重新配置 AI 不应该把用户偏好冲掉。
-        payload = self._strip_legacy_ai_fields(self._read_payload())
-        ai_data = normalized.to_dict()
-        # 调用方通常传明文；若已经是密文（例如原样回写），不要二次加密。
-        if not is_encrypted(normalized.api_key):
-            ai_data["api_key"] = protect(normalized.api_key)
-        payload["version"] = CONFIG_VERSION
-        payload["ai"] = ai_data
-        self._write_payload(payload)
+        profiles = self.load_profiles()
+        active = profiles.active()
+        if active is None:
+            profile = AIProfile(
+                id=new_profile_id(),
+                name=name.strip() or default_profile_name(normalized),
+                config=normalized,
+            )
+            profiles = AIProfiles((profile,), profile.id)
+        else:
+            profile = AIProfile(
+                id=active.id,
+                name=name.strip() or active.name,
+                config=normalized,
+            )
+            profiles = profiles.with_profile(profile).with_active(profile.id)
+        self.save_profiles(profiles)
         return normalized
+
+    # -------------------------------------------------------------- 多套配置
+    def load_profiles(self) -> AIProfiles:
+        """读取全部 AI 配置；旧版单配置会自动派生为一条「默认配置」。
+
+        列表里的坏条目（字段缺失、Key 无法解密）会被跳过，不能让一个坏配置
+        拖垮整个设置页；当前配置的有效性仍由 `load()` 负责校验。
+        """
+        profiles = self._profiles_from_payload(self._read_payload())
+        if profiles.profiles:
+            return profiles
+
+        try:
+            config = self.load()
+        except ConfigError:
+            return AIProfiles()
+        if config is None:
+            return AIProfiles()
+        profile = AIProfile(
+            id=LEGACY_PROFILE_ID,
+            name=default_profile_name(config),
+            config=config,
+        )
+        return AIProfiles((profile,), profile.id)
+
+    def save_profiles(self, profiles: AIProfiles) -> AIProfiles:
+        """整体保存多套配置，并把当前配置镜像到 `ai` 段。"""
+        if not profiles.profiles:
+            raise ConfigError("至少需要保留一个 AI 配置")
+
+        normalized: list[AIProfile] = []
+        seen: set[str] = set()
+        for profile in profiles.profiles:
+            item = profile.normalized()
+            if not item.id or item.id in seen:
+                raise ConfigError("AI 配置 id 为空或重复")
+            errors = item.config.validate()
+            if errors:
+                raise ConfigError(f"配置「{item.name}」不完整：" + "；".join(errors))
+            seen.add(item.id)
+            normalized.append(item)
+
+        active_id = profiles.active_id
+        if not any(item.id == active_id for item in normalized):
+            active_id = normalized[0].id
+        active = next(item for item in normalized if item.id == active_id)
+
+        # 保留其它段（ui / readability 等）：切换 AI 不应该把用户偏好冲掉。
+        payload = self._strip_legacy_ai_fields(self._read_payload())
+        payload["version"] = CONFIG_VERSION
+        payload["ai_profiles"] = [self._profile_payload(item) for item in normalized]
+        payload["active_ai_id"] = active_id
+        payload["ai"] = self._encrypted_ai_dict(active.config)
+        self._write_payload(payload)
+        return AIProfiles(tuple(normalized), active_id)
+
+    def add_profile(self, config: AIConfig, *, name: str = "") -> AIProfiles:
+        """新增一套配置并设为当前配置。"""
+        normalized = config.normalized()
+        errors = normalized.validate()
+        if errors:
+            raise ConfigError("；".join(errors))
+        profile = AIProfile(
+            id=new_profile_id(),
+            name=name.strip() or default_profile_name(normalized),
+            config=normalized,
+        )
+        profiles = self.load_profiles()
+        return self.save_profiles(profiles.with_profile(profile).with_active(profile.id))
+
+    def update_profile(self, profile_id: str, config: AIConfig, *, name: str = "") -> AIProfiles:
+        """修改一套已有配置；名称留空时保留原名。"""
+        profiles = self.load_profiles()
+        current = profiles.find(profile_id)
+        if current is None:
+            raise ConfigError("要修改的 AI 配置不存在")
+        profile = AIProfile(
+            id=current.id,
+            name=name.strip() or current.name,
+            config=config.normalized(),
+        )
+        return self.save_profiles(profiles.with_profile(profile))
+
+    def delete_profile(self, profile_id: str) -> AIProfiles:
+        """删除一套配置；至少保留一套，删除当前项时自动切到第一套。"""
+        profiles = self.load_profiles()
+        if profiles.find(profile_id) is None:
+            raise ConfigError("要删除的 AI 配置不存在")
+        if len(profiles.profiles) <= 1:
+            raise ConfigError("至少需要保留一个 AI 配置")
+        return self.save_profiles(profiles.without(profile_id))
+
+    def activate_profile(self, profile_id: str) -> AIProfiles:
+        """切换当前配置。"""
+        profiles = self.load_profiles()
+        if profiles.find(profile_id) is None:
+            raise ConfigError("要切换的 AI 配置不存在")
+        return self.save_profiles(profiles.with_active(profile_id))
 
     def load_ui(self) -> UiConfig:
         """读取界面偏好；文件缺失或损坏一律回退默认值，不能因为偏好把启动搞挂。"""
@@ -443,6 +663,61 @@ class ConfigStore:
 
     # ------------------------------------------------------------------ 内部
     _LEGACY_AI_KEYS: tuple[str, ...] = ("base_url", "api_key", "model", "temperature")
+
+    @classmethod
+    def _encrypted_ai_dict(cls, config: AIConfig) -> dict[str, Any]:
+        """序列化一套配置；调用方通常传明文，已经是密文时不要二次加密。"""
+        data = config.normalized().to_dict()
+        if not is_encrypted(str(data.get("api_key") or "")):
+            data["api_key"] = protect(str(data.get("api_key") or ""))
+        return data
+
+    @classmethod
+    def _profile_payload(cls, profile: AIProfile) -> dict[str, Any]:
+        data = cls._encrypted_ai_dict(profile.config)
+        data["id"] = profile.id
+        data["name"] = profile.name
+        return data
+
+    @classmethod
+    def _profile_from_payload(cls, data: Any) -> AIProfile | None:
+        """解析一条配置；坏条目返回 None，由调用方跳过。"""
+        try:
+            profile = AIProfile.from_dict(data)
+            api_key = unprotect(profile.config.api_key)
+        except (ConfigError, SecretError):
+            return None
+        if api_key != profile.config.api_key:
+            profile = replace(
+                profile,
+                config=replace(profile.config, api_key=api_key).normalized(),
+            )
+        if profile.config.validate():
+            return None
+        return profile
+
+    @classmethod
+    def _profiles_from_payload(cls, payload: dict[str, Any]) -> AIProfiles:
+        """只解析 `ai_profiles` 段；没有该段时返回空集合（由调用方回退旧格式）。"""
+        raw = payload.get("ai_profiles")
+        if not isinstance(raw, list):
+            return AIProfiles()
+
+        items: list[AIProfile] = []
+        seen: set[str] = set()
+        for entry in raw:
+            profile = cls._profile_from_payload(entry)
+            if profile is None or profile.id in seen:
+                continue
+            seen.add(profile.id)
+            items.append(profile)
+        if not items:
+            return AIProfiles()
+
+        active_id = str(payload.get("active_ai_id") or "").strip()
+        if not any(item.id == active_id for item in items):
+            active_id = items[0].id
+        return AIProfiles(tuple(items), active_id)
 
     @classmethod
     def _strip_legacy_ai_fields(cls, payload: dict[str, Any]) -> dict[str, Any]:

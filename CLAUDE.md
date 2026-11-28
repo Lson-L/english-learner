@@ -129,6 +129,12 @@ uv run ruff format src/english_learner tests
   `services/level_progress.py`，今日页显示「B1 → B2 · 把握 38%」+ 进度条 +
   置信度 / pending + 最多 3 条证据（最近检测、生词比例趋势、词档认识率）；
   检测结果页补难度分布与高两档题答对数。不新增 AI 调用、不改等级与 SRS。
+- **多套 AI 配置（2026-11-28）**：`config.json` 新增 `ai_profiles`（id / name /
+  base_url / api_key / model / temperature 数组）+ `active_ai_id`，`ai` 段始终
+  镜像当前配置；旧单配置由 `ConfigStore.load_profiles()` 派生为一条 id 为
+  `default` 的配置，无需用户重配。设置页「AI 服务」支持下拉切换与
+  新增 / 编辑 / 删除，切换后立即 `AppContext.set_config()`；`save_profiles()`
+  是唯一整体写盘入口，至少保留一套。改配置结构时注意保持 `load()` 兼容。
 - **M6.5（2026-11-20）**：档内难度浮动。`difficulty_hint()` 推导 low / mid / high
   并注入文章 prompt（空值 / mid 与旧版逐字节一致），hint 与理由写入
   `articles.metrics_json`；可读性重试会撤掉 high，用户阅读反馈优先于 hint。

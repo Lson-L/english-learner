@@ -152,6 +152,9 @@ BUTTON_EN: dict[str, str] = {
     "正在批改…": "Grading…",
     # 设置页 / 数据
     "测试连接": "Test connection",
+    "新增配置": "Add profile",
+    "编辑配置": "Edit profile",
+    "删除配置": "Delete profile",
     "查看调用记录": "View AI calls",
     "查看运行日志": "View logs",
     "清空记录": "Clear records",

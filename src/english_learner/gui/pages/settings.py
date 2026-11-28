@@ -34,6 +34,7 @@ from ...services.config_store import (
     MAX_DAILY_REVIEW_LIMIT,
     MIN_DAILY_REVIEW_LIMIT,
     AIConfig,
+    AIProfiles,
     ConfigError,
     ConfigStore,
 )
@@ -56,12 +57,16 @@ logger = logging.getLogger(__name__)
 
 
 class SettingsPage(QWidget):
-    """配置展示与连接测试。
+    """配置展示、多套配置切换与连接测试。
 
-    重新配置弹窗由 MainWindow 统一管理，这里只发信号，避免页面之间互相依赖。
+    新增 / 编辑配置的弹窗由 MainWindow 统一管理，这里只发信号，避免页面之间
+    互相依赖；切换与删除只改本地配置，不经过主窗口。
     """
 
-    reconfigure_requested = Signal()
+    profile_create_requested = Signal()
+    profile_edit_requested = Signal(str)
+    # 当前配置变化（切换 / 删除后自动换到另一套）：主窗口同步自己的副本。
+    config_changed = Signal(object)
     # 英文字体切换：由主窗口负责重建全局 QSS 并同步阅读页。
     english_font_changed = Signal(str)
     # 主题切换（True = 低调深色）：由主窗口重建 QSS 并更新窗口/侧边栏文案。
@@ -81,6 +86,8 @@ class SettingsPage(QWidget):
         self._ui = store.load_ui()
         self._review = store.load_review()
         self._real_text = store.load_real_text()
+        self._profiles: AIProfiles = store.load_profiles()
+        self._loading_profiles = False
         self._worker: TaskWorker | None = None
 
         # 卡片较多，小窗口下放进滚动区，避免内容被挤压或截断。
@@ -126,6 +133,12 @@ class SettingsPage(QWidget):
         form.setHorizontalSpacing(24)
         form.setVerticalSpacing(10)
 
+        self._profile_combo = QComboBox()
+        self._profile_combo.setMinimumWidth(240)
+        self._profile_combo.setToolTip("切换后立即使用选中的配置")
+        self._profile_combo.currentIndexChanged.connect(self._on_profile_selected)
+        form.addRow(self._form_label("当前配置"), self._profile_combo)
+
         self._url_value = self._value_label("")
         self._model_value = self._value_label("")
         self._key_value = self._value_label("")
@@ -145,23 +158,128 @@ class SettingsPage(QWidget):
         self._test_progress = busy_progress_bar(width=96)
         buttons.addWidget(self._test_progress)
 
-        reconfigure_button = QPushButton("重新配置")
-        reconfigure_button.setObjectName("primaryButton")
-        reconfigure_button.clicked.connect(self.reconfigure_requested.emit)
-        buttons.addWidget(reconfigure_button)
+        self._edit_profile_button = QPushButton("编辑配置")
+        self._edit_profile_button.setObjectName("secondaryButton")
+        self._edit_profile_button.clicked.connect(self._on_edit_profile)
+        buttons.addWidget(self._edit_profile_button)
+
+        self._new_profile_button = QPushButton("新增配置")
+        self._new_profile_button.setObjectName("primaryButton")
+        self._new_profile_button.clicked.connect(self.profile_create_requested.emit)
+        buttons.addWidget(self._new_profile_button)
+
+        self._delete_profile_button = QPushButton("删除配置")
+        self._delete_profile_button.setObjectName("secondaryButton")
+        self._delete_profile_button.clicked.connect(self._on_delete_profile)
+        buttons.addWidget(self._delete_profile_button)
         buttons.addStretch(1)
         card.body.addLayout(buttons)
 
         self._status = QLabel("")
         card.body.addWidget(self._status)
 
-        note = QLabel("API Key 仅保存在本机用户目录，不会上传到除你配置的服务商以外的任何地方。")
+        note = QLabel(
+            "可以保存多套 AI 配置并随时切换；API Key 仅保存在本机用户目录，"
+            "不会上传到除你配置的服务商以外的任何地方。"
+        )
         note.setObjectName("muted")
         note.setWordWrap(True)
         card.body.addWidget(note)
 
-        self.apply_config(self._config)
+        self.reload_profiles()
         return card
+
+    def reload_profiles(self) -> None:
+        """从 config.json 重新读取配置列表并刷新下拉框 / 展示字段。"""
+        profiles = self._store.load_profiles()
+        self._profiles = profiles
+        self._loading_profiles = True
+        try:
+            self._profile_combo.clear()
+            for profile in profiles.profiles:
+                self._profile_combo.addItem(profile.name, profile.id)
+            active = profiles.active()
+            if active is not None:
+                index = self._profile_combo.findData(active.id)
+                if index >= 0:
+                    self._profile_combo.setCurrentIndex(index)
+                self.apply_config(active.config)
+        finally:
+            self._loading_profiles = False
+        self._update_profile_buttons()
+
+    def _update_profile_buttons(self) -> None:
+        count = len(self._profiles.profiles)
+        self._edit_profile_button.setEnabled(count > 0)
+        self._delete_profile_button.setEnabled(count > 1)
+
+    def _selected_profile_id(self) -> str:
+        return str(self._profile_combo.currentData() or "")
+
+    def _on_profile_selected(self, index: int) -> None:
+        if self._loading_profiles:
+            return
+        profile_id = str(self._profile_combo.itemData(index) or "")
+        if not profile_id:
+            return
+        try:
+            profiles = self._store.activate_profile(profile_id)
+        except (ConfigError, OSError) as exc:
+            set_status(self._status, f"切换配置失败：{exc}", "error")
+            self.reload_profiles()
+            return
+
+        self._profiles = profiles
+        active = profiles.active()
+        if active is None:
+            self.reload_profiles()
+            return
+        self.apply_config(active.config)
+        self._notify_config_changed(active.config)
+        set_status(self._status, f"已切换到「{active.name}」，建议测试一次连接。", "hint")
+
+    def _on_edit_profile(self) -> None:
+        profile_id = self._selected_profile_id()
+        if profile_id:
+            self.profile_edit_requested.emit(profile_id)
+
+    def _on_delete_profile(self) -> None:
+        profile_id = self._selected_profile_id()
+        profile = self._profiles.find(profile_id) if profile_id else None
+        if profile is None:
+            return
+        if len(self._profiles.profiles) <= 1:
+            set_status(self._status, "至少需要保留一个 AI 配置。", "hint")
+            return
+        answer = QMessageBox.question(
+            self,
+            "删除配置",
+            f"确定删除配置「{profile.name}」吗？\n如果它是当前配置，会自动切换到剩下的第一套。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        was_active = self._profiles.active_id == profile_id
+        try:
+            profiles = self._store.delete_profile(profile_id)
+        except (ConfigError, OSError) as exc:
+            set_status(self._status, f"删除配置失败：{exc}", "error")
+            return
+
+        self.reload_profiles()
+        if was_active:
+            active = profiles.active()
+            if active is not None:
+                self._notify_config_changed(active.config)
+        set_status(self._status, f"已删除配置「{profile.name}」。", "hint")
+
+    def _notify_config_changed(self, config: AIConfig) -> None:
+        """切换配置后立即让 AppContext 用新配置新建客户端。"""
+        if self._context is not None:
+            self._context.set_config(config)
+        self.config_changed.emit(config)
 
     def _build_log_card(self) -> Card:
         """运行日志入口；AI 调用用量已移到统计页。"""
@@ -613,12 +731,11 @@ class SettingsPage(QWidget):
         LogViewerDialog(parent=self).exec()
 
     def apply_config(self, config: AIConfig) -> None:
-        """配置变更后刷新展示。"""
+        """配置变更后刷新展示（状态提示由调用方决定，避免覆盖切换/删除结果）。"""
         self._config = config.normalized()
         self._url_value.setText(self._config.base_url)
         self._model_value.setText(self._config.model)
         self._key_value.setText(self._config.masked_key())
-        set_status(self._status, "修改配置后建议先测试一次连接。", "hint")
 
     def _on_test_clicked(self) -> None:
         worker = self._worker
